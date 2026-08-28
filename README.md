@@ -1,257 +1,446 @@
+# Reconner
+
 <p align="center">
-  <img src="assets/reconner-logo.svg" alt="Reconner" width="520">
+  <img src="assets/reconner-banner.png" alt="Reconner" width="900">
 </p>
 
 <p align="center">
-  <b>A free & open-source, self-hosted bug-bounty watchtower.</b><br>
-  Web + network reconnaissance, vulnerability scanning, and continuous monitoring — one dashboard, all on your own machine.
+  <b>Self-hosted reconnaissance, DAST and continuous attack-surface monitoring for bug bounty and authorized security testing.</b>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/backend-Go-00ADD8?style=flat-square" alt="Go">
-  <img src="https://img.shields.io/badge/frontend-React%20%2B%20TS-22d3ee?style=flat-square" alt="React">
-  <img src="https://img.shields.io/badge/self--hosted-yes-2dd4bf?style=flat-square" alt="Self-hosted">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT">
-  <a href="https://t.me/rootdr_research"><img src="https://img.shields.io/badge/telegram-%40rootdr__research-3b82f6?style=flat-square" alt="Telegram"></a>
-</p>
+Reconner turns a target into a dependency-aware security pipeline: discover the surface, expand it with URLs/parameters/JavaScript, run active checks, verify interesting results, and keep the target under continuous observation — from one dashboard.
+
+> **Authorized testing only.** Run Reconner only against assets you own or are explicitly authorized to test.
 
 ---
 
-## What is Reconner?
+## Pipeline
 
-Reconner is a self-hosted reconnaissance platform for bug-bounty hunters and
-security researchers. Point it at a domain or an IP range and it runs a full
-pipeline — discovery, fingerprinting, vulnerability checks and continuous
-monitoring — then presents everything in a single live dashboard. Nothing is
-sent to a third party: the app, its database and all findings stay on your box.
+```text
+Target
+  │
+  ▼
+Scope / Asset discovery
+  │
+  ├── Subdomain enumeration
+  ├── HTTP probing + fingerprinting
+  └── Passive / external intelligence
+  │
+  ▼
+Surface expansion
+  │
+  ├── JavaScript analysis
+  ├── JS endpoint probing
+  ├── Crawling
+  ├── Wayback / historical URL mining
+  ├── Parameter discovery
+  ├── Reflected-parameter checks
+  ├── Hidden parameter mining
+  ├── Directory discovery
+  └── Backup / exposed-file discovery
+  │
+  ▼
+Security testing
+  │
+  ├── XSS / DAST
+  ├── SQLi / NoSQLi
+  ├── SSRF / OAST
+  ├── IDOR / access control
+  ├── JWT / OAuth
+  ├── LFI / path traversal
+  ├── SSTI / XXE / CMDi
+  ├── Open Redirect
+  ├── Cache poisoning
+  ├── Race conditions*
+  ├── Request smuggling*
+  └── Nuclei
+  │
+  ▼
+Verification
+  │
+  ├── Re-confirmation
+  ├── Differential / behavioral checks
+  ├── Browser execution where applicable
+  ├── OAST correlation
+  └── Confidence / priority scoring
+  │
+  ▼
+Findings
+  │
+  ├── Evidence
+  ├── Screenshots
+  ├── Global findings
+  └── Attack-path / correlation view
+  │
+  ▼
+Monitoring
+  └── Detect changes in HTTP services and JavaScript assets
 
-> **Authorized testing only.** Reconner is an active offensive-security tool.
-> Only run it against assets you own or are explicitly permitted to test. See
-> the [disclaimer](#disclaimer).
+* Optional / intrusive modules.
+```
 
-## What's new
+The scheduler can run independent modules in parallel while preserving module dependencies and resource limits.
 
-- **Single-endpoint mode.** Point Reconner at one exact URL
-  (`https://site/appointment?h=…`) and the whole pipeline — param discovery,
-  crawl, JS analysis, XSS/SQLi and every other check — runs against *that*
-  endpoint and the paths under it, **including path parameters** (`/orders/{id}`),
-  not just query params.
-- **Global Findings page.** One place that aggregates confirmed findings across
-  every target, with severity filters and per-target drill-down.
-- **In-app tool installer.** The System page shows every scanner's status and can
-  install the missing Go/pip tools one-click (no root), or hand you the exact
-  command + docs for the rest.
-- **Docker image.** One reproducible container bundles the backend, dashboard and
-  the entire tool-chain + headless Chromium — `docker compose up -d --build`.
-- **Quieter, sharper findings.** Reflected-XSS is only reported when a real
-  headless browser confirms execution (JSON/RSC/redirect reflections go to
-  *Needs Review*); DOM-XSS uses framework-aware sinks with bounded taint;
-  time-based SQLi requires linear-scaling proof; and host-level hygiene
-  (missing CSP/HSTS/…) is reported **once per domain**, not once per URL.
-- **Live ETA.** Per-module and whole-scan time-remaining while a scan runs.
+---
 
-## Why Reconner?
+## What Reconner Covers
 
-- **One box, full pipeline.** Recon, active scanning and monitoring in a single
-  dashboard — instead of gluing a dozen CLIs together by hand.
-- **Findings you can trust.** Every injection class is confirmed with
-  differential / out-of-band / control-based checks and re-verified before it's
-  reported, so you get far less noise than fire-and-grep scanning.
-- **Web *and* network.** Subdomains, JS, parameters and DAST on one side; ports,
-  service CVEs and edge-device checks on the other — one tool, one view.
-- **Truly self-hosted.** No account, no cloud, no telemetry — the app, its
-  database and every finding stay on your machine.
-- **Open and hackable.** MIT-licensed Go + React; drop in a Nuclei template or a
-  detection module without asking anyone.
+### Web Recon
 
-## Features
+- Passive + active subdomain enumeration
+- HTTP probing and service fingerprinting
+- JavaScript analysis for endpoints, secrets and API keys
+- JS endpoint probing
+- Headless SPA crawling
+- Historical URL discovery with Wayback
+- Parameter discovery
+- Reflected-parameter detection
+- Hidden parameter mining
+- Directory discovery
+- Backup/configuration-file discovery
+- Subdomain takeover detection
+- Origin-IP discovery behind CDN/WAF using SecurityTrails
+- Shodan passive intelligence
+- Technology-specific intelligence
 
-**Web reconnaissance**
-- Subdomain enumeration (passive + active), live HTTP probing and fingerprinting
-- JavaScript analysis — endpoints, secrets and API keys
-- Parameter discovery, reflected-parameter detection and hidden-param mining
-- Directory / backup / config-file discovery
-- Native context-aware DAST: XSS, SQLi, NoSQLi, SSRF, IDOR, LFI, SSTI, XXE, CMDi, open redirects, and more
-- Out-of-band (OAST) detection for blind SSRF / RCE / SQLi / SSTI
-- Nuclei integration with a curated template pack and false-positive filtering
+### Web Security Testing
 
-**Network reconnaissance**
-- Port scanning and service/version detection over IP / CIDR / range / list scopes
-- Network-CVE scanning
-- Credential brute-force for SSH / SMB / RDP / VNC (opt-in, scope-guarded)
-- Initial-access checks for unauthenticated services and pre-auth edge-device CVEs
-- IP-camera / DVR / NVR auditing (via [Ingram](https://github.com/jorhelp/Ingram)) with snapshot capture
+Reconner's current scan modules cover:
 
-**Platform**
-- Live dashboard with real-time logs and results
+- **XSS** — context-aware reflected XSS with browser-backed execution confirmation
+- **DAST** — combined XSS/SQLi engine
+- **SQL Injection** — error, boolean/content-differential and out-of-band checks
+- **NoSQL Injection** — MongoDB operator/error-based checks
+- **SSRF** — URL-parameter testing and blind/OAST verification
+- **IDOR / Access Control** — requires two identities for meaningful cross-user verification
+- **JWT / OAuth** — common JWT and OAuth flow weaknesses
+- **LFI / Path Traversal**
+- **SSTI** — common template-expression checks
+- **XXE** — in-band and blind/OAST XML entity checks
+- **Command Injection** — controlled marker/OAST-based verification
+- **Open Redirect**
+- **Web Cache Poisoning**
+- **Race Conditions** — optional
+- **Request Smuggling** — optional
+- **CORS, CRLF and 403-bypass checks** through the vulnerability scanning layer
+- **Account-takeover chain correlation** across relevant authentication findings
+- **Exposure checks** including GraphQL introspection, API specifications and open buckets
+
+### Nuclei
+
+Nuclei is integrated as a separate detection layer and can consume the surfaces produced by Reconner.
+
+The integration includes surface limiting, filtering and a verification stage for selected findings rather than treating every raw match as a confirmed vulnerability.
+
+### OAST
+
+Reconner supports out-of-band workflows for blind vulnerabilities, including:
+
+- Blind SSRF
+- Blind RCE
+- Blind SQLi
+- Blind SSTI
+- Blind / stored XSS
+
+An Interactsh-compatible server can be configured for OAST callbacks.
+
+---
+
+## Network Recon
+
+Network targets can be supplied as:
+
+```text
+10.10.10.10
+10.10.10.0/24
+10.10.10.1-10.10.10.254
+10.10.10.10,10.10.10.20
+```
+
+Network functionality includes:
+
+- Port scanning
+- Service/version detection
+- Network vulnerability/CVE checks
+- Unauthenticated/pre-auth service checks
+- SSH / SMB / RDP / VNC credential testing
+- Optional full-port scanning
+- IP camera / DVR / NVR auditing through the Ingram integration
+- Snapshot capture where supported
+
+Credential testing and other intrusive network checks are intentionally gated and should only be enabled when allowed by the engagement.
+
+---
+
+## Single-Endpoint Mode
+
+A URL containing a path or query can be scanned as an endpoint-focused target.
+
+Example:
+
+```text
+https://target.example/orders/123?format=json
+```
+
+The scan can stay focused on that endpoint and its discovered paths instead of expanding to the entire host.
+
+Path parameters are also considered:
+
+```text
+/orders/{id}
+/users/{username}
+/files/{filename}
+```
+
+This is particularly useful when investigating one API route or one suspicious application endpoint.
+
+---
+
+## Verification
+
+Reconner has a dedicated verification stage instead of simply storing scanner output as confirmed findings.
+
+Examples:
+
+- Reflected XSS requires actual browser execution for confirmation.
+- SQLi uses control/differential behavior and time-based evidence where applicable.
+- OAST findings are correlated with callbacks.
+- IDOR testing uses two identities when the module is enabled.
+- Findings can be re-confirmed and assigned confidence/priority.
+
+The result is a smaller set of findings that are more useful for manual validation and reporting.
+
+---
+
+## Dashboard
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Reconner Dashboard" width="49%">
+  <img src="docs/screenshots/findings.png" alt="Findings and Attack Paths" width="49%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/live-logs.png" alt="Live Scan Logs" width="49%">
+  <img src="docs/screenshots/report.png" alt="Reconner Report" width="49%">
+</p>
+
+The dashboard provides:
+
+- Target and asset management
+- Scan profiles: **Quick / Standard / Deep / Custom**
+- Per-module selection
+- Live logs and scan progress
+- ETA for running scans
+- Findings and severity filtering
+- Evidence and screenshots
+- Global findings across targets
 - Correlation / attack-path view
+- System and scanner status
 - Continuous change monitoring
-- One-click reports: HTML, Markdown and PDF
-- Fully self-hosted — your data never leaves your machine
+- HTML / Markdown / PDF reports
 
-## Screenshots
+---
 
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="49%">
-  <img src="docs/screenshots/findings.png" alt="Findings, evidence and attack paths" width="49%">
-</p>
-<p align="center">
-  <img src="docs/screenshots/live-logs.png" alt="Live scan logs" width="49%">
-  <img src="docs/screenshots/report.png" alt="Exportable PoC report" width="49%">
-</p>
+## Installation
 
-<p align="center"><sub>Dashboard · findings with evidence &amp; attack paths · live scan logs · exportable PoC report.</sub></p>
+### Requirements
 
-## Quick start
+Native installation currently uses:
 
-Reconner is a single Go binary plus a static dashboard. Build and run it as a
-**normal user** — no root required.
+- Go **1.25+**
+- Node.js **18+**
+- A C compiler (`gcc`/build-essential) for CGO + SQLite
+- Chromium/Chrome for browser-backed checks
 
-**Requirements:** Go ≥ 1.23 (with a C compiler for the embedded SQLite driver)
-and Node.js ≥ 18. The external scanners are optional and auto-detected on your
-`PATH` (see [Prerequisites](#prerequisites)).
+The repository's Makefile builds the React dashboard first and then the Go backend.
+
+### Linux / macOS
 
 ```bash
-git clone https://github.com/rootdr-backup/reconner.git
-cd reconner
+git clone https://github.com/rootdr-backup/Reconner.git
+cd Reconner
 
-make            # builds the frontend bundle and the `reconner` binary
+make
+```
+
+Start the web application:
+
+```bash
 ./reconner serve
 ```
 
-Then open **http://localhost:8080** and log in:
+By default the dashboard listens on:
 
-| Username | Password      |
-|----------|---------------|
-| `admin`  | `change_m)_e` |
-
-You'll be required to set a new password on first login.
-
-> Web reconnaissance runs entirely unprivileged. Some **network**-scan features
-> (raw-socket port scanning, etc.) may need elevated privileges — the same as
-> any port scanner (e.g. `nmap`, `naabu`). Run those with the capability or
-> privilege your OS requires; everything else works as a normal user.
-
-### Run with Docker (recommended for servers)
-
-A single, reproducible image bundles the backend, the built dashboard, **and**
-the whole tool-chain (nuclei, dalfox, katana, subfinder, httpx, naabu, …) plus
-headless Chromium and nmap — nothing to install on the host.
-
-```bash
-cp .env.example .env          # (optional) set a fixed admin password / host port
-docker compose up -d --build  # starts on http://localhost:8080
-docker compose logs -f        # the random admin password prints here on first boot
+```text
+http://127.0.0.1:8080
 ```
 
-The admin user is `admin`; leave `ADMIN_PASSWORD` blank in `.env` for a strong
-random password generated on first boot. Data (DB, config, screenshots,
-templates) persists in the `reconner-data` volume, so updates never lose it. Full
-details in **[README.Docker.md](README.Docker.md)** (or `make docker-up`,
-`make docker-logs`, `make docker-password`).
+The application itself does not require root for normal web reconnaissance.
 
-### Running on a server (remote access)
-
-By default Reconner binds **`127.0.0.1`** — local only, so a fresh VPS install
-isn't exposed to the internet. To reach the dashboard from your own machine, pick
-one:
+For convenience, the repository also contains dependency installers:
 
 ```bash
-# A) SSH tunnel — nothing exposed publicly (recommended)
-ssh -L 8080:127.0.0.1:8080 user@your-server
-#   then browse http://localhost:8080 on your laptop
-
-# B) Bind publicly — ONLY behind a firewall / VPN / security group
-#   edit ~/.recon-platform/config.json →  "host": "0.0.0.0"   then restart
-```
-
-Option B puts an admin dashboard on the open internet, so gate it at the firewall
-(or front it with a reverse proxy + TLS + auth). The startup banner reminds you
-which mode you're in.
-
-## Prerequisites
-
-Reconner shells out to standard, widely-used recon tools when they're present
-and silently skips the ones that aren't. Install whatever you need from the
-[ProjectDiscovery suite](https://github.com/projectdiscovery) plus `nmap`,
-`sqlmap`, `dirsearch`, `hydra` and friends.
-
-For convenience, an optional installer fetches the common set and (optionally)
-registers a background service. It uses `sudo` **only** for system-level steps
-(placing binaries in `/usr/local/bin`, installing a systemd unit); the app
-itself never requires it:
-
-```bash
-# Linux — optional convenience installer
+# Linux
 bash setup.sh
 
-# macOS — optional
+# macOS
 bash scripts/reconner-macos-deps.sh
 ```
 
-## Configuration
-
-On first run Reconner writes a config to `~/.recon-platform/config.json`. Every
-scanner, worker pool, rate limit and optional API key is tunable there — the
-fields are documented inline in
-[`internal/config/config.go`](internal/config/config.go).
-
-The optional AI-assisted orchestrator is **off by default**. If you enable it,
-it reads an Anthropic API key strictly from the `ANTHROPIC_API_KEY` environment
-variable — nothing is hardcoded and nothing is transmitted unless you turn it on.
-
-## Reports
-
-Every target exports a self-contained report from the UI or the API:
-
-```
-/api/targets/{id}/report        # Markdown
-/api/targets/{id}/report.html   # standalone HTML
-/api/targets/{id}/report.pdf    # PDF
-```
-
-## Tech stack
-
-- **Backend:** Go (embedded SQLite)
-- **Frontend:** React + TypeScript + Tailwind (Vite)
-- **Scanners:** the ProjectDiscovery suite, plus nmap, sqlmap, dirsearch, hydra, Ingram and others
-
-## Feedback & bug reports
-
-Found a bug, a false positive, or have an idea? Please
-[open an issue](https://github.com/rootdr-backup/reconner/issues) — reproduction
-steps and log output help a lot. You can also reach out on Telegram
-[@rootdr_research](https://t.me/rootdr_research). For security-sensitive reports,
-follow [SECURITY.md](SECURITY.md).
-
-## Support
-
-If Reconner saves you time, you can support its development:
-
-- 🇮🇷 **Iranian:** [daramet.com/RootDR](https://daramet.com/RootDR)
-- 🌍 **International (crypto):**
-
-  | Chain | Address |
-  |-------|---------|
-  | Solana | `BBdEFMnnMFX8ZqeoXbnmYYLE49gNEygdUDy4ctuB9EiT` |
-  | Bitcoin | `bc1qefw45vhpwy6k0hw4gayu9qmrje9ml34l8ap7ly` |
-  | EVM (ETH/BSC/Polygon…) | `0x58e7c01913D6eA354DEaB1f83AD9A95B4D9EAfCa` |
-  | Tron (TRC20) | `TYE2DKJZ7nNkBNEJ7uSr374ZVfKfBUYTic` |
-
-## Disclaimer
-
-This project is for **authorized security testing and educational purposes
-only**. Running it against systems without explicit, prior permission is
-illegal and unethical. The author assumes no liability and is not responsible
-for any misuse or damage caused by this tool. **You** are responsible for your
-own actions.
-
-## License
-
-Released under the [MIT License](LICENSE).
+External recon tools are optional and are detected when available. The Docker image is the easiest way to get the bundled toolchain.
 
 ---
 
-<p align="center">
-  Crafted by <b>RootDR</b> · <a href="https://t.me/rootdr_research">@rootdr_research</a>
-</p>
+## Docker
+
+For a server/VPS, Docker is the recommended deployment method.
+
+```bash
+git clone https://github.com/rootdr-backup/Reconner.git
+cd Reconner
+
+cp .env.example .env
+docker compose up -d --build
+```
+
+Check startup:
+
+```bash
+docker compose logs -f
+```
+
+The dashboard is available on:
+
+```text
+http://127.0.0.1:8080
+```
+
+The container includes the application, built frontend, Reconner's Go-based toolchain, headless Chromium and nmap.
+
+Data is persisted in the `reconner-data` named volume.
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs -f
+docker compose down
+docker compose up -d --build
+```
+
+To completely remove the persistent data volume:
+
+```bash
+docker compose down -v
+```
+
+### Server access
+
+Reconner binds locally by default. For a remote VPS, the safest simple option is an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@YOUR_SERVER
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8080
+```
+
+If you intentionally expose the dashboard remotely, protect it with a firewall/VPN or a properly configured reverse proxy and TLS.
+
+---
+
+## Recommended Server
+
+For a dedicated bug-bounty Reconner instance:
+
+```text
+8 vCPU
+16 GB RAM
+120 GB NVMe SSD
+```
+
+This is a practical starting point for continuous web recon, crawling, Nuclei, browser-backed checks and several concurrent targets.
+
+For large programs or heavy CIDR/network scans:
+
+```text
+16+ vCPU
+32+ GB RAM
+250+ GB NVMe
+```
+
+Actual requirements depend on target size, concurrency, crawling depth, browser usage, Nuclei workload and network scanning.
+
+Reconner exposes limits for concurrency, URLs, Nuclei surfaces/processes, rate limiting and other resource-heavy operations so the deployment can be tuned instead of simply increasing worker counts.
+
+---
+
+## Configuration
+
+The native configuration is stored at:
+
+```text
+~/.recon-platform/config.json
+```
+
+Docker stores the configuration under the persistent `/data` volume.
+
+Configuration covers scan/resource limits, HTTP throttling, Nuclei settings, browser settings, OAST, passive-intelligence providers and network modules.
+
+Optional integrations include:
+
+- SecurityTrails
+- Shodan
+- Censys
+- FOFA
+- 360 Quake
+- ZoomEye
+- VirusTotal
+- Interactsh-compatible OAST
+- Anthropic AI orchestration
+
+Optional external services are only used by the corresponding enabled integration.
+
+---
+
+## External Toolchain
+
+The Docker build includes the main reconnaissance toolchain used by Reconner, including:
+
+```text
+subfinder
+httpx
+nuclei
+katana
+naabu
+dnsx
+alterx
+asnmap
+uncover
+gau
+waybackurls
+assetfinder
+qsreplace
+dalfox
+subzy
+nmap
+Chromium
+```
+
+Other integrations can be installed separately when required.
+
+---
+
+## License
+
+MIT License.
+
+## Disclaimer
+
+Reconner is intended for authorized security testing, bug bounty programs, penetration testing and research.
+
+Do not scan or attack systems without explicit authorization. You are responsible for scope, rate limits, rules of engagement and compliance with applicable laws.
+
