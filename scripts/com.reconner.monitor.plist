@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service: run Reconner on a schedule (continuous monitoring).
+
+  INSTALL (per-user, no root needed):
+    1. Edit the two paths / the domain list below.
+    2. cp scripts/com.reconner.monitor.plist ~/Library/LaunchAgents/
+    3. launchctl load  ~/Library/LaunchAgents/com.reconner.monitor.plist
+       launchctl start com.reconner.monitor        # run once now
+    To stop:  launchctl unload ~/Library/LaunchAgents/com.reconner.monitor.plist
+
+  StartInterval is in SECONDS (86400 = once a day). It scans each domain with
+  the monitor module and writes fresh reports.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.reconner.monitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <!-- Edit this line: your domains + which modules to run on each cycle. -->
+        <string>for d in example.com test.com; do /usr/local/bin/reconner scan "$d" --quick --quiet; done</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/Users/CHANGE_ME/go/bin:/Users/CHANGE_ME/.local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>86400</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/reconner-monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/reconner-monitor.err</string>
+</dict>
+</plist>

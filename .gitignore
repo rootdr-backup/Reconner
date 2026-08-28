@@ -1,0 +1,36 @@
+# ── Go ──
+/reconner
+/reconner.new
+*.exe
+*.test
+*.out
+
+# ── SQLite / runtime data ──
+*.db
+*.sqlite
+*.sqlite3
+/data/
+.recon-platform/
+
+# ── frontend ──
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+
+# ── editor / OS ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── local secrets / config ──
+config.json
+config.local.json
+*.pem
+*.key
+
+# ── docker / env ──
+.env

@@ -1,0 +1,114 @@
+package scanner
+
+import (
+	"context"
+	"net/url"
+	"strings"
+)
+
+// Per-scan toggles carried on the scan context (set by the scheduler from the
+// scan request's pseudo-modules, the same channel as the speed profile). Each
+// defaults to the historical behaviour when unset, so an older client that sends
+// no toggle is unaffected.
+
+type subBruteKey string
+
+const ctxSubBrute subBruteKey = "subdomain_brute"
+
+// WithSubdomainBrute toggles the SLOW active phase of subdomain enumeration —
+// wordlist brute-force + permutation generation (activeEnum) and the deep
+// alterx/puredns/massdns pass (deepDNSEnum). Passive sources, resolution, ASN and
+// vhost discovery always run. Operators disable it per scan when they only want a
+// fast passive map (it is by far the longest part of enumeration).
+func WithSubdomainBrute(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxSubBrute, enabled)
+}
+
+// subdomainBruteEnabled reports whether the slow brute/permutation phase should
+// run. Defaults to TRUE when unset (preserves existing behaviour).
+func subdomainBruteEnabled(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxSubBrute).(bool); ok {
+		return v
+	}
+	return true
+}
+
+// ── Single-endpoint scan mode ────────────────────────────────────────────────
+//
+// When the operator scans a single URL and ticks "single endpoint", the whole
+// pipeline is confined to THAT url and the paths under it: crawling stays under
+// the seed's directory prefix, discovery never wanders to sibling paths or other
+// hosts, and every discovered surface (parameters, http_services, JS) is filtered
+// to the endpoint scope before any module consumes it. The seed URL's own query
+// AND path parameters are always in scope. Off by default (unset ⇒ full scan).
+
+type endpointScopeKey string
+
+const ctxEndpointScope endpointScopeKey = "endpoint_scope"
+
+// WithEndpointScope confines the scan to the given seed URL prefixes (each is a
+// full URL; its host + directory path becomes the allowed prefix). An empty list
+// clears confinement.
+func WithEndpointScope(ctx context.Context, seedURLs []string) context.Context {
+	var prefixes []string
+	for _, u := range seedURLs {
+		if p := endpointPrefix(u); p != "" {
+			prefixes = append(prefixes, p)
+		}
+	}
+	if len(prefixes) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxEndpointScope, prefixes)
+}
+
+// endpointScopePrefixes returns the confinement prefixes, or nil when the scan is
+// not in single-endpoint mode.
+func endpointScopePrefixes(ctx context.Context) []string {
+	if v, ok := ctx.Value(ctxEndpointScope).([]string); ok {
+		return v
+	}
+	return nil
+}
+
+// endpointPrefix reduces a URL to its confinement prefix: lowercased host + the
+// directory portion of the path (everything up to and including the last '/').
+// e.g. https://x.com/a/b?q=1 → "x.com/a/"  and  https://x.com/a/b/ → "x.com/a/b/".
+func endpointPrefix(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	path := u.Path
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasSuffix(path, "/") {
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			path = path[:i+1]
+		} else {
+			path = "/"
+		}
+	}
+	return strings.ToLower(u.Host) + path
+}
+
+// urlInEndpointScope reports whether rawURL falls under any confinement prefix.
+// When there are no prefixes (not single-endpoint mode) everything is in scope.
+func urlInEndpointScope(ctx context.Context, rawURL string) bool {
+	prefixes := endpointScopePrefixes(ctx)
+	if len(prefixes) == 0 {
+		return true
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	hostPath := strings.ToLower(u.Host) + u.Path
+	for _, p := range prefixes {
+		if strings.HasPrefix(hostPath, p) {
+			return true
+		}
+	}
+	return false
+}

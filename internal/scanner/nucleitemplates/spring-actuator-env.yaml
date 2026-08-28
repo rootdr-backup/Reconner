@@ -1,0 +1,28 @@
+id: reconner-spring-actuator-env
+info:
+  name: Spring Boot Actuator /env exposed
+  author: reconner
+  severity: high
+  description: An unauthenticated Spring Boot Actuator /env endpoint discloses environment properties and often secrets (credentials, tokens) in propertySources.
+  tags: reconner,exposure,springboot,actuator
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/env"
+      - "{{BaseURL}}/env"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "propertySources"
+      - type: word
+        part: header
+        words:
+          - "application/json"
+          - "application/vnd.spring-boot.actuator"
+        condition: or
+      - type: status
+        status:
+          - 200

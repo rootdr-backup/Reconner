@@ -1,0 +1,29 @@
+id: reconner-git-config-exposure
+info:
+  name: Exposed .git/config
+  author: reconner
+  severity: high
+  description: A publicly readable .git/config lets an attacker reconstruct the repository (source code, secrets in history) from the exposed .git directory.
+  tags: reconner,exposure,git,config
+  reference:
+    - https://owasp.org/www-community/attacks/Source_code_disclosure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/config"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "[core]"
+          - "repositoryformatversion"
+        condition: and
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

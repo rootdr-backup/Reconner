@@ -1,0 +1,25 @@
+id: reconner-phpinfo-exposure
+info:
+  name: phpinfo() page exposed
+  author: reconner
+  severity: medium
+  description: An exposed phpinfo() page discloses server paths, loaded modules, environment variables and configuration useful for further attacks.
+  tags: reconner,exposure,phpinfo,config
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/phpinfo.php"
+      - "{{BaseURL}}/info.php"
+      - "{{BaseURL}}/test.php"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "PHP Version"
+          - "php.ini"
+        condition: and
+      - type: status
+        status:
+          - 200

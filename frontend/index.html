@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08080b" />
+    <title>Reconner · Watchtower</title>
+    <!-- No external webfonts on purpose: a render-blocking Google Fonts <link>
+         hangs the whole app on a server that can't reach fonts.googleapis.com
+         (firewalled / air-gapped / slow), which showed as an endless loading
+         spinner. The UI uses the system font stack (Inter → system-ui → …) from
+         tailwind.config.js, so text renders instantly and offline. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

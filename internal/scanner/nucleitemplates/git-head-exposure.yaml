@@ -1,0 +1,20 @@
+id: reconner-git-head-exposure
+info:
+  name: Exposed .git/HEAD
+  author: reconner
+  severity: medium
+  description: A readable .git/HEAD confirms an exposed .git directory even when .git/config is blocked, enabling repository reconstruction.
+  tags: reconner,exposure,git,disclosure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/HEAD"
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "^ref:\\s+refs/heads/"
+      - type: status
+        status:
+          - 200

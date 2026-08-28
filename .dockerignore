@@ -1,0 +1,19 @@
+# Keep the build context small and reproducible: never ship local build output,
+# dependencies, VCS metadata or the packaged shell installer into the image.
+.git
+.github
+**/node_modules
+frontend/dist
+frontend/node_modules
+*.log
+*.db
+data/
+dist/
+# Packaged single-file installers (not needed inside the image).
+reconner-install*.sh
+reconnerinstall*.sh
+install.sh
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

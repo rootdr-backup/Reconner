@@ -1,0 +1,211 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  :root {
+    /* Single committed accent — teal-500. No competing hues. */
+    --accent: #8b5cf6;
+    --accent-2: #6366f1;
+    --grad-accent: linear-gradient(120deg, #8b5cf6 0%, #6366f1 100%);
+    --grad-accent-soft: linear-gradient(120deg, rgba(139,92,246,.12), rgba(99,102,241,.06));
+    --glow: 0 0 0 1px rgba(139,92,246,.10), 0 8px 34px -14px rgba(139,92,246,.35);
+    --focus-ring: 0 0 0 2px #07090d, 0 0 0 4px rgba(139,92,246,.6);
+    /* 4/8-based spacing is provided by Tailwind's scale; radii/shadows here. */
+    --shadow-card: 0 1px 0 rgba(255,255,255,.015) inset, 0 10px 30px -22px rgba(0,0,0,.9);
+  }
+
+  body {
+    @apply text-text-primary font-sans;
+    margin: 0;
+    padding: 0;
+    background-color: #07090d;
+    /* One faint accent wash + a neutral depth gradient — calm, not busy. */
+    background-image:
+      radial-gradient(70rem 60rem at 100% -10%, rgba(139,92,246,.06), transparent 60%),
+      radial-gradient(60rem 50rem at -10% 110%, rgba(99,102,241,.04), transparent 55%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #2a3341;
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4658; background-clip: padding-box; }
+
+  ::selection { @apply text-text-primary; background: rgba(139,92,246,.28); }
+
+  /* Accessible keyboard focus everywhere (mouse clicks don't trigger it). */
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+    border-radius: 8px;
+  }
+}
+
+@layer components {
+  /* ── Cards ────────────────────────────────────────────────────── */
+  .card {
+    @apply rounded-lg;
+    background: #0f1218;
+    border: 1px solid #1e2530;
+    box-shadow: var(--shadow-card);
+  }
+
+  .card-hover {
+    @apply card transition-all duration-200;
+  }
+  .card-hover:hover {
+    border-color: #2a3341;
+    box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 14px 34px -22px rgba(0,0,0,.95);
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────── */
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer select-none disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn active:scale-[.98];
+    color: #04140f;
+    background-image: var(--grad-accent);
+    box-shadow: 0 4px 14px -8px rgba(139,92,246,.55);
+    font-weight: 600;
+  }
+  .btn-primary:hover { filter: brightness(1.08); box-shadow: 0 6px 18px -8px rgba(139,92,246,.7); }
+  .btn-secondary {
+    @apply btn text-text-primary active:scale-[.98];
+    background: #151a22;
+    border: 1px solid #2a3341;
+  }
+  .btn-secondary:hover { background: #1b212b; border-color: #3a4658; }
+  .btn-ghost { @apply btn text-text-secondary hover:bg-white/[.05] hover:text-text-primary active:scale-[.98]; }
+  .btn-danger {
+    @apply btn active:scale-[.98];
+    color: #fecdd3;
+    background: rgba(244,63,94,.10);
+    border: 1px solid rgba(244,63,94,.28);
+  }
+  .btn-danger:hover { background: rgba(244,63,94,.16); }
+
+  /* ── Inputs ───────────────────────────────────────────────────── */
+  .input {
+    @apply w-full px-3 py-2 rounded-lg text-sm text-text-primary placeholder-text-muted outline-none transition-all duration-150;
+    background: #0c0f14;
+    border: 1px solid #2a3341;
+  }
+  .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139,92,246,.16); }
+  .label { @apply block text-xs font-medium text-text-secondary mb-1.5; }
+
+  /* ── Badges (severity always carries its text label — never color alone) ── */
+  .badge { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold; }
+  .badge-critical { @apply badge; color:#fecdd3; background:rgba(244,63,94,.16); border:1px solid rgba(244,63,94,.32); }
+  .badge-high     { @apply badge; color:#fed7aa; background:rgba(249,115,22,.15); border:1px solid rgba(249,115,22,.30); }
+  .badge-medium   { @apply badge; color:#fde68a; background:rgba(234,179,8,.15); border:1px solid rgba(234,179,8,.30); }
+  .badge-low      { @apply badge; color:#bbf7d0; background:rgba(34,197,94,.15); border:1px solid rgba(34,197,94,.30); }
+  .badge-info     { @apply badge; color:#bae6fd; background:rgba(99,102,241,.15); border:1px solid rgba(99,102,241,.30); }
+  .badge-neutral  { @apply badge text-text-secondary; background:rgba(255,255,255,.04); border:1px solid #2a3341; }
+
+  /* ── Tables ───────────────────────────────────────────────────── */
+  .table-header {
+    @apply text-[11px] font-semibold text-text-muted uppercase tracking-wider px-4 py-2.5 text-left;
+    background: #0f1218;
+    position: sticky; top: 0; z-index: 1;
+  }
+  .table-cell { @apply px-4 py-2.5 text-sm text-text-secondary; }
+  /* rows fade in softly as results stream in — subtle, GPU-cheap */
+  .table-row { @apply transition-colors duration-100; border-bottom:1px solid #161c24; animation: rowIn .22s ease both; }
+  .table-row:hover { background: rgba(255,255,255,.025); }
+
+  .stat-card { @apply card p-4 flex flex-col gap-1; }
+  .page-header { @apply flex items-center justify-between mb-6; }
+  .page-title { @apply text-2xl font-bold text-text-primary tracking-tight; }
+  .section-title { @apply text-sm font-semibold text-text-secondary uppercase tracking-wider mb-3; }
+  .code { @apply font-mono text-xs px-1.5 py-0.5 rounded text-accent-hover; background:rgba(139,92,246,.10); }
+  .divider { @apply my-4; border-top:1px solid rgba(255,255,255,.07); }
+  .skeleton { @apply animate-pulse rounded; background:rgba(255,255,255,.06); }
+
+  .dot-online  { @apply w-2 h-2 rounded-full bg-severity-low animate-pulse; box-shadow:0 0 8px rgba(34,197,94,.7); }
+  .dot-offline { @apply w-2 h-2 rounded-full bg-text-muted; }
+  .dot-running { @apply w-2 h-2 rounded-full bg-accent animate-pulse; box-shadow:0 0 8px rgba(139,92,246,.75); }
+  .dot-error   { @apply w-2 h-2 rounded-full bg-severity-critical; box-shadow:0 0 8px rgba(244,63,94,.75); }
+
+  /* nav item active accent bar */
+  .nav-item { @apply relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150; }
+}
+
+@layer utilities {
+  .text-gradient {
+    background-image: var(--grad-accent);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .glow-accent { box-shadow: var(--glow); }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  /* Ambient accent wash — single hue, restrained (calm console, not a party). */
+  .aurora { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+  .aurora::before, .aurora::after {
+    content: ''; position: absolute; width: 40rem; height: 40rem; border-radius: 9999px;
+    filter: blur(100px); opacity: .12;
+  }
+  .aurora::before { background:#8b5cf6; top:-16rem; left:-12rem; animation: drift1 28s ease-in-out infinite; }
+  .aurora::after  { background:#6366f1; bottom:-18rem; right:-12rem; animation: drift2 32s ease-in-out infinite; }
+}
+
+/* Respect reduced-motion: kill ambient drift + row/shimmer animations. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .aurora::before, .aurora::after { animation: none; }
+}
+
+@keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(6rem,4rem)} }
+@keyframes drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-5rem,-4rem)} }
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spin-slow 2s linear infinite; }
+@keyframes fadeIn { from{opacity:0} to{opacity:1} }
+@keyframes slideUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+@keyframes rowIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }
+
+/* shimmer sweep for progress/loading strips */
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+.shimmer { position: relative; overflow: hidden; }
+.shimmer::after {
+  content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+/* soft breathing glow for anything actively scanning */
+@keyframes glowPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(139,92,246,.0); }
+  50%     { box-shadow: 0 0 14px -2px rgba(139,92,246,.5); }
+}
+.animate-glow { animation: glowPulse 2.2s ease-in-out infinite; }
+
+.log-info    { @apply text-text-secondary; }
+.log-success { @apply text-severity-low; }
+.log-warning { @apply text-severity-medium; }
+.log-error   { @apply text-severity-critical; }
+.log-debug   { @apply text-text-muted; }
+.log-found   { @apply text-accent-hover; }

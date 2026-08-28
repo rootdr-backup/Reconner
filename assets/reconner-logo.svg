@@ -1,0 +1,37 @@
+<svg width="960" height="300" viewBox="0 0 960 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Reconner">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="0.55" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <radialGradient id="sweep" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- radar / watchtower mark -->
+  <g transform="translate(150 150)" filter="url(#glow)">
+    <circle r="104" fill="#0b0f14"/>
+    <circle r="104" fill="none" stroke="url(#g)" stroke-width="5"/>
+    <circle r="72" fill="none" stroke="url(#g)" stroke-width="2.5" opacity="0.65"/>
+    <circle r="40" fill="none" stroke="url(#g)" stroke-width="2.5" opacity="0.5"/>
+    <!-- crosshair -->
+    <path d="M-104 0h44M60 0h44M0 -104v44M0 60v44" stroke="url(#g)" stroke-width="3" stroke-linecap="round"/>
+    <!-- radar sweep -->
+    <path d="M0 0 L104 0 A104 104 0 0 0 40 -96 Z" fill="url(#sweep)"/>
+    <line x1="0" y1="0" x2="86" y2="-58" stroke="url(#g)" stroke-width="3.5" stroke-linecap="round"/>
+    <!-- ping -->
+    <circle cx="52" cy="-36" r="7" fill="#2dd4bf"/>
+    <circle r="9" fill="url(#g)"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="300" y="150" font-family="'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="92" font-weight="800" letter-spacing="1" fill="url(#g)">Reconner</text>
+  <text x="306" y="196" font-family="'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="20" font-weight="600" letter-spacing="5.5" fill="#8b93a1">BUG-BOUNTY WATCHTOWER</text>
+</svg>

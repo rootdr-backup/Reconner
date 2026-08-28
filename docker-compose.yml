@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Reconner — docker compose.
+#
+#   docker compose up -d --build      # build the image and start on :8080
+#   docker compose logs -f            # follow logs (admin password prints here
+#                                     #   on the very first boot)
+#   docker compose down               # stop (the named volume keeps the DB)
+#
+# Configuration is via a .env file next to this one (copy .env.example → .env).
+# The database + config persist in the `reconner-data` named volume, so updating
+# the image (docker compose pull / up -d --build) never loses your data.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  reconner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/rootdr-backup/reconner:latest
+    container_name: reconner
+    restart: unless-stopped
+    ports:
+      # host:container — change HOST_PORT in .env to expose a different port.
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      # The app always listens on 8080 inside the container; map it above.
+      PORT: "8080"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      # Leave ADMIN_PASSWORD unset for a random password generated on first boot
+      # (printed once in the logs). Set it in .env to pin a known password.
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+    volumes:
+      - reconner-data:/data
+    # naabu / nmap raw-socket (SYN) scans need these capabilities. Drop them if
+    # you only run web-app scans and want a tighter container.
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    # Chromium headless is happier with a little more shared memory.
+    shm_size: "512m"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  reconner-data:

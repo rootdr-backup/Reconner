@@ -1,0 +1,29 @@
+id: reconner-docker-compose-exposure
+info:
+  name: Exposed docker-compose.yml
+  author: reconner
+  severity: medium
+  description: A readable docker-compose file often leaks service credentials, environment variables and internal architecture.
+  tags: reconner,exposure,docker,config
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/docker-compose.yml"
+      - "{{BaseURL}}/docker-compose.yaml"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "services:"
+          - "image:"
+        condition: and
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

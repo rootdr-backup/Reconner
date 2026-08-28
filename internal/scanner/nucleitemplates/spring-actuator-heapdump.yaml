@@ -1,0 +1,22 @@
+id: reconner-spring-actuator-heapdump
+info:
+  name: Spring Boot Actuator heapdump exposed
+  author: reconner
+  severity: critical
+  description: An unauthenticated Actuator /heapdump downloads the full JVM heap, which contains in-memory credentials, session tokens and request data.
+  tags: reconner,exposure,springboot,actuator,heapdump
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/heapdump"
+      - "{{BaseURL}}/heapdump"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "JAVA PROFILE 1.0"
+      - type: status
+        status:
+          - 200

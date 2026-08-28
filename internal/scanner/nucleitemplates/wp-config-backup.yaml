@@ -1,0 +1,27 @@
+id: reconner-wp-config-backup
+info:
+  name: WordPress wp-config backup exposed
+  author: reconner
+  severity: critical
+  description: A readable wp-config backup leaks the WordPress database credentials and secret auth keys.
+  tags: reconner,exposure,wordpress,backup,config
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-config.php.bak"
+      - "{{BaseURL}}/wp-config.php~"
+      - "{{BaseURL}}/wp-config.php.save"
+      - "{{BaseURL}}/wp-config.php.old"
+      - "{{BaseURL}}/.wp-config.php.swp"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "DB_PASSWORD"
+          - "DB_NAME"
+        condition: and
+      - type: status
+        status:
+          - 200

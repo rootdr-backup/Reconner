@@ -1,0 +1,25 @@
+id: reconner-env-file-exposure
+info:
+  name: Exposed .env file with secrets
+  author: reconner
+  severity: critical
+  description: A publicly readable .env file typically leaks database credentials, app keys and third-party API secrets.
+  tags: reconner,exposure,env,secret
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.env"
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "(?m)^\\s*(DB_PASSWORD|APP_KEY|AWS_SECRET_ACCESS_KEY|SECRET_KEY|DB_USERNAME|MAIL_PASSWORD|REDIS_PASSWORD)\\s*="
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

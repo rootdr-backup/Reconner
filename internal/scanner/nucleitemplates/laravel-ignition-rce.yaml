@@ -1,0 +1,22 @@
+id: reconner-laravel-ignition-debug
+info:
+  name: Laravel Ignition debug endpoint exposed
+  author: reconner
+  severity: high
+  description: An exposed Laravel Ignition endpoint (debug mode on in production) has historically enabled CVE-2021-3129 RCE and leaks environment details.
+  tags: reconner,exposure,laravel,ignition,debug
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/_ignition/health-check"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"can_execute_commands\""
+          - "ignition"
+        condition: or
+      - type: status
+        status:
+          - 200
