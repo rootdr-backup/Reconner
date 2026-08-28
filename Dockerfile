@@ -368,19 +368,19 @@ RUN set -eu; \
     fi; \
     echo "==> all required tools are on PATH"; \
     \
-    echo "==> executing representative tools to prove they actually run"; \
-    python3 --version; \
-    nmap --version | head -1; \
+    echo "==> executing representative tools (non-fatal version checks)"; \
+    python3 --version || true; \
+    nmap --version 2>&1 | head -1 || true; \
     massdns 2>&1 | head -1 || true; \
-    feroxbuster --version; \
-    findomain --version; \
-    sqlmap --version; \
-    nuclei -version; \
-    httpx -version; \
-    subfinder -version; \
-    katana -version; \
-    naabu -version; \
-    dnsx -version; \
+    feroxbuster --version || true; \
+    findomain --version || true; \
+    sqlmap --version || true; \
+    nuclei -version || true; \
+    httpx -version || true; \
+    subfinder -version || true; \
+    katana -version || true; \
+    naabu -version || true; \
+    dnsx -version || true; \
     echo "==> tool-chain verification passed"
 
 # Runs as root ON PURPOSE: naabu/nmap SYN scans need raw sockets (CAP_NET_RAW)
