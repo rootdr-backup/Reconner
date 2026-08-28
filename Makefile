@@ -4,8 +4,8 @@
 #   make            # build the frontend + the `reconner` binary
 #   ./reconner serve
 #
-# Individual targets are below. Nothing here needs sudo; only the optional
-# system-tool installer (scripts/) touches system paths.
+# Individual targets are below. Nothing here needs sudo —
+# Docker is the recommended way to get the full tool-chain.
 
 BINARY      ?= reconner
 PKG         := ./cmd/reconner
