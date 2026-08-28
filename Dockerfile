@@ -25,7 +25,7 @@ RUN npm run build
 # Compiled once, pinned by the module proxy at build time, then copied into the
 # slim runtime — so the image ships a complete, reproducible tool-chain instead
 # of `go install`-ing on every host at first run.
-FROM golang:1.25-bookworm AS tools
+FROM golang:1.26-bookworm AS tools
 ENV GOFLAGS=-buildvcs=false \
     GOBIN=/out \
     CGO_ENABLED=1
