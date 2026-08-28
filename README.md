@@ -415,19 +415,6 @@ cd Reconner
 make            # builds the frontend bundle and the `reconner` binary
 ./reconner serve
 ```
-
-The external recon tool-chain is optional here too — every module
-auto-detects and gracefully skips missing tools. To install the common set
-locally instead of using Docker:
-
-```bash
-# Linux — optional convenience installer
-bash setup.sh
-
-# macOS — optional
-bash scripts/reconner-macos-deps.sh
-```
-
 Useful `make` targets: `make test` (Go test suite), `make tidy` (`go mod
 tidy`), `make clean` (remove build artifacts), and the `docker-*` targets
 (`make docker-up`, `make docker-logs`, `make docker-password`,
