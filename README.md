@@ -136,13 +136,9 @@ docker compose pull
 docker compose up -d
 ```
 
-> **Architecture note:** the CI workflow currently builds for the runner's
-> native platform only (no multi-platform `buildx` configuration) — in
-> practice this means the published `:latest` tag is a **linux/amd64** image.
-> On an **arm64** host (Apple Silicon, AWS Graviton, etc.), use **Option A**
-> (`docker compose up -d --build`) so the Dockerfile's own architecture
-> detection (`TARGETARCH`) builds the correct Feroxbuster/Findomain binaries
-> for your CPU.
+> **Architecture:** the prebuilt image on GHCR (`:latest`) is **linux/amd64** only.
+> - Most VPS / PC (amd64) → Option B is fine: `docker compose pull && docker compose up -d`
+> - Apple Silicon (M1/M2/M3/M4) or other arm64 → use Option A: `docker compose up -d --build`
 
 Either way, the first successful build/pull compiles or fetches all 30 tools
 plus headless Chromium — a local `--build` from scratch can take **15–25+
