@@ -295,7 +295,8 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 	// 12 hosts serialised into ~16 min). Cap each host and let the rest proceed.
 	dctx, dcancel := context.WithTimeout(ctx, 150*time.Second)
 	defer dcancel()
-	err := s.exec.RunWithCallback(dctx, targetID, func(line string) {
+
+	callback := func(line string) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Target:") ||
 			strings.HasPrefix(line, "Error") || strings.HasPrefix(line, "[!]") ||
@@ -319,19 +320,15 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		if len(parts) < 4 {
 			return
 		}
-		// parts[0] = [HH:MM:SS], parts[1] = status_code, parts[2] = -, parts[3] = size, parts[4] = -, parts[5] = path/url
 		var statusCode int
 		fmt.Sscanf(parts[1], "%d", &statusCode)
 		if statusCode == 0 {
 			return
 		}
-		// Capture the response size (dirsearch prints e.g. "10KB", "260B") so the
-		// Directory tab can be sorted by size on large targets.
 		size := 0
 		if len(parts) >= 4 {
 			size = humanSizeToBytes(parts[3])
 		}
-		// Find the path/URL (last token)
 		pathOrURL := parts[len(parts)-1]
 		var foundURL string
 		if strings.HasPrefix(pathOrURL, "http") {
@@ -342,13 +339,20 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 			return
 		}
 		s.storeDirFinding(targetID, foundURL, statusCode, size, "")
-	}, "dirsearch", "-u", svcURL, "--no-color", "-q",
+	}
+
+	args := []string{
+		"-u", svcURL, "--no-color", "-q",
 		"-e", "php,asp,aspx,jsp,html,txt,bak,zip,sql,tar,gz,rar,xml,json,yaml,env,js,pdf,cfg,conf,old,swp,inc",
 		"-i", "200,204,301,302,307,401,403,405,500",
-		// NO --crawl (recursive crawl was the main time sink and rarely adds
-		// findings the built-in prober + katana didn't already surface). Faster
-		// timeouts and a firm per-host max-time keep the whole module snappy.
-		"--timeout", "6", "--full-url", "-t", "60", "--max-time", "120")
+		"--timeout", "6", "--full-url", "-t", "60", "--max-time", "120",
+	}
+	err := s.exec.RunWithCallback(dctx, targetID, callback, "dirsearch", args...)
+	if err != nil && strings.Contains(err.Error(), "no such file or directory") {
+		// venv shebang/interpreter broken → fall back to python -m
+		pyArgs := append([]string{"-m", "dirsearch"}, args...)
+		err = s.exec.RunWithCallback(dctx, targetID, callback, "python3", pyArgs...)
+	}
 	if err != nil && ctx.Err() == nil && dctx.Err() != context.DeadlineExceeded {
 		logFn("warn", "dir_discovery", fmt.Sprintf("dirsearch error for %s: %v", svcURL, err))
 	}
