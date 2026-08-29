@@ -142,6 +142,9 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 		if err := rows.Scan(&ip.URL, &ip.Param, &ip.Method, &ip.ContentType, &ip.Location, &reflected); err != nil {
 			continue
 		}
+		if !urlHostInScope(ctx, ip.URL) {
+			continue
+		}
 		if ip.Param == "" || isTrackingParam(ip.Param) {
 			continue
 		}
