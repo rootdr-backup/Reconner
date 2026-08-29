@@ -333,14 +333,19 @@ COPY --from=massdns   /out/massdns             /usr/local/bin/massdns
 COPY --from=external  /out/feroxbuster         /usr/local/bin/feroxbuster
 COPY --from=external  /out/findomain           /usr/local/bin/findomain
 COPY --from=pytools   /opt/venv                /opt/venv
-# Also expose the venv's console scripts directly on /usr/local/bin: the app's
-# tool-executor searches /usr/local/bin BEFORE it falls back to PATH-based
-# lookup (internal/tools/executor.go), so this guarantees dirsearch/uro/waymore
-# are found the same way every other bundled tool is, regardless of PATH.
+# Expose ONLY the three console scripts we actually want from the venv, as
+# symlinks in /usr/local/bin — deliberately NOT adding /opt/venv/bin to PATH.
+# dirsearch pulls in the PyPI package "httpx" (an unrelated async HTTP client
+# library) as a dependency, which installs its own broken `httpx` command
+# stub (it errors out unless the `httpx[cli]` extra is installed). Putting
+# /opt/venv/bin on PATH let that stub SHADOW the real ProjectDiscovery `httpx`
+# Go binary in /usr/local/bin, breaking the entire image
+# ("The httpx command line client could not run because the required
+# dependencies were not installed."). The symlinks below are all that's
+# needed — no venv directory should ever be added to PATH.
 RUN ln -s /opt/venv/bin/dirsearch /usr/local/bin/dirsearch \
  && ln -s /opt/venv/bin/uro       /usr/local/bin/uro \
  && ln -s /opt/venv/bin/waymore   /usr/local/bin/waymore
-ENV PATH="/opt/venv/bin:${PATH}"
 
 # The app binary and the built dashboard.
 COPY --from=backend  /out/reconner            /usr/local/bin/reconner
@@ -398,7 +403,7 @@ RUN set -eu; \
     naabu -version; \
     dnsx -version; \
     dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \
-    python3 -m dirsearch --help >/dev/null 2>&1 || true; \
+    /opt/venv/bin/python3 -m dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not importable via its own venv python3" >&2; exit 1; }; \
     echo "==> tool-chain verification passed"
 
 # Runs as root ON PURPOSE: naabu/nmap SYN scans need raw sockets (CAP_NET_RAW)
