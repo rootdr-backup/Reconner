@@ -191,6 +191,16 @@ func (s *DirScanner) loadHTTPServices(ctx context.Context, targetID string) (ser
 			services = append(services, u)
 		}
 	}
+	// Per-asset host scope
+	if hostScopeSet(ctx) != nil {
+		kept := services[:0]
+		for _, u := range services {
+			if urlHostInScope(ctx, u) {
+				kept = append(kept, u)
+			}
+		}
+		services = kept
+	}
 	return services, totalAlive
 }
 
