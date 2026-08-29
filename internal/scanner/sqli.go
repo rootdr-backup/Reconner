@@ -573,6 +573,7 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn L
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 	if len(urls) == 0 {
 		return
 	}
