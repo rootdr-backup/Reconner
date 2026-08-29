@@ -113,3 +113,63 @@ func urlInEndpointScope(ctx context.Context, rawURL string) bool {
 	}
 	return false
 }
+// ── Per-asset host scope ─────────────────────────────────────────────────────
+// When the operator scans a single asset (scope_override), the pipeline is
+// confined to that asset's host(s). Unset ⇒ full target (no confinement).
+
+type hostScopeKey string
+
+const ctxHostScope hostScopeKey = "host_scope"
+
+// WithHostScope confines the scan to the given hostnames (exact, lowercased).
+func WithHostScope(ctx context.Context, hosts []string) context.Context {
+	set := map[string]bool{}
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		h = strings.TrimSuffix(h, ".")
+		if h == "" {
+			continue
+		}
+		if hh, _, err := net.SplitHostPort(h); err == nil {
+			h = hh
+		}
+		set[h] = true
+	}
+	if len(set) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxHostScope, set)
+}
+
+func hostScopeSet(ctx context.Context) map[string]bool {
+	if v, ok := ctx.Value(ctxHostScope).(map[string]bool); ok {
+		return v
+	}
+	return nil
+}
+
+// hostInScope reports whether host is allowed. Unset scope ⇒ everything in scope.
+func hostInScope(ctx context.Context, host string) bool {
+	set := hostScopeSet(ctx)
+	if set == nil {
+		return true
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return set[host]
+}
+
+// urlHostInScope extracts the host from rawURL and checks hostInScope.
+func urlHostInScope(ctx context.Context, rawURL string) bool {
+	if hostScopeSet(ctx) == nil {
+		return true
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return hostInScope(ctx, u.Host)
+}
