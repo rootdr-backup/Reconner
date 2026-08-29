@@ -93,10 +93,13 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 		if line == "" || !strings.Contains(line, "?") {
 			return
 		}
-		// Single-endpoint mode: only keep URLs under the seed endpoint prefix — a
+				// Single-endpoint mode: only keep URLs under the seed endpoint prefix — a
 		// whole-domain wayback/gau dump would otherwise drag the scan far off the one
 		// URL the operator asked for.
 		if !urlInEndpointScope(ctx, line) {
+			return
+		}
+		if !urlHostInScope(ctx, line) {
 			return
 		}
 		if singleScope {
