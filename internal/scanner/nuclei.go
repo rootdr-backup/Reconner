@@ -122,6 +122,17 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 		}
 	}
 
+	// Per-asset host scope
+	if hostScopeSet(ctx) != nil {
+		kept := rawURLs[:0]
+		for _, u := range rawURLs {
+			if urlHostInScope(ctx, u) {
+				kept = append(kept, u)
+			}
+		}
+		rawURLs = kept
+	}
+
 	if len(rawURLs) == 0 {
 		logFn("info", "nuclei", "No HTTP services to scan with nuclei")
 		return nil
