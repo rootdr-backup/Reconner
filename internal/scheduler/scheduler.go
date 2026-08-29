@@ -1082,7 +1082,16 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			VALUES (?, ?, ?, 'seed', CURRENT_TIMESTAMP)
 			ON CONFLICT(target_id, subdomain) DO NOTHING`, uuid.New().String(), targetID, host)
 	}
-
+		// Per-asset scan: confine every DB-reading module to the override host(s).
+	if scopeOverride != "" {
+		scopeHosts := webHosts
+		if len(scopeHosts) == 0 && webPrimary != "" {
+			scopeHosts = []string{webPrimary}
+		}
+		if len(scopeHosts) > 0 {
+			ctx = scanner.WithHostScope(ctx, scopeHosts)
+		}
+	}
 	sentModules := models.JSONToStringSlice(modulesJSON)
 	var modules []string
 	// Honor the per-scan speed tokens (slow/normal/fast); strip any legacy
