@@ -93,6 +93,7 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 		}
 	}
 	rows.Close()
+	subs = filterHostsByHostScope(ctx, subs)
 
 	if len(subs) == 0 {
 		logFn("info", "takeover", "No subdomains to check")
