@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"strings"
 )
