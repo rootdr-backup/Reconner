@@ -281,6 +281,9 @@ func (s *SQLiScanner) secondOrderReadURLs(ctx context.Context, targetID string, 
 		for rows.Next() {
 			var u string
 			if rows.Scan(&u) == nil {
+				if !urlHostInScope(ctx, u) {
+					continue
+				}
 				add(u)
 			}
 		}
@@ -290,6 +293,9 @@ func (s *SQLiScanner) secondOrderReadURLs(ctx context.Context, targetID string, 
 		for rows.Next() {
 			var u string
 			if rows.Scan(&u) == nil {
+				if !urlHostInScope(ctx, u) {
+					continue
+				}
 				add(u)
 			}
 		}
