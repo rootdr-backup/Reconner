@@ -92,6 +92,7 @@ func (s *VulnScanner) RunPrototypePollution(ctx context.Context, targetID string
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 
 	const marker = "rcnpp1337"
 	payloads := []string{
@@ -185,6 +186,7 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
