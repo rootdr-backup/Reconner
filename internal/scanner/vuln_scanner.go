@@ -763,6 +763,7 @@ func (s *VulnScanner) RunCORSCheck(ctx context.Context, targetID string, logFn L
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 
 	logFn("info", "cors_scan", fmt.Sprintf("Testing %d endpoints for CORS...", len(urls)))
 
