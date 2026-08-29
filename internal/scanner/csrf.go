@@ -92,7 +92,7 @@ func (s *CSRFScanner) loadPages(ctx context.Context, targetID string) []string {
 			out = append(out, u)
 		}
 	}
-	return out
+	return filterURLsByHostScope(ctx, out)
 }
 
 func (s *CSRFScanner) checkPage(ctx context.Context, targetID, page string, logFn LogFunc) int {
