@@ -116,7 +116,7 @@ func (s *CORSScanner) loadURLs(ctx context.Context, targetID string) []string {
 			}
 		}
 	}
-	return out
+	return filterURLsByHostScope(ctx, out)
 }
 
 // check runs the CORS probes against one URL and returns the most severe
