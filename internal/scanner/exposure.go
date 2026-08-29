@@ -710,7 +710,7 @@ func (s *ExposureScanner) loadServiceBases(ctx context.Context, targetID string,
 			bases = append(bases, u)
 		}
 	}
-	return bases
+	return filterURLsByHostScope(ctx, bases)
 }
 
 func (s *ExposureScanner) store(targetID, vulnType, severity, rawURL, param, evidence string) {
