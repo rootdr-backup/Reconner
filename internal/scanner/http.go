@@ -70,7 +70,17 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		hosts = append(hosts, sub)
 	}
 	rows.Close()
-
+// Per-asset host scope: only probe hosts belonging to this scoped task.
+	if hostScopeSet(ctx) != nil {
+		kept := hosts[:0]
+		for _, h := range hosts {
+			if hostInScope(ctx, h) {
+				kept = append(kept, h)
+			}
+		}
+		hosts = kept
+		logFn("info", "http_probe", fmt.Sprintf("Host-scope filter: %d host(s) in scope", len(hosts)))
+	}
 	// Out-of-scope exclusions (bug-bounty): drop excluded hosts BEFORE probing, so
 	// nothing excluded ever becomes an http_service — the whole web pipeline reads
 	// from http_services, so this one filter keeps every downstream module
