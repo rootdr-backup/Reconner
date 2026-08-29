@@ -21,8 +21,14 @@
 #                   Chromium + every tool above, finished with a hard
 #                   build-time verification of the PATH.
 #                   20 (Go) + 1 (massdns) + 2 (releases) + 3 (venv) + 4 (apt)
-#                   = 30 required tools. Chromium is bundled in addition to,
-#                   not counted within, that 30.
+#                   = 30 required tools. Chromium AND git are bundled in
+#                   addition to, not counted within, that 30 — git specifically
+#                   because internal/scanner/nuclei.go gates its own official-
+#                   template auto-provisioning on `IsToolAvailable("git")`;
+#                   without it nuclei silently loses the official/fuzzing
+#                   template sets and, in the worst case (embedded pack also
+#                   fails to materialize), gets invoked with zero -t flags and
+#                   hard-fails with "no templates provided for scan" (exit 1).
 #
 # Dependency note: puredns and shuffledns (both stage 2) do their DNS
 # brute-forcing THROUGH massdns (stage 3) — internal/api/tool_install.go
@@ -294,6 +300,15 @@ LABEL org.opencontainers.image.title="Reconner" \
 #   hydra            SSH/SMB/RDP/VNC credential brute-force (opt-in, scope-guarded by the app)
 #   sqlmap           active SQLi confirmation pass (opt-in, off by default)
 #   python3          runs the pytools venv (dirsearch/uro/waymore) AND the Ingram camera scanner
+#   git              REQUIRED at runtime, not just at build time: internal/scanner/nuclei.go
+#                    checks `IsToolAvailable("git")` before cloning the official nuclei-templates
+#                    + fuzzing-templates sets into <DataDir>/nuclei-templates on first scan. Without
+#                    it that provisioning step is silently skipped forever (IsToolAvailable() is
+#                    gated on it), so nuclei runs with only Reconner's small embedded template pack
+#                    — a real, confirmed coverage loss, and if that embedded pack ever fails to
+#                    materialize too (e.g. an unwritable /data), nuclei is invoked with NO -t flags
+#                    at all and hard-fails with `[FTL] no templates provided for scan` (exit 1) —
+#                    reproduced against a real nuclei binary while auditing this image.
 #   curl             image HEALTHCHECK
 #   tini             PID 1 — reaps zombie children the tool-chain spawns
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -304,6 +319,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       hydra \
       sqlmap \
       python3 \
+      git \
       curl \
       tini \
  && rm -rf /var/lib/apt/lists/*
@@ -348,7 +364,7 @@ ENV RECON_CONFIG=/data/config.json \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN set -eu; \
-    echo "==> verifying all 30 required tools, plus Chromium, are on PATH"; \
+    echo "==> verifying all 30 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
       subfinder httpx nuclei katana naabu dnsx alterx asnmap uncover \
@@ -356,7 +372,7 @@ RUN set -eu; \
       gowitness hakrawler puredns scilla shuffledns \
       dirsearch feroxbuster findomain hydra sqlmap uro waymore \
       massdns nmap python3 \
-      chromium \
+      chromium git \
     ; do \
       if ! command -v "$t" >/dev/null 2>&1; then \
         MISSING="${MISSING} $t"; \
@@ -368,19 +384,20 @@ RUN set -eu; \
     fi; \
     echo "==> all required tools are on PATH"; \
     \
-    echo "==> executing representative tools (non-fatal version checks)"; \
-    python3 --version || true; \
-    nmap --version 2>&1 | head -1 || true; \
+    echo "==> executing representative tools to prove they actually run"; \
+    python3 --version; \
+    nmap --version | head -1; \
+    git --version; \
     massdns 2>&1 | head -1 || true; \
-    feroxbuster --version || true; \
-    findomain --version || true; \
-    sqlmap --version || true; \
-    nuclei -version || true; \
-    httpx -version || true; \
-    subfinder -version || true; \
-    katana -version || true; \
-    naabu -version || true; \
-    dnsx -version || true; \
+    feroxbuster --version; \
+    findomain --version; \
+    sqlmap --version; \
+    nuclei -version; \
+    httpx -version; \
+    subfinder -version; \
+    katana -version; \
+    naabu -version; \
+    dnsx -version; \
     echo "==> tool-chain verification passed"
 
 # Runs as root ON PURPOSE: naabu/nmap SYN scans need raw sockets (CAP_NET_RAW)
