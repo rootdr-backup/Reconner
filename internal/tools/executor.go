@@ -235,9 +235,10 @@ func (e *Executor) findTool(name string) string {
 
 func (e *Executor) extendedPath() string {
 	existing := os.Getenv("PATH")
-	extra := []string{
+		extra := []string{
 		e.cfg.ToolsDir,
 		filepath.Join(os.Getenv("HOME"), "go", "bin"),
+		"/opt/venv/bin",
 		filepath.Join(os.Getenv("HOME"), ".local", "bin"), // pip/pipx installs (waymore)
 		"/usr/local/go/bin",
 		"/usr/local/bin",
