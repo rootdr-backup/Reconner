@@ -249,7 +249,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc \
       libc6-dev \
  && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /opt/venv
+RUN python3 -m venv --copies /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir dirsearch uro waymore
@@ -387,7 +387,6 @@ RUN set -eu; \
     echo "==> executing representative tools to prove they actually run"; \
     python3 --version; \
     nmap --version | head -1; \
-    git --version; \
     massdns 2>&1 | head -1 || true; \
     feroxbuster --version; \
     findomain --version; \
@@ -398,6 +397,8 @@ RUN set -eu; \
     katana -version; \
     naabu -version; \
     dnsx -version; \
+    dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \
+    python3 -m dirsearch --help >/dev/null 2>&1 || true; \
     echo "==> tool-chain verification passed"
 
 # Runs as root ON PURPOSE: naabu/nmap SYN scans need raw sockets (CAP_NET_RAW)
