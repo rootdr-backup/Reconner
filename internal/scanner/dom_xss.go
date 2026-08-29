@@ -334,6 +334,8 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		}
 	}
 	rows.Close()
+	pages = filterURLsByHostScope(ctx, pages)
+
 	if len(pages) == 0 {
 		return
 	}
