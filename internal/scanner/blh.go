@@ -148,6 +148,9 @@ func (s *BLHScanner) loadPages(ctx context.Context, targetID string) []string {
 		if u == "" || seen[u] {
 			return
 		}
+		if !urlHostInScope(ctx, u) {
+			return
+		}
 		seen[u] = true
 		out = append(out, u)
 	}
