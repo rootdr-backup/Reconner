@@ -361,6 +361,7 @@ func (s *ParamScanner) discoverForms(ctx context.Context, targetID, domain strin
 		}
 	}
 	rows.Close()
+	pages = filterURLsByHostScope(ctx, pages)
 
 	client := &http.Client{Timeout: 12 * time.Second, Transport: sharedHTTPTransport}
 	stored := 0
