@@ -111,7 +111,7 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 	if err != nil {
 		return fmt.Errorf("query http services: %w", err)
 	}
-	var serviceURLs []string
+		var serviceURLs []string
 	for rows.Next() {
 		var u string
 		if err := rows.Scan(&u); err == nil {
@@ -119,6 +119,17 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 		}
 	}
 	rows.Close()
+
+	// Per-asset host scope
+	if hostScopeSet(ctx) != nil {
+		kept := serviceURLs[:0]
+		for _, u := range serviceURLs {
+			if urlHostInScope(ctx, u) {
+				kept = append(kept, u)
+			}
+		}
+		serviceURLs = kept
+	}
 
 	if len(serviceURLs) == 0 {
 		logFn("info", "js_analysis", "No HTTP services found")
