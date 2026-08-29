@@ -75,8 +75,8 @@ image:
 │       │                                                           │
 │       ▼                                                           │
 │  runtime   → slim Debian + Chromium + nmap + hydra + sqlmap +    │
-│              python3, all of the above copied in, then a         │
-│              build-time verification of all 30 tools + Chromium  │
+│              python3 + git, all of the above copied in, then a   │
+│              build-time verification of all 30 tools + extras    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                      docker-compose.yml
@@ -136,9 +136,13 @@ docker compose pull
 docker compose up -d
 ```
 
-> **Architecture:** the prebuilt image on GHCR (`:latest`) is **linux/amd64** only.
-> - Most VPS / PC (amd64) → Option B is fine: `docker compose pull && docker compose up -d`
-> - Apple Silicon (M1/M2/M3/M4) or other arm64 → use Option A: `docker compose up -d --build`
+> **Architecture note:** the CI workflow currently builds for the runner's
+> native platform only (no multi-platform `buildx` configuration) — in
+> practice this means the published `:latest` tag is a **linux/amd64** image.
+> On an **arm64** host (Apple Silicon, AWS Graviton, etc.), use **Option A**
+> (`docker compose up -d --build`) so the Dockerfile's own architecture
+> detection (`TARGETARCH`) builds the correct Feroxbuster/Findomain binaries
+> for your CPU.
 
 Either way, the first successful build/pull compiles or fetches all 30 tools
 plus headless Chromium — a local `--build` from scratch can take **15–25+
@@ -285,8 +289,12 @@ have Go, Python, Node, or Rust.
 | python3 | Runs the Python tool-chain + the Ingram camera scanner | apt |
 
 **Plus, bundled but outside the 30-tool count above:** headless **Chromium**,
-used for XSS/DOM execution proof and screenshotting — also verified to run at
-build time.
+used for XSS/DOM execution proof and screenshotting, and **git**, which
+`internal/scanner/nuclei.go` requires on `PATH` to auto-provision the
+official nuclei-templates + fuzzing-templates sets on first scan (Reconner's
+own small embedded template pack still runs even without it, but the
+official/community coverage does not). Both are verified to run at build
+time alongside the 30.
 
 Every module in the app degrades gracefully if a tool is somehow unavailable,
 but in the official Docker image, all 30 tools plus Chromium are present and
@@ -371,14 +379,33 @@ docker compose exec reconner sh -c '
            gau waybackurls assetfinder qsreplace dalfox subzy \
            gowitness hakrawler puredns scilla shuffledns \
            dirsearch feroxbuster findomain hydra sqlmap uro waymore \
-           massdns nmap python3 chromium; do
+           massdns nmap python3 chromium git; do
     command -v "$t" >/dev/null 2>&1 && echo "OK      $t" || echo "MISSING $t"
   done'
 ```
-That is all 30 required tools plus Chromium (31 lines). Every line should
-read `OK` — the image build already enforces this, so a `MISSING` line here
-would mean the container is running an older or custom image, not one built
-from the current Dockerfile.
+That is all 30 required tools plus Chromium and git (32 lines). Every line
+should read `OK` — the image build already enforces this, so a `MISSING`
+line here would mean the container is running an older or custom image, not
+one built from the current Dockerfile.
+
+**"nuclei process error: exit status 1" in the logs**
+This means nuclei was invoked with **no templates at all** — it fails fast
+with `no templates provided for scan` in that case, and Reconner only logs
+the exit code, not nuclei's own message. Reconner always tries to write its
+own small embedded template pack to `<DataDir>/nuclei-reconner-pack` first
+(no network needed), and separately `git clone`s the official
+nuclei-templates + fuzzing-templates sets into `<DataDir>/nuclei-templates`
+— but only if `git` is on `PATH`. Check both:
+```bash
+docker compose exec reconner sh -c '
+  command -v git || echo "git MISSING";
+  ls -la /data/nuclei-reconner-pack /data/nuclei-templates
+'
+```
+If `nuclei-reconner-pack` is empty, `/data` likely isn't writable by the
+container. If `nuclei-templates` is empty and `git` reports `MISSING`,
+rebuild from the current Dockerfile (which bundles `git`) — running an image
+built before this fix is the most common cause.
 
 **Rebuilding from scratch (no cache)**
 ```bash
@@ -411,6 +438,19 @@ cd Reconner
 make            # builds the frontend bundle and the `reconner` binary
 ./reconner serve
 ```
+
+The external recon tool-chain is optional here too — every module
+auto-detects and gracefully skips missing tools. To install the common set
+locally instead of using Docker:
+
+```bash
+# Linux — optional convenience installer
+bash setup.sh
+
+# macOS — optional
+bash scripts/reconner-macos-deps.sh
+```
+
 Useful `make` targets: `make test` (Go test suite), `make tidy` (`go mod
 tidy`), `make clean` (remove build artifacts), and the `docker-*` targets
 (`make docker-up`, `make docker-logs`, `make docker-password`,
