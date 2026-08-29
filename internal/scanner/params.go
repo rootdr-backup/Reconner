@@ -58,7 +58,7 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	if err != nil {
 		return err
 	}
-	var targetURLs []string
+		var targetURLs []string
 	for rows.Next() {
 		var u string
 		if err := rows.Scan(&u); err == nil {
@@ -66,6 +66,17 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 		}
 	}
 	rows.Close()
+
+	// Per-asset host scope
+	if hostScopeSet(ctx) != nil {
+		kept := targetURLs[:0]
+		for _, u := range targetURLs {
+			if urlHostInScope(ctx, u) {
+				kept = append(kept, u)
+			}
+		}
+		targetURLs = kept
+	}
 
 	allURLs := make(map[string]bool)
 	var urlMu sync.Mutex
