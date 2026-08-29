@@ -362,6 +362,9 @@ func (s *VulnScanner) RunXSS(ctx context.Context, targetID, domain string, logFn
 		if err := rows.Scan(&u.URL, &u.Param); err != nil {
 			continue
 		}
+		if !urlHostInScope(ctx, u.URL) {
+			continue
+		}
 		key := xssNormalizeKey(u.URL, u.Param)
 		if seen[key] {
 			continue
@@ -879,6 +882,7 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 
 	if len(urls) == 0 {
 		logFn("info", "403_bypass", "No 403 endpoints found to test")
@@ -1048,6 +1052,7 @@ func (s *VulnScanner) RunHostHeaderInjection(ctx context.Context, targetID strin
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 
 	logFn("info", "host_header", fmt.Sprintf("Testing %d endpoints for host header injection...", len(urls)))
 
@@ -1185,9 +1190,12 @@ func (s *VulnScanner) RunCRLF(ctx context.Context, targetID string, logFn LogFun
 	}
 	type up struct{ URL, Param string }
 	var items []up
-	for rows.Next() {
+		for rows.Next() {
 		var u up
 		if err := rows.Scan(&u.URL, &u.Param); err == nil {
+			if !urlHostInScope(ctx, u.URL) {
+				continue
+			}
 			items = append(items, u)
 		}
 	}
