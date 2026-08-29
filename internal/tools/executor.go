@@ -214,9 +214,10 @@ func (e *Executor) findTool(name string) string {
 	// ProjectDiscovery tools live) BEFORE ~/.local/bin — a python package named
 	// like a recon tool (e.g. the "httpx" HTTP library CLI) installs into
 	// ~/.local/bin and would otherwise shadow the real tool and break probing.
-	for _, dir := range []string{
+		for _, dir := range []string{
 		filepath.Join(os.Getenv("HOME"), "go", "bin"),
 		"/usr/local/bin",
+		"/opt/venv/bin",
 		filepath.Join(os.Getenv("HOME"), ".local", "bin"), // pip/pipx installs (waymore/dirsearch/uro)
 	} {
 		p := filepath.Join(dir, name)
