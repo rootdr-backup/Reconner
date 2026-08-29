@@ -4,13 +4,15 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#08080b" />
+    <meta name="theme-color" content="#050505" />
     <title>Reconner · Watchtower</title>
-    <!-- No external webfonts on purpose: a render-blocking Google Fonts <link>
-         hangs the whole app on a server that can't reach fonts.googleapis.com
+    <!-- Fonts are SELF-HOSTED from /fonts (Vazirmatn + JetBrains Mono, woff2).
+         No external webfont CDN on purpose: a render-blocking Google Fonts
+         request hangs the whole app on a server that can't reach it
          (firewalled / air-gapped / slow), which showed as an endless loading
-         spinner. The UI uses the system font stack (Inter → system-ui → …) from
-         tailwind.config.js, so text renders instantly and offline. -->
+         spinner. Local files render instantly and work offline. -->
+    <link rel="preload" href="/fonts/Vazirmatn-var.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/JetBrainsMono-400.woff2" as="font" type="font/woff2" crossorigin />
   </head>
   <body>
     <div id="root"></div>

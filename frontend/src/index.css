@@ -1,4 +1,35 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* ── Self-hosted fonts (offline-safe, no Google Fonts dependency) ─────────
+   Vazirmatn variable (UI text — Persian + Latin) & JetBrains Mono (numbers,
+   identifiers, logs). Served from /fonts via Vite's public dir. */
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/fonts/Vazirmatn-var.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -13,26 +44,26 @@
   }
 
   :root {
-    /* Single committed accent — teal-500. No competing hues. */
-    --accent: #8b5cf6;
-    --accent-2: #6366f1;
-    --grad-accent: linear-gradient(120deg, #8b5cf6 0%, #6366f1 100%);
-    --grad-accent-soft: linear-gradient(120deg, rgba(139,92,246,.12), rgba(99,102,241,.06));
-    --glow: 0 0 0 1px rgba(139,92,246,.10), 0 8px 34px -14px rgba(139,92,246,.35);
-    --focus-ring: 0 0 0 2px #07090d, 0 0 0 4px rgba(139,92,246,.6);
-    /* 4/8-based spacing is provided by Tailwind's scale; radii/shadows here. */
-    --shadow-card: 0 1px 0 rgba(255,255,255,.015) inset, 0 10px 30px -22px rgba(0,0,0,.9);
+    /* Single committed accent — amber-500. No competing hues. */
+    --accent: #f59e0b;
+    --accent-2: #d97706;
+    --grad-accent: linear-gradient(120deg, #f59e0b 0%, #d97706 100%);
+    --grad-accent-soft: linear-gradient(120deg, rgba(245,158,11,.12), rgba(217,119,6,.06));
+    --glow: 0 0 0 1px rgba(245,158,11,.12), 0 8px 34px -14px rgba(245,158,11,.32);
+    --focus-ring: 0 0 0 2px #050505, 0 0 0 4px rgba(245,158,11,.55);
+    --shadow-card: 0 1px 0 rgba(255,255,255,.02) inset, 0 10px 30px -22px rgba(0,0,0,.9);
   }
 
   body {
     @apply text-text-primary font-sans;
     margin: 0;
     padding: 0;
-    background-color: #07090d;
-    /* One faint accent wash + a neutral depth gradient — calm, not busy. */
+    background-color: #050505;
+    /* One faint amber wash up top + a warm depth gradient below — a dim CRT
+       idle glow, calm rather than busy. */
     background-image:
-      radial-gradient(70rem 60rem at 100% -10%, rgba(139,92,246,.06), transparent 60%),
-      radial-gradient(60rem 50rem at -10% 110%, rgba(99,102,241,.04), transparent 55%);
+      radial-gradient(70rem 46rem at 50% -12%, rgba(245,158,11,.055), transparent 62%),
+      radial-gradient(56rem 44rem at -12% 112%, rgba(217,119,6,.035), transparent 58%);
     background-attachment: fixed;
     min-height: 100vh;
   }
@@ -44,29 +75,29 @@
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: #2a3341;
+    background: #2b2823;
     border-radius: 9999px;
     border: 3px solid transparent;
     background-clip: padding-box;
   }
-  ::-webkit-scrollbar-thumb:hover { background: #3a4658; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #413c33; background-clip: padding-box; }
 
-  ::selection { @apply text-text-primary; background: rgba(139,92,246,.28); }
+  ::selection { color: #140b00; background: rgba(245,158,11,.85); }
 
   /* Accessible keyboard focus everywhere (mouse clicks don't trigger it). */
   :focus-visible {
     outline: none;
     box-shadow: var(--focus-ring);
-    border-radius: 8px;
+    border-radius: 4px;
   }
 }
 
 @layer components {
   /* ── Cards ────────────────────────────────────────────────────── */
   .card {
-    @apply rounded-lg;
-    background: #0f1218;
-    border: 1px solid #1e2530;
+    @apply rounded;
+    background: #0b0b0a;
+    border: 1px solid #262421;
     box-shadow: var(--shadow-card);
   }
 
@@ -74,81 +105,107 @@
     @apply card transition-all duration-200;
   }
   .card-hover:hover {
-    border-color: #2a3341;
-    box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 14px 34px -22px rgba(0,0,0,.95);
+    border-color: #3a362e;
+    box-shadow: 0 0 0 1px rgba(245,158,11,.10), 0 14px 34px -22px rgba(0,0,0,.95);
   }
+
+  /* Terminal KPI card — amber corner brackets (top-left / bottom-right). */
+  .card-term {
+    @apply card relative;
+  }
+  .card-term::before, .card-term::after {
+    content: '';
+    position: absolute;
+    width: 10px; height: 10px;
+    pointer-events: none;
+    opacity: .55;
+    transition: opacity .2s ease;
+  }
+  .card-term::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid var(--accent);
+    border-left: 1px solid var(--accent);
+  }
+  .card-term::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+  }
+  .card-term:hover::before, .card-term:hover::after { opacity: 1; }
 
   /* ── Buttons ──────────────────────────────────────────────────── */
   .btn {
-    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer select-none disabled:opacity-40 disabled:cursor-not-allowed;
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-all duration-150 cursor-pointer select-none disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .btn-primary {
     @apply btn active:scale-[.98];
-    color: #04140f;
+    color: #140b00;
     background-image: var(--grad-accent);
-    box-shadow: 0 4px 14px -8px rgba(139,92,246,.55);
-    font-weight: 600;
+    box-shadow: 0 4px 14px -8px rgba(245,158,11,.55);
+    font-weight: 700;
   }
-  .btn-primary:hover { filter: brightness(1.08); box-shadow: 0 6px 18px -8px rgba(139,92,246,.7); }
+  .btn-primary:hover { filter: brightness(1.1); box-shadow: 0 6px 18px -8px rgba(245,158,11,.7); }
   .btn-secondary {
     @apply btn text-text-primary active:scale-[.98];
-    background: #151a22;
-    border: 1px solid #2a3341;
+    background: #141412;
+    border: 1px solid #3a362e;
   }
-  .btn-secondary:hover { background: #1b212b; border-color: #3a4658; }
+  .btn-secondary:hover { background: #1c1b18; border-color: #4a4438; }
   .btn-ghost { @apply btn text-text-secondary hover:bg-white/[.05] hover:text-text-primary active:scale-[.98]; }
   .btn-danger {
     @apply btn active:scale-[.98];
     color: #fecdd3;
-    background: rgba(244,63,94,.10);
-    border: 1px solid rgba(244,63,94,.28);
+    background: rgba(239,68,68,.10);
+    border: 1px solid rgba(239,68,68,.28);
   }
-  .btn-danger:hover { background: rgba(244,63,94,.16); }
+  .btn-danger:hover { background: rgba(239,68,68,.16); }
 
   /* ── Inputs ───────────────────────────────────────────────────── */
   .input {
-    @apply w-full px-3 py-2 rounded-lg text-sm text-text-primary placeholder-text-muted outline-none transition-all duration-150;
-    background: #0c0f14;
-    border: 1px solid #2a3341;
+    @apply w-full px-3 py-2 rounded text-sm text-text-primary placeholder-text-muted outline-none transition-all duration-150;
+    background: #080807;
+    border: 1px solid #3a362e;
   }
-  .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139,92,246,.16); }
+  .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(245,158,11,.14); }
   .label { @apply block text-xs font-medium text-text-secondary mb-1.5; }
 
   /* ── Badges (severity always carries its text label — never color alone) ── */
-  .badge { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold; }
-  .badge-critical { @apply badge; color:#fecdd3; background:rgba(244,63,94,.16); border:1px solid rgba(244,63,94,.32); }
-  .badge-high     { @apply badge; color:#fed7aa; background:rgba(249,115,22,.15); border:1px solid rgba(249,115,22,.30); }
-  .badge-medium   { @apply badge; color:#fde68a; background:rgba(234,179,8,.15); border:1px solid rgba(234,179,8,.30); }
-  .badge-low      { @apply badge; color:#bbf7d0; background:rgba(34,197,94,.15); border:1px solid rgba(34,197,94,.30); }
-  .badge-info     { @apply badge; color:#bae6fd; background:rgba(99,102,241,.15); border:1px solid rgba(99,102,241,.30); }
-  .badge-neutral  { @apply badge text-text-secondary; background:rgba(255,255,255,.04); border:1px solid #2a3341; }
+  .badge { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-xs font-semibold; }
+  .badge-critical { @apply badge; color:#fecaca; background:rgba(239,68,68,.15); border:1px solid rgba(239,68,68,.32); }
+  .badge-high     { @apply badge; color:#fed7aa; background:rgba(249,115,22,.14); border:1px solid rgba(249,115,22,.30); }
+  .badge-medium   { @apply badge; color:#fde68a; background:rgba(234,179,8,.13); border:1px solid rgba(234,179,8,.30); }
+  .badge-low      { @apply badge; color:#bbf7d0; background:rgba(34,197,94,.13); border:1px solid rgba(34,197,94,.30); }
+  .badge-info     { @apply badge; color:#bae6fd; background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.30); }
+  .badge-neutral  { @apply badge text-text-secondary; background:rgba(255,255,255,.04); border:1px solid #3a362e; }
 
   /* ── Tables ───────────────────────────────────────────────────── */
   .table-header {
-    @apply text-[11px] font-semibold text-text-muted uppercase tracking-wider px-4 py-2.5 text-left;
-    background: #0f1218;
+    @apply text-[11px] font-semibold text-text-muted uppercase tracking-wider px-4 py-2.5 text-left font-mono;
+    background: #0b0b0a;
     position: sticky; top: 0; z-index: 1;
   }
   .table-cell { @apply px-4 py-2.5 text-sm text-text-secondary; }
   /* rows fade in softly as results stream in — subtle, GPU-cheap */
-  .table-row { @apply transition-colors duration-100; border-bottom:1px solid #161c24; animation: rowIn .22s ease both; }
-  .table-row:hover { background: rgba(255,255,255,.025); }
+  .table-row { @apply transition-colors duration-100; border-bottom:1px solid #191817; animation: rowIn .22s ease both; }
+  .table-row:hover { background: rgba(245,158,11,.03); }
 
   .stat-card { @apply card p-4 flex flex-col gap-1; }
   .page-header { @apply flex items-center justify-between mb-6; }
   .page-title { @apply text-2xl font-bold text-text-primary tracking-tight; }
-  .section-title { @apply text-sm font-semibold text-text-secondary uppercase tracking-wider mb-3; }
-  .code { @apply font-mono text-xs px-1.5 py-0.5 rounded text-accent-hover; background:rgba(139,92,246,.10); }
-  .divider { @apply my-4; border-top:1px solid rgba(255,255,255,.07); }
-  .skeleton { @apply animate-pulse rounded; background:rgba(255,255,255,.06); }
+  /* Section labels read like terminal comments: "// FINDINGS BY SEVERITY" */
+  .section-title { @apply text-[11px] font-semibold text-text-muted uppercase tracking-[.14em] mb-3 font-mono; }
+  .section-title::before { content: '// '; color: var(--accent); }
+  .code { @apply font-mono text-xs px-1.5 py-0.5 rounded-sm text-accent-hover; background:rgba(245,158,11,.10); }
+  .divider { @apply my-4; border-top:1px solid rgba(255,255,255,.06); }
+  .skeleton { @apply animate-pulse rounded-sm; background:rgba(255,255,255,.05); }
 
   .dot-online  { @apply w-2 h-2 rounded-full bg-severity-low animate-pulse; box-shadow:0 0 8px rgba(34,197,94,.7); }
   .dot-offline { @apply w-2 h-2 rounded-full bg-text-muted; }
-  .dot-running { @apply w-2 h-2 rounded-full bg-accent animate-pulse; box-shadow:0 0 8px rgba(139,92,246,.75); }
-  .dot-error   { @apply w-2 h-2 rounded-full bg-severity-critical; box-shadow:0 0 8px rgba(244,63,94,.75); }
+  .dot-running { @apply w-2 h-2 rounded-full bg-accent animate-pulse; box-shadow:0 0 8px rgba(245,158,11,.75); }
+  .dot-error   { @apply w-2 h-2 rounded-full bg-severity-critical; box-shadow:0 0 8px rgba(239,68,68,.75); }
 
   /* nav item active accent bar */
-  .nav-item { @apply relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150; }
+  .nav-item { @apply relative flex items-center gap-3 px-3 py-2 rounded text-sm font-medium transition-all duration-150; }
 }
 
 @layer utilities {
@@ -159,17 +216,46 @@
   .glow-accent { box-shadow: var(--glow); }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  /* Ambient accent wash — single hue, restrained (calm console, not a party). */
+
+  /* Ambient accent wash — single amber hue, restrained (dim CRT idle, not a party). */
   .aurora { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
   .aurora::before, .aurora::after {
     content: ''; position: absolute; width: 40rem; height: 40rem; border-radius: 9999px;
-    filter: blur(100px); opacity: .12;
+    filter: blur(110px); opacity: .07;
   }
-  .aurora::before { background:#8b5cf6; top:-16rem; left:-12rem; animation: drift1 28s ease-in-out infinite; }
-  .aurora::after  { background:#6366f1; bottom:-18rem; right:-12rem; animation: drift2 32s ease-in-out infinite; }
+  .aurora::before { background:#f59e0b; top:-18rem; left:-12rem; animation: drift1 30s ease-in-out infinite; }
+  .aurora::after  { background:#d97706; bottom:-20rem; right:-12rem; animation: drift2 34s ease-in-out infinite; }
+
+  /* CRT scanlines — static, GPU-free, barely-there texture over the void.
+     Pair with .aurora in Shell/Login. Toggleable via reduced-motion (below). */
+  .scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px, transparent 2px,
+      rgba(255,255,255,.013) 3px, transparent 4px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  /* Blinking block cursor — the terminal heartbeat. Use: <span class="term-cursor"/> */
+  .term-cursor {
+    @apply inline-block w-[.55em] h-[1.05em] align-[-.15em] bg-accent;
+    animation: blink 1.1s steps(2, start) infinite;
+  }
+
+  /* One-shot typing line (login banner). Width hardcodes to ~38ch of the
+     12px mono line; container must be nowrap + overflow-hidden. */
+  .type-line {
+    display: inline-block;
+    white-space: nowrap;
+    overflow: hidden;
+    max-width: 0;
+    animation: typing 1.6s steps(44, end) .35s forwards;
+  }
 }
 
-/* Respect reduced-motion: kill ambient drift + row/shimmer animations. */
+/* Respect reduced-motion: kill ambient drift + row/shimmer/cursor animations. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
@@ -177,6 +263,8 @@
     transition-duration: 0.001ms !important;
   }
   .aurora::before, .aurora::after { animation: none; }
+  .term-cursor { animation: none; }
+  .type-line { animation: none; max-width: 100%; }
 }
 
 @keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(6rem,4rem)} }
@@ -186,20 +274,22 @@
 @keyframes fadeIn { from{opacity:0} to{opacity:1} }
 @keyframes slideUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
 @keyframes rowIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }
+@keyframes blink { to { visibility: hidden; } }
+@keyframes typing { to { max-width: 100%; } }
 
 /* shimmer sweep for progress/loading strips */
 @keyframes shimmer { 100% { transform: translateX(100%); } }
 .shimmer { position: relative; overflow: hidden; }
 .shimmer::after {
   content: ''; position: absolute; inset: 0; transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+  background: linear-gradient(90deg, transparent, rgba(245,158,11,.09), transparent);
   animation: shimmer 1.6s infinite;
 }
 
 /* soft breathing glow for anything actively scanning */
 @keyframes glowPulse {
-  0%,100% { box-shadow: 0 0 0 0 rgba(139,92,246,.0); }
-  50%     { box-shadow: 0 0 14px -2px rgba(139,92,246,.5); }
+  0%,100% { box-shadow: 0 0 0 0 rgba(245,158,11,.0); }
+  50%     { box-shadow: 0 0 14px -2px rgba(245,158,11,.5); }
 }
 .animate-glow { animation: glowPulse 2.2s ease-in-out infinite; }
 

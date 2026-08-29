@@ -10,6 +10,9 @@ import type { Task } from '../types'
 const dot: Record<string,string> = { running:'bg-accent animate-pulse', finished:'bg-severity-low', failed:'bg-severity-critical', pending:'bg-text-muted', cancelled:'bg-border-strong' }
 const tc: Record<string,string> = { running:'text-accent', finished:'text-severity-low', failed:'text-severity-critical', pending:'text-text-muted', cancelled:'text-text-muted' }
 
+// Terminal-style status tags, e.g. "[running]" — reads like a log level.
+const tt = (s: string) => `[${s}]`
+
 export default function Tasks() {
   const [taskList, setTaskList] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
@@ -63,10 +66,11 @@ export default function Tasks() {
   }
 
   return (
-    <div className="flex gap-4" style={{height:'calc(100vh - 9rem)'}}>
-      <div className="flex flex-col w-72 shrink-0">
+    <div className="flex flex-col lg:flex-row gap-4 lg:h-[calc(100vh-9rem)]">
+      {/* Task list — full width column on mobile, fixed rail on desktop. */}
+      <div className="flex flex-col w-full lg:w-72 shrink-0 h-[46vh] lg:h-auto min-h-0">
         <div className="flex items-center justify-between mb-3">
-          <h1 className="text-xl font-semibold">Tasks</h1>
+          <h1 className="text-xl font-bold">Tasks</h1>
           <Button size="sm" variant="ghost" onClick={() => load(statusFilter)}>↻</Button>
         </div>
         <div className="flex gap-2 mb-3">
@@ -96,7 +100,7 @@ export default function Tasks() {
                 <div className="flex items-center gap-2 mb-1">
                   <span className={cn('w-2 h-2 rounded-full shrink-0', dot[task.status] || 'bg-text-muted')}/>
                   <span className="text-xs font-medium truncate flex-1" title={task.target_domain}>{task.name || task.target_domain || 'Unknown'}</span>
-                  <span className={cn('text-xs', tc[task.status])}>{task.status}</span>
+                  <span className={cn('text-xs font-mono', tc[task.status])}>{tt(task.status)}</span>
                 </div>
                 <p className="text-xs text-text-muted ml-4">{task.modules?.join(', ') || 'all'}</p>
                 {task.current_module && <p className="text-xs text-accent ml-4 mt-0.5">{task.current_module}</p>}
@@ -116,7 +120,7 @@ export default function Tasks() {
             ))}
         </div>
       </div>
-      <div className="flex-1 card overflow-hidden" style={{padding:0}}>
+      <div className="flex-1 card overflow-hidden min-h-[50vh] lg:min-h-0" style={{padding:0}}>
         {selected ? (
           <div className="flex flex-col h-full">
             <div className="px-4 py-3 border-b border-border flex items-center gap-3">

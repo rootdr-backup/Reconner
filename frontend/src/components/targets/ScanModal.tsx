@@ -341,20 +341,21 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           </div>
         )}
 
-        {/* All modules visible at once: compact grouped 2/3/4-column grid so the
-            full 30+ module roster fits without hunting through a long scroll. */}
-        <div className="max-h-[52vh] overflow-y-auto pr-1 space-y-4 no-scrollbar">
+        {/* All modules visible at once: compact grouped responsive grid —
+            1 col on phones, 2 on tablets, 3 on wide screens inside the xl modal.
+            Every chip truncates its label so nothing can push out of its cell. */}
+        <div className="max-h-[52vh] overflow-y-auto pr-1 space-y-4">
           {GROUPS.map(group => {
             const mods = MODULES.filter(m => m.group === group)
             const on = mods.filter(m => selected.has(m.id)).length
             return (
               <div key={group}>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">{group}</span>
-                  <span className="text-[10px] text-text-muted">{on}/{mods.length}</span>
-                  <span className="flex-1 h-px bg-white/[.06]" />
+                  <span className="text-[11px] font-semibold uppercase tracking-[.14em] text-text-muted font-mono">// {group}</span>
+                  <span className="text-[10px] text-text-muted font-mono">{on}/{mods.length}</span>
+                  <span className="flex-1 h-px bg-white/[.05]" />
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-1.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-1.5">
                   {mods.map(m => {
                     const sel = selected.has(m.id)
                     return (
@@ -369,9 +370,9 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
                         }`}
                       >
                         <ModuleIcon module={m.id} size={20} />
-                        <span className="text-xs font-medium truncate flex-1">{m.label}</span>
+                        <span className="text-xs font-medium truncate flex-1 min-w-0">{m.label}</span>
                         <span className={`w-3.5 h-3.5 rounded-full grid place-items-center shrink-0 text-[9px] ${
-                          sel ? 'bg-accent text-white' : 'border border-white/15'
+                          sel ? 'bg-accent text-[#140b00] font-bold' : 'border border-white/15'
                         }`}>{sel ? '✓' : ''}</span>
                       </button>
                     )
@@ -382,9 +383,10 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           })}
         </div>
 
-        <div className="flex justify-end gap-2 pt-3 border-t border-white/[.06]">
+        <div className="flex flex-wrap justify-end gap-2 pt-3 border-t border-white/[.06]">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={loading} disabled={selected.size === 0 || !idorReady} onClick={handleStart}
+            className="w-full sm:w-auto justify-center whitespace-nowrap"
             title={!idorReady ? 'IDOR/BOLA needs two identities — paste User A and User B above' : undefined}>
             ▶ Start Scan ({selected.size})
           </Button>

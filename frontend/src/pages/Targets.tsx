@@ -179,16 +179,16 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">
+          <h1 className="text-xl font-bold">
             {filterKind === 'web' ? 'Web Targets' : filterKind === 'network' ? 'Network Targets' : 'Targets'}
           </h1>
-          <p className="text-xs text-text-muted">
+          <p className="text-xs text-text-muted font-mono">
             {kindTargets.length} target{kindTargets.length === 1 ? '' : 's'} · domains &amp; subdomains — web application scanning
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {kindTargets.length > 0 && (
             <Button size="sm" variant="ghost" onClick={() => { setSelectMode(m => !m); setSelected(new Set()) }}>
               {selectMode ? 'Done' : 'Select'}
@@ -262,6 +262,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
                       <Button
                         size="sm"
                         variant="primary"
+                        className="whitespace-nowrap"
                         onClick={e => { e.stopPropagation(); setScanTarget(t) }}
                       >
                         Scan

@@ -52,11 +52,13 @@ export const Modal = ({ open, onClose, title, children, width='md' }: { open: bo
   const w = { sm:'max-w-sm', md:'max-w-md', lg:'max-w-2xl', xl:'max-w-4xl' }
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
-      <div className={cn('relative bg-surface-2 border border-border rounded-xl shadow-2xl w-full', w[width])}>
-        {title && <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border"><h2 className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors shrink-0">✕</button></div>}
-        <div className="p-5">{children}</div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4">
+      <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={onClose}/>
+      {/* Column + max-height keeps the header pinned and the BODY scrolling,
+          so forms/buttons can never fall out of the viewport on small screens. */}
+      <div className={cn('relative bg-surface-2 border border-border rounded-lg shadow-2xl w-full max-h-[92vh] flex flex-col', w[width])}>
+        {title && <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 border-b border-border shrink-0"><h2 className="text-sm sm:text-base font-semibold truncate min-w-0 font-mono" title={title}><span className="text-accent mr-1.5">$</span>{title}</h2><button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors shrink-0 text-lg leading-none px-1">✕</button></div>}
+        <div className="p-4 sm:p-5 overflow-y-auto">{children}</div>
       </div>
     </div>
   )
@@ -158,10 +160,11 @@ export const CopyButton = ({ text }: { text: string }) => {
 }
 
 export const StatCard = ({ label, value, color }: { label: string; value: string|number; color?: string }) => (
-  <div className="card-hover p-4 relative overflow-hidden group">
-    <span className="absolute inset-x-0 top-0 h-px opacity-60" style={{ backgroundImage: 'var(--grad-accent)' }} />
-    <p className="text-xs text-text-muted mb-1 uppercase tracking-wider">{label}</p>
-    <p className={cn('text-3xl font-bold tabular-nums tracking-tight', color || 'text-text-primary')}>{value}</p>
+  <div className="card-term p-4 relative overflow-hidden group">
+    <p className="text-[10px] text-text-muted mb-1 uppercase tracking-[.14em] font-mono truncate">
+      <span className="text-accent mr-1">$</span>{label}
+    </p>
+    <p className={cn('text-2xl sm:text-3xl font-bold tabular-nums tracking-tight font-mono', color || 'text-text-primary')}>{value}</p>
   </div>
 )
 

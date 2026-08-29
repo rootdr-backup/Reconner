@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { cn } from '../../lib/utils'
 import { useAuthStore } from '../../store/auth'
+import { useUIStore } from '../../store/ui'
 import { dashboard } from '../../lib/api'
 
 // Donation options. Iranian users have a local gateway; everyone else can send
@@ -40,6 +41,7 @@ type NavGroup = { label: string; items: NavItem[] }
 
 export const Sidebar = () => {
   const { user, logout } = useAuthStore()
+  const { sidebarOpen, setSidebarOpen } = useUIStore()
   const navigate = useNavigate()
   const [donateOpen, setDonateOpen] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
@@ -58,13 +60,13 @@ export const Sidebar = () => {
   }, [])
 
   const groups: NavGroup[] = [
-    { label: 'Overview', items: [{ to: '/', label: 'Dashboard', Icon: Icons.dashboard }] },
-    { label: 'Scanning', items: [
+    { label: 'overview', items: [{ to: '/', label: 'Dashboard', Icon: Icons.dashboard }] },
+    { label: 'scanning', items: [
       { to: '/targets', label: 'Targets', Icon: Icons.targets, badge: targetsN > 0 ? { text: String(targetsN) } : null },
       { to: '/findings', label: 'Findings', Icon: Icons.findings },
       { to: '/tasks', label: 'Scans', Icon: Icons.tasks, badge: runningN > 0 ? { text: String(runningN), live: true } : null },
     ] },
-    { label: 'System', items: [{ to: '/system', label: 'Settings', Icon: Icons.system }] },
+    { label: 'system', items: [{ to: '/system', label: 'Settings', Icon: Icons.system }] },
   ]
 
   const copyAddress = async (chain: string, address: string) => {
@@ -77,44 +79,55 @@ export const Sidebar = () => {
     setTimeout(() => setCopied((c) => (c === chain ? null : c)), 1500)
   }
   return (
-    <aside className="relative z-10 flex flex-col w-60 shrink-0 h-screen sticky top-0
-      border-r border-border bg-surface-1/95 backdrop-blur-xl">
+    <aside className={cn(
+      'fixed lg:sticky inset-y-0 left-0 top-0 z-40 flex flex-col w-64 shrink-0 h-screen',
+      'border-r border-border bg-surface-1 backdrop-blur-xl transition-transform duration-200 ease-out',
+      sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
+    )}>
       <div className="flex items-center gap-3 px-5 h-16 border-b border-border">
-        <div className="grid place-items-center w-9 h-9 rounded-xl shrink-0 glow-accent"
-          style={{ backgroundImage: 'var(--grad-accent)' }}>
-          <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+        <div className="grid place-items-center w-9 h-9 rounded shrink-0 bg-black border border-accent/50 glow-accent">
+          <svg className="w-5 h-5 text-accent" viewBox="0 0 24 24" fill="none">
             <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.9" />
             <path d="M12 4v4M12 16v4M4 12h4M16 12h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
             <circle cx="12" cy="12" r="2" fill="currentColor" />
           </svg>
         </div>
-        <div className="leading-tight">
-          <div className="text-[15px] font-bold tracking-tight text-gradient">Reconner</div>
-          <div className="text-[10px] text-text-muted tracking-wider uppercase">Watchtower</div>
+        <div className="leading-tight min-w-0">
+          <div className="text-[15px] font-bold tracking-tight text-text-primary">Reconner</div>
+          <div className="text-[10px] text-text-muted font-mono tracking-wide truncate">root@watchtower:~$</div>
         </div>
+        {/* Close drawer (mobile only) */}
+        <button onClick={() => setSidebarOpen(false)} title="Close menu"
+          className="lg:hidden ml-auto p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-white/5 transition-colors">
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       <nav className="flex-1 px-3 py-4 space-y-4 overflow-y-auto no-scrollbar">
         {groups.map(group => (
           <div key={group.label}>
-            <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted/80">{group.label}</p>
+            <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-[.16em] text-text-muted/70 font-mono">
+              <span className="text-accent/70">//</span> {group.label}
+            </p>
             <div className="space-y-0.5">
               {group.items.map(({ to, label, Icon, badge }) => (
                 <NavLink key={to} to={to} end={to === '/'}
+                  onClick={() => setSidebarOpen(false)}
                   className={({ isActive }) => cn('nav-item group',
                     isActive ? 'text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-white/[.04]'
                   )}>
                   {({ isActive }) => (
                     <>
-                      {isActive && <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full"
-                        style={{ backgroundImage: 'var(--grad-accent)' }} />}
-                      <span className={cn('absolute inset-0 rounded-lg -z-0', isActive && 'bg-accent-muted ring-1 ring-accent/20')} />
+                      {isActive && <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full bg-accent" />}
+                      <span className={cn('absolute inset-0 rounded -z-0', isActive && 'bg-accent-muted ring-1 ring-accent/25')} />
                       <Icon className={cn('relative w-[18px] h-[18px] shrink-0 transition-colors',
-                        isActive ? 'text-accent-hover' : 'text-text-muted group-hover:text-text-secondary')} />
+                        isActive ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary')} />
                       <span className="relative flex-1">{label}</span>
                       {badge && (
-                        <span className={cn('relative flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold tabular-nums',
-                          badge.live ? 'bg-accent-muted text-accent-hover' : 'bg-white/[.06] text-text-secondary')}>
+                        <span className={cn('relative flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-[10px] font-semibold tabular-nums font-mono',
+                          badge.live ? 'bg-accent-muted text-accent' : 'bg-white/[.06] text-text-secondary')}>
                           {badge.live && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />}
                           {badge.text}
                         </span>
@@ -133,7 +146,7 @@ export const Sidebar = () => {
       <div className="px-3 pt-2">
         <button type="button" onClick={() => setDonateOpen((o) => !o)}
           title="Support RootDR — donate"
-          className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-medium
+          className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded text-xs font-medium
             text-text-secondary border border-white/[.08] hover:border-accent/40 hover:text-accent
             hover:bg-accent/[.06] transition-colors">
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -143,19 +156,19 @@ export const Sidebar = () => {
         </button>
 
         {donateOpen && (
-          <div className="mt-2 p-2.5 rounded-lg border border-white/[.08] bg-black/30 space-y-2">
+          <div className="mt-2 p-2.5 rounded border border-white/[.08] bg-black/40 space-y-2">
             <a href="https://daramet.com/RootDR" target="_blank" rel="noreferrer"
-              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md text-[11px]
+              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm text-[11px]
                 text-text-secondary hover:text-accent hover:bg-accent/[.06] transition-colors">
               <span>Iranian gateway</span>
               <span className="text-accent">daramet.com/RootDR ↗</span>
             </a>
             <div className="pt-1 border-t border-white/[.06]">
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wide text-text-muted">Crypto (tap to copy)</div>
+              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wide text-text-muted font-mono">Crypto (tap to copy)</div>
               {CRYPTO_DONATIONS.map(({ chain, address }) => (
                 <button key={chain} type="button" onClick={() => copyAddress(chain, address)}
                   title={address}
-                  className="w-full flex flex-col items-start gap-0.5 px-2 py-1.5 rounded-md text-left
+                  className="w-full flex flex-col items-start gap-0.5 px-2 py-1.5 rounded-sm text-left
                     hover:bg-accent/[.06] transition-colors group">
                   <span className="flex items-center justify-between w-full text-[11px] text-text-secondary">
                     <span>{chain}</span>
@@ -172,18 +185,17 @@ export const Sidebar = () => {
       </div>
 
       <div className="border-t border-white/[.06] p-3 mt-2">
-        <div className="flex items-center gap-3 px-2 py-2 rounded-lg">
-          <div className="grid place-items-center w-8 h-8 rounded-full text-xs font-bold text-white shrink-0"
-            style={{ backgroundImage: 'var(--grad-accent)' }}>
+        <div className="flex items-center gap-3 px-2 py-2 rounded">
+          <div className="grid place-items-center w-8 h-8 rounded-sm text-xs font-bold shrink-0 bg-accent text-text-inverse">
             {(user?.username || 'A').slice(0, 1).toUpperCase()}
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-xs font-semibold truncate">{user?.username || 'admin'}</div>
-            <div className="text-[10px] text-text-muted">signed in</div>
+            <div className="text-[10px] text-text-muted font-mono">session active</div>
           </div>
           <button onClick={() => logout().then(() => navigate('/login'))}
             title="Logout"
-            className="text-text-muted hover:text-severity-critical transition-colors p-1.5 rounded-md hover:bg-white/5">
+            className="text-text-muted hover:text-severity-critical transition-colors p-1.5 rounded-sm hover:bg-white/5">
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
               strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />

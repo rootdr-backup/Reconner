@@ -15,10 +15,10 @@ const sevDot: Record<string, string> = {
 }
 
 // Static labels for top-level route segments; `/targets/:id` resolves to the
-// target name via a tiny in-memory cache so breadcrumbs read like
-// "Targets › example.com" instead of a raw UUID.
+// target name via a tiny in-memory cache so breadcrumbs read like a terminal
+// path: "~/targets/example.com" instead of a raw UUID.
 const SEGMENT_LABEL: Record<string, string> = {
-  targets: 'Targets', findings: 'Findings', tasks: 'Tasks', system: 'System',
+  targets: 'targets', findings: 'findings', tasks: 'tasks', system: 'system',
 }
 
 function useBreadcrumbs(): { label: string; to: string }[] {
@@ -35,7 +35,7 @@ function useBreadcrumbs(): { label: string; to: string }[] {
     return () => { alive = false }
   }, [targetId])
 
-  const crumbs: { label: string; to: string }[] = [{ label: 'Dashboard', to: '/' }]
+  const crumbs: { label: string; to: string }[] = []
   if (parts[0] && SEGMENT_LABEL[parts[0]]) crumbs.push({ label: SEGMENT_LABEL[parts[0]], to: `/${parts[0]}` })
   if (targetId) crumbs.push({ label: targetName || '…', to: `/targets/${targetId}` })
   return crumbs
@@ -70,24 +70,22 @@ function GlobalSearch() {
   const go = (t: Target) => { setOpen(false); setQ(''); nav(`/targets/${t.id}`) }
 
   return (
-    <div className="relative hidden sm:block" ref={boxRef}>
-      <div className="flex items-center gap-2 w-64 px-3 py-1.5 rounded-lg bg-surface-alt border border-border focus-within:border-accent/50 transition-colors">
-        <svg className="w-4 h-4 text-text-muted shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-          <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
-        </svg>
+    <div className="relative hidden md:block" ref={boxRef}>
+      <div className="flex items-center gap-2 w-56 lg:w-64 px-3 py-1.5 rounded bg-surface-alt border border-border focus-within:border-accent/50 transition-colors">
+        <span className="text-accent font-mono text-xs shrink-0">/</span>
         <input value={q} onFocus={() => { loadOnce(); setOpen(true) }} onChange={e => { setQ(e.target.value); setOpen(true) }}
           onKeyDown={e => { if (e.key === 'Enter' && results[0]) go(results[0]); if (e.key === 'Escape') setOpen(false) }}
-          placeholder="Search targets…" className="bg-transparent outline-none text-sm text-text-primary placeholder-text-muted w-full" />
+          placeholder="grep targets…" className="bg-transparent outline-none text-sm text-text-primary placeholder-text-muted w-full font-mono" />
       </div>
       {open && debounced.trim() && (
-        <div className="absolute left-0 mt-2 w-80 max-h-80 overflow-y-auto rounded-xl border border-border bg-surface-2 shadow-2xl z-50">
+        <div className="absolute left-0 mt-2 w-80 max-w-[calc(100vw-2rem)] max-h-80 overflow-y-auto rounded border border-border bg-surface-2 shadow-2xl z-50">
           {results.length === 0
             ? <p className="text-xs text-text-muted text-center py-6">No targets match “{debounced.trim()}”.</p>
             : results.map(t => (
               <button key={t.id} onClick={() => go(t)}
-                className="w-full text-left px-4 py-2.5 border-b border-border/60 last:border-0 hover:bg-white/[.04] transition-colors">
+                className="w-full text-left px-4 py-2.5 border-b border-border/60 last:border-0 hover:bg-accent/[.06] transition-colors">
                 <span className="block text-sm text-text-primary truncate">{t.name || t.domain}</span>
-                {t.name && <span className="block text-[11px] text-text-muted truncate">{t.domain}</span>}
+                {t.name && <span className="block text-[11px] text-text-muted truncate font-mono">{t.domain}</span>}
               </button>
             ))}
         </div>
@@ -98,7 +96,7 @@ function GlobalSearch() {
 
 export const TopBar = () => {
   const [connected, setConnected] = useState(false)
-  const { toasts, removeToast } = useUIStore()
+  const { toasts, removeToast, setSidebarOpen } = useUIStore()
   const navigate = useNavigate()
   const crumbs = useBreadcrumbs()
 
@@ -144,26 +142,36 @@ export const TopBar = () => {
 
   return (
     <>
-      <header className="h-16 flex items-center justify-between gap-4 px-6 border-b border-border bg-surface-1/70 backdrop-blur-xl shrink-0">
-        {/* Breadcrumbs */}
-        <nav className="flex items-center gap-1.5 text-sm min-w-0" aria-label="Breadcrumb">
+      <header className="h-16 flex items-center justify-between gap-2 sm:gap-4 px-3 sm:px-6 border-b border-border bg-surface-1/80 backdrop-blur-xl shrink-0">
+        {/* Mobile menu button — opens the off-canvas sidebar drawer */}
+        <button onClick={() => setSidebarOpen(true)} title="Open menu"
+          className="lg:hidden p-2 -ml-1 rounded text-text-secondary hover:text-text-primary hover:bg-white/[.06] transition-colors shrink-0">
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+
+        {/* Terminal-path breadcrumbs: ~/targets/example.com */}
+        <nav className="flex items-center gap-0.5 text-[13px] min-w-0 font-mono" aria-label="Breadcrumb">
+          <span className="text-text-muted shrink-0">~</span>
+          {crumbs.length === 0 && <span className="text-text-muted/60 shrink-0">/</span>}
           {crumbs.map((c, i) => (
-            <span key={c.to} className="flex items-center gap-1.5 min-w-0">
-              {i > 0 && <span className="text-text-muted/60 shrink-0">›</span>}
+            <span key={c.to} className="flex items-center gap-0.5 min-w-0">
+              <span className="text-text-muted/50 shrink-0">/</span>
               {i === crumbs.length - 1
-                ? <span className="text-text-primary font-medium truncate">{c.label}</span>
+                ? <span className="text-accent font-medium truncate">{c.label}</span>
                 : <Link to={c.to} className="text-text-secondary hover:text-text-primary transition-colors truncate">{c.label}</Link>}
             </span>
           ))}
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           <GlobalSearch />
 
           {/* Notifications bell */}
           <div className="relative" ref={bellRef}>
             <button onClick={() => setOpen(o => !o)} title="Notifications"
-              className="relative p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.06] transition-colors">
+              className="relative p-2 rounded text-text-muted hover:text-text-primary hover:bg-white/[.06] transition-colors">
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0" />
               </svg>
@@ -175,9 +183,9 @@ export const TopBar = () => {
             </button>
 
             {open && (
-              <div className="absolute right-0 mt-2 w-80 max-h-[70vh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-50">
+              <div className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-1.5rem)] max-h-[70vh] overflow-hidden flex flex-col rounded border border-border bg-surface-2 shadow-2xl z-50">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-                  <span className="text-sm font-semibold">Notifications</span>
+                  <span className="text-sm font-semibold font-mono">// notifications</span>
                   {unread > 0 && (
                     <button onClick={markAllRead} className="text-[11px] text-accent hover:underline">Mark all read</button>
                   )}
@@ -202,19 +210,19 @@ export const TopBar = () => {
             )}
           </div>
 
-          <div className={cn('flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border',
+          <div className={cn('flex items-center gap-2 text-[11px] font-semibold px-2.5 sm:px-3 py-1.5 rounded-full border font-mono tracking-wider',
             connected
               ? 'text-severity-low border-severity-low/25 bg-severity-low/10'
               : 'text-text-muted border-white/10 bg-white/5')}>
             <span className={connected ? 'dot-online' : 'dot-offline'}/>
-            {connected ? 'Live' : 'Offline'}
+            <span>{connected ? 'LIVE' : 'OFFLINE'}</span>
           </div>
         </div>
       </header>
 
-      <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none max-w-[calc(100vw-2.5rem)]">
         {toasts.map(t => (
-          <div key={t.id} className={cn('flex items-start gap-3 px-4 py-3 rounded-lg border shadow-lg text-sm pointer-events-auto min-w-64 max-w-sm',
+          <div key={t.id} className={cn('flex items-start gap-3 px-4 py-3 rounded border shadow-lg text-sm pointer-events-auto min-w-64 max-w-sm',
             t.type === 'success' && 'bg-surface-3 border-severity-low/30 text-severity-low',
             t.type === 'error' && 'bg-surface-3 border-severity-critical/30 text-severity-critical',
             t.type === 'warning' && 'bg-surface-3 border-severity-medium/30 text-severity-medium',
