@@ -171,5 +171,34 @@ func urlHostInScope(ctx context.Context, rawURL string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return hostInScope(ctx, u.Host)
+		return hostInScope(ctx, u.Host)
+}
+
+// filterURLsByHostScope drops URLs whose host is outside the per-asset scope.
+// No-op when host scope is unset (full-target scan).
+func filterURLsByHostScope(ctx context.Context, urls []string) []string {
+	if hostScopeSet(ctx) == nil || len(urls) == 0 {
+		return urls
+	}
+	kept := urls[:0]
+	for _, u := range urls {
+		if urlHostInScope(ctx, u) {
+			kept = append(kept, u)
+		}
+	}
+	return kept
+}
+
+// filterHostsByHostScope drops bare hostnames outside the per-asset scope.
+func filterHostsByHostScope(ctx context.Context, hosts []string) []string {
+	if hostScopeSet(ctx) == nil || len(hosts) == 0 {
+		return hosts
+	}
+	kept := hosts[:0]
+	for _, h := range hosts {
+		if hostInScope(ctx, h) {
+			kept = append(kept, h)
+		}
+	}
+	return kept
 }
