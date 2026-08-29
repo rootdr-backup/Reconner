@@ -205,6 +205,7 @@ func (s *HTTPScanner) fingerprintHosts(ctx context.Context, targetID string, log
 		}
 	}
 	rows.Close()
+	urls = filterURLsByHostScope(ctx, urls)
 	if len(urls) == 0 {
 		return
 	}
