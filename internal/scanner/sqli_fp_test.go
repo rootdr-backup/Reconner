@@ -80,3 +80,34 @@ func TestSQLiErrorBasedRequiresReproduction(t *testing.T) {
 		t.Fatalf("a reproducible DB error must be reported as error-based SQLi, got %q", kind)
 	}
 }
+
+func TestSQLiFullEngineInjectsHeaderAndAuthenticatedCookie(t *testing.T) {
+	withLoopbackAllowed(t)
+	dbErr := "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hasQuote(r.Header.Get("X-Forwarded-For")) || hasQuote(cookieValue(r.Header.Get("Cookie"), "cart")) {
+			w.Write([]byte(dbErr))
+			return
+		}
+		w.Write([]byte("stable normal response"))
+	}))
+	defer srv.Close()
+	s := &SQLiScanner{}
+	auth := map[string]string{"Cookie": "session=secret; cart=7"}
+
+	headerIP := insertionPoint{URL: srv.URL, Param: "X-Forwarded-For", Value: "127.0.0.1", Method: "GET", Location: "header"}
+	if kind, _ := s.quickProbe(context.Background(), headerIP, auth); kind != "error_based" {
+		t.Fatalf("full SQLi engine did not reach header sink: %q", kind)
+	}
+	cookieIP := insertionPoint{URL: srv.URL, Param: "cart", Value: "7", Method: "GET", Location: "cookie"}
+	if kind, _ := s.quickProbe(context.Background(), cookieIP, auth); kind != "error_based" {
+		t.Fatalf("full SQLi engine did not reach authenticated cookie sink: %q", kind)
+	}
+	req, err := buildInjectedRequest(context.Background(), cookieIP, "7'", auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookieValue(req.Header.Get("Cookie"), "session") != "secret" {
+		t.Fatalf("injecting cart cookie dropped auth session: %q", req.Header.Get("Cookie"))
+	}
+}

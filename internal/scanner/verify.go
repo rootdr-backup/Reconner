@@ -43,22 +43,32 @@ func NewVerifyScanner(db *database.DB, exec *tools.Executor, cfg *config.Config,
 func (s *VerifyScanner) verifySQLiWithSQLmap(ctx context.Context, targetID string, logFn LogFunc) {
 	var domain string
 	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
-	// cookie from the baseline identity (if any) for authenticated SQLi.
-	cookie := ""
+	// Full baseline identity (Cookie, Authorization and custom headers) for
+	// authenticated SQLi. Keeping only Cookie made protected JSON/API candidates
+	// unreachable to sqlmap.
+	authHeaders := map[string]string{}
 	var origins []string
 	for _, id := range LoadIdentities(ctx, s.db, targetID, secret.New(s.cfg.SessionSecret)) {
 		if id.Origin != "" {
 			origins = append(origins, id.Origin)
 		}
 		if id.IsBaseline {
-			cookie = id.Headers["Cookie"]
+			for k, v := range id.Headers {
+				authHeaders[k] = v
+			}
 		}
 	}
-	verifier := NewSQLmapVerifier(s.exec, s.cfg, s.logger, domain, origins, cookie)
+	verifier := NewSQLmapVerifier(s.exec, s.cfg, s.logger, domain, origins, authHeaders)
+	verifier.db = s.db
 
+	limit := 100
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, url, method, parameter, location, subtype, confidence FROM candidates
-		 WHERE target_id=? AND type='sqli' AND status IN ('DETECTED','TRIAGED') AND confidence>=85 LIMIT 25`, targetID)
+		 WHERE target_id=? AND type='sqli' AND status IN ('DETECTED','TRIAGED') AND confidence>=70
+		 ORDER BY confidence DESC, created_at ASC LIMIT ?`, targetID, limit)
 	if err != nil {
 		return
 	}
@@ -200,7 +210,8 @@ func (s *VerifyScanner) verifyNucleiCandidates(ctx context.Context, targetID str
 	}
 
 	// Shared verifiers (built once). sqlmap needs the target domain + identity.
-	var domain, cookie string
+	var domain string
+	authHeaders := map[string]string{}
 	var origins []string
 	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
 	for _, id := range LoadIdentities(ctx, s.db, targetID, secret.New(s.cfg.SessionSecret)) {
@@ -208,13 +219,16 @@ func (s *VerifyScanner) verifyNucleiCandidates(ctx context.Context, targetID str
 			origins = append(origins, id.Origin)
 		}
 		if id.IsBaseline {
-			cookie = id.Headers["Cookie"]
+			for k, v := range id.Headers {
+				authHeaders[k] = v
+			}
 		}
 	}
 	xssV := NewXSSContextVerifier(nil)
 	var sqlmapV *SQLmapVerifier
 	if s.cfg != nil && s.cfg.EnableSQLmap {
-		sqlmapV = NewSQLmapVerifier(s.exec, s.cfg, s.logger, domain, origins, cookie)
+		sqlmapV = NewSQLmapVerifier(s.exec, s.cfg, s.logger, domain, origins, authHeaders)
+		sqlmapV.db = s.db
 	}
 
 	verified, rejected := 0, 0

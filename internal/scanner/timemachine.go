@@ -168,9 +168,9 @@ func tmClassify(param string) string {
 func (s *TimeMachineScanner) store(targetID, rawURL, param, value string) bool {
 	id := uuid.New().String()
 	res, err := s.db.Exec(`
-		INSERT INTO parameters (id, target_id, url, parameter, value, source)
-		VALUES (?, ?, ?, ?, ?, 'timemachine')
-		ON CONFLICT(target_id, url, parameter) DO NOTHING
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,?,'timemachine','GET','','query')
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING
 	`, id, targetID, rawURL, param, value)
 	if err != nil {
 		return false

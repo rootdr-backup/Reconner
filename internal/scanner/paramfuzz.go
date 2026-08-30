@@ -435,19 +435,19 @@ func (s *ParamFuzzScanner) selectEndpoints(ctx context.Context, targetID string)
 }
 
 func (s *ParamFuzzScanner) storeParam(targetID, endpoint string, p minedParam) bool {
-	method, contentType := "GET", ""
+	method, contentType, location := "GET", "", "query"
 	switch p.loc {
 	case pfBody:
-		method, contentType = "POST", "application/x-www-form-urlencoded"
+		method, contentType, location = "POST", "application/x-www-form-urlencoded", "body"
 	case pfJSON:
-		method, contentType = "POST", "application/json"
+		method, contentType, location = "POST", "application/json", "json"
 	}
 	id := uuid.New().String()
 	res, err := s.db.Exec(`
-		INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type)
-		VALUES (?, ?, ?, ?, '', 'fuzz', ?, ?)
-		ON CONFLICT(target_id, url, parameter) DO NOTHING
-	`, id, targetID, endpoint, p.name, method, contentType)
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,'','fuzz',?,?,?)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING
+	`, id, targetID, endpoint, p.name, method, contentType, location)
 	if err != nil {
 		return false
 	}

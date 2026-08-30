@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,5 +80,37 @@ func TestHarvestGraphQLEndToEnd(t *testing.T) {
 	joined := strings.Join(params, ",")
 	if !strings.Contains(joined, "login.email") || !strings.Contains(joined, "user.id") {
 		t.Fatalf("expected operation args stored as params, got %v", params)
+	}
+	var loc string
+	if err := db.QueryRow(`SELECT location FROM parameters WHERE target_id=? AND parameter='user.id'`, tid).Scan(&loc); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(loc, "graphql:query:user:id:") {
+		t.Fatalf("GraphQL argument placement contract was not stored: %q", loc)
+	}
+}
+
+func TestGraphQLInjectionBuildsOperationAndSiblings(t *testing.T) {
+	ip := insertionPoint{
+		URL: "https://api.test/graphql", Param: "user.id", Method: "POST", ContentType: "application/json",
+		Location: "graphql:query:user:id:object",
+		Siblings: map[string]string{"user.id": "7", "user.tenant": "acme", "login.email": "ignored@test"},
+	}
+	body, ok := buildGraphQLInjectionBody(ip, "7' AND '1'='1")
+	if !ok {
+		t.Fatal("GraphQL insertion location was rejected")
+	}
+	var doc map[string]string
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatal(err)
+	}
+	q := doc["query"]
+	for _, want := range []string{`query{user(`, `id:"7' AND '1'='1"`, `tenant:"acme"`, `{__typename}}`} {
+		if !strings.Contains(q, want) {
+			t.Errorf("GraphQL replay missing %q: %s", want, q)
+		}
+	}
+	if strings.Contains(q, "login") {
+		t.Fatalf("arguments from another operation leaked into replay: %s", q)
 	}
 }

@@ -156,7 +156,7 @@ func SeedEndpointURL(ctx context.Context, db *database.DB, targetID, rawURL stri
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type, location, is_reflected)
 			VALUES (?, ?, ?, ?, ?, 'endpoint-seed', 'GET', '', 'query', 0)
-			ON CONFLICT(target_id, url, parameter) DO UPDATE SET source='endpoint-seed'`,
+			ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET source='endpoint-seed'`,
 			uuid.New().String(), targetID, norm, name, val); err == nil {
 			seeded = true
 		}
@@ -171,7 +171,7 @@ func SeedEndpointURL(ctx context.Context, db *database.DB, targetID, rawURL stri
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type, location, is_reflected)
 			VALUES (?, ?, ?, ?, ?, 'endpoint-seed', 'GET', '', ?, 0)
-			ON CONFLICT(target_id, url, parameter) DO UPDATE SET source='endpoint-seed', location=excluded.location`,
+			ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET source='endpoint-seed', location=excluded.location`,
 			uuid.New().String(), targetID, norm, pname, valsSeg[k], "path:"+itoa(idx)); err == nil {
 			seeded = true
 		}

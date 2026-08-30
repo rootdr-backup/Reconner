@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // GraphQL introspection harvesting.
@@ -27,7 +29,7 @@ var graphqlPaths = []string{
 
 // A minimal introspection query — enough to enumerate operations + their args
 // without pulling the full (huge) type system.
-const gqlIntrospectionBody = `{"query":"query{__schema{queryType{name} mutationType{name} types{name fields{name args{name}}}}}"}`
+const gqlIntrospectionBody = `{"query":"query{__schema{queryType{name} mutationType{name} types{name fields{name type{kind name ofType{kind name ofType{kind name}}} args{name type{kind name ofType{kind name ofType{kind name}}}}}}}}"}`
 
 // harvestGraphQL probes each in-scope origin for a GraphQL endpoint with
 // introspection enabled and stores each operation's arguments as JSON-body
@@ -67,13 +69,13 @@ func (s *ParamScanner) harvestGraphQL(ctx context.Context, targetID string, targ
 				endpoint, len(operations)))
 			for _, op := range operations {
 				ops++
-				// Store the operation name + each argument as testable JSON-body
-				// params on the GraphQL endpoint.
-				if s.storeFormParameter(targetID, endpoint, op.Name, "POST", "application/json") {
-					stored++
-				}
 				for _, arg := range op.Args {
-					if s.storeFormParameter(targetID, endpoint, op.Name+"."+arg, "POST", "application/json") {
+					selection := "object"
+					if op.Scalar {
+						selection = "scalar"
+					}
+					loc := "graphql:" + op.Kind + ":" + op.Name + ":" + arg + ":" + selection
+					if s.storeGraphQLParameter(targetID, endpoint, op.Name+"."+arg, loc) {
 						stored++
 					}
 				}
@@ -115,8 +117,33 @@ func (s *ParamScanner) introspect(ctx context.Context, client *http.Client, endp
 }
 
 type gqlOperation struct {
-	Name string
-	Args []string
+	Name   string
+	Args   []string
+	Kind   string
+	Scalar bool
+}
+
+type gqlTypeRef struct {
+	Kind   string      `json:"kind"`
+	Name   string      `json:"name"`
+	OfType *gqlTypeRef `json:"ofType"`
+}
+
+func gqlBaseKind(t gqlTypeRef) string {
+	for t.OfType != nil {
+		t = *t.OfType
+	}
+	return strings.ToUpper(t.Kind)
+}
+
+func (s *ParamScanner) storeGraphQLParameter(targetID, endpoint, name, location string) bool {
+	_, err := s.db.Exec(`
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,?,'graphql','POST','application/json',?)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET
+			method='POST',content_type='application/json',location=excluded.location`,
+		uuid.New().String(), targetID, endpoint, name, "", location)
+	return err == nil
 }
 
 // parseGraphQLOperations extracts the root query + mutation operations (and their
@@ -130,7 +157,8 @@ func parseGraphQLOperations(body []byte) []gqlOperation {
 				Types        []struct {
 					Name   string `json:"name"`
 					Fields []struct {
-						Name string `json:"name"`
+						Name string     `json:"name"`
+						Type gqlTypeRef `json:"type"`
 						Args []struct {
 							Name string `json:"name"`
 						} `json:"args"`
@@ -161,7 +189,13 @@ func parseGraphQLOperations(body []byte) []gqlOperation {
 			if f.Name == "" || strings.HasPrefix(f.Name, "__") {
 				continue
 			}
-			op := gqlOperation{Name: f.Name}
+			kind := "query"
+			if t.Name == doc.Data.Schema.MutationType.Name {
+				kind = "mutation"
+			}
+			baseKind := gqlBaseKind(f.Type)
+			op := gqlOperation{Name: f.Name, Kind: kind,
+				Scalar: baseKind == "SCALAR" || baseKind == "ENUM"}
 			for _, a := range f.Args {
 				if a.Name != "" {
 					op.Args = append(op.Args, a.Name)

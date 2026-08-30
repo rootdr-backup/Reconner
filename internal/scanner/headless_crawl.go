@@ -254,15 +254,15 @@ func (c *HeadlessCrawler) storeParams(ctx context.Context, targetID string, para
 		if !urlInEndpointScope(ctx, p.URL) {
 			continue
 		}
-		method := "GET"
+		method, contentType, location := "GET", "", "query"
 		if strings.Contains(p.Source, "form") {
-			method = "POST"
+			method, contentType, location = "POST", "application/x-www-form-urlencoded", "body"
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO parameters (id, target_id, url, parameter, value, source, method)
-			VALUES (?,?,?,?,?,?,?)
-			ON CONFLICT(target_id, url, parameter) DO NOTHING`,
-			uuid.New().String(), targetID, p.URL, p.Param, p.Value, p.Source, method); err == nil {
+			INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+			VALUES (?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING`,
+			uuid.New().String(), targetID, p.URL, p.Param, p.Value, p.Source, method, contentType, location); err == nil {
 			stored++
 		}
 	}

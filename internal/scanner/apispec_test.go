@@ -43,6 +43,8 @@ func TestParseAPISpecSwagger2(t *testing.T) {
 	// path param substituted → concrete URL
 	if p := epByPath(eps, "/v1/users/1"); p == nil {
 		t.Fatalf("path param not substituted to a concrete URL: %v", eps)
+	} else if len(p.Path) != 1 || p.Path[0].Name != "id" || p.Path[0].Index != 2 {
+		t.Fatalf("path parameter insertion contract missing/wrong: %+v", p.Path)
 	}
 	// find the POST body op
 	var bodyFields []string
@@ -70,9 +72,13 @@ func TestParseAPISpecOpenAPI3(t *testing.T) {
 	spec := []byte(`{
 	  "openapi":"3.0.1",
 	  "servers":[{"url":"https://svc.example.com/api"}],
+	  "components":{"schemas":{"RefBody":{"type":"object","properties":{"account":{"type":"object","properties":{"id":{"type":"integer"}}}}}}},
 	  "paths":{
 	    "/search":{"get":{"parameters":[{"name":"q","in":"query"},{"name":"limit","in":"query"}]}},
-	    "/orders":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"item":{"type":"string"},"qty":{"type":"integer"}}}}}}}}
+	    "/orders":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"item":{"type":"string"},"qty":{"type":"integer"},"customer":{"type":"object","properties":{"email":{"type":"string"}}}}}}}}}},
+	    "/upload":{"post":{"requestBody":{"content":{"multipart/form-data":{"schema":{"properties":{"title":{"type":"string"}}}}}}}},
+	    "/legacy":{"post":{"requestBody":{"content":{"application/xml":{"schema":{"properties":{"lookup":{"type":"string"}}}}}}}},
+	    "/ref":{"patch":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/RefBody"}}}}}}
 	  }
 	}`)
 	eps := parseAPISpec(spec, "https://svc.example.com")
@@ -89,8 +95,23 @@ func TestParseAPISpecOpenAPI3(t *testing.T) {
 		t.Fatalf("openapi 3 requestBody json not detected: %+v", orders)
 	}
 	sort.Strings(orders.Body)
-	if strings.Join(orders.Body, ",") != "item,qty" {
+	if strings.Join(orders.Body, ",") != "customer.email,item,qty" {
 		t.Fatalf("requestBody properties not extracted: %v", orders.Body)
+	}
+	if orders.BodyTypes["qty"] != "integer" || orders.BodyTypes["customer.email"] != "string" {
+		t.Fatalf("JSON schema field types not preserved: %#v", orders.BodyTypes)
+	}
+	upload := epByPath(eps, "/api/upload")
+	if upload == nil || upload.ContentType != "multipart/form-data" || strings.Join(upload.Body, ",") != "title" {
+		t.Fatalf("multipart request body contract not extracted: %+v", upload)
+	}
+	legacy := epByPath(eps, "/api/legacy")
+	if legacy == nil || legacy.ContentType != "application/xml" || strings.Join(legacy.Body, ",") != "lookup" {
+		t.Fatalf("XML request body contract not extracted: %+v", legacy)
+	}
+	ref := epByPath(eps, "/api/ref")
+	if ref == nil || strings.Join(ref.Body, ",") != "account.id" || ref.BodyTypes["account.id"] != "integer" {
+		t.Fatalf("local OpenAPI $ref body schema not resolved: %+v", ref)
 	}
 }
 
