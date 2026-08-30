@@ -311,19 +311,16 @@ func (s *AuthzEngine) updateHypothesis(ctx context.Context, id, status, observed
 }
 
 func (s *AuthzEngine) storeFinding(ctx context.Context, targetID, typ, sev, url, param, evidence string, confidence int) string {
-	newID := uuid.New().String()
 	priority := confidence * severityWeightIDOR(sev)
-	_, _ = s.db.ExecContext(ctx, `
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?,?,?,?,?,?,'',?,?,?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity=excluded.severity, evidence=excluded.evidence, confidence=excluded.confidence, priority=excluded.priority`,
-		newID, targetID, typ, sev, url, param, evidence, confidence, priority)
-	var id string
-	_ = s.db.QueryRowContext(ctx, `SELECT id FROM vuln_findings WHERE target_id=? AND type=? AND url=? AND parameter=?`,
-		targetID, typ, url, param).Scan(&id)
-	if id == "" {
-		id = newID
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
 	}
-	return id
+	ids, _ := RecordDetectorObservation(ctx, s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Severity: sev, URL: url, Method: "REPLAY",
+		Parameter: param, Location: "authorization", Evidence: evidence, Source: "authz-engine",
+		DetectionMethod: "cross-identity-replay", Confidence: confidence,
+		Priority: priority, Verdict: verdict,
+	})
+	return ids.FindingID
 }

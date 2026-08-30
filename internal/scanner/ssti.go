@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -116,13 +115,12 @@ func (s *SSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 }
 
 func (s *SSTIScanner) store(targetID, vulnType, severity, rawURL, param, payload, evidence string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, payload = excluded.payload, evidence = excluded.evidence
-	`, id, targetID, vulnType, severity, rawURL, param, payload, evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
+		Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
+		Source: "ssti-native", DetectionMethod: "evaluated-marker", Confidence: 96,
+		Verdict: VerifyVerified,
+	})
 }
 
 func (s *SSTIScanner) notify(targetID, rawURL, param string) {

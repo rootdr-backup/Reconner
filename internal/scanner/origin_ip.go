@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -247,13 +246,17 @@ func (s *OriginIPScanner) fetchThroughCDN(ctx context.Context, domain string) (s
 }
 
 func (s *OriginIPScanner) store(targetID, domain, ip, sev, evidence string) {
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'origin_ip_disclosure', ?, ?, '', ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, payload = excluded.payload,
-			evidence = excluded.evidence, confidence = excluded.confidence, priority = excluded.priority
-	`, uuid.New().String(), targetID, sev, domain, ip, evidence, pickConf(sev), pickPrio(sev))
+	conf := pickConf(sev)
+	verdict := CandDetected
+	if conf >= ConfEvidence {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "origin_ip_disclosure", Severity: sev, URL: domain,
+		Method: "DNS/HTTP", Location: "host", Payload: ip, Evidence: evidence,
+		Source: "origin-ip", DetectionMethod: "origin-differential", Confidence: conf,
+		Priority: pickPrio(sev), Verdict: verdict,
+	})
 }
 
 func pickConf(sev string) int {

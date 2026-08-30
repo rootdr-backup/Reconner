@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -363,18 +362,17 @@ func (s *AccountTakeoverEngine) store(targetID, typ, sev, rawURL, param, evidenc
 	if weight == 0 {
 		weight = 1
 	}
-	status := StatusCandidate
+	verdict := CandDetected
 	if confidence >= ConfEvidence {
-		status = StatusFinding
+		verdict = VerifyVerified
 	}
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority, status)
-		VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority, status = excluded.status
-	`, uuid.New().String(), targetID, typ, sev, rawURL, param, evidence, confidence, confidence*weight, status)
-	if s.broadcast != nil && status == StatusFinding {
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Severity: sev, URL: rawURL, Method: "GET",
+		Parameter: param, Location: "query", Evidence: evidence, Source: "account-takeover",
+		DetectionMethod: "workflow-correlation", Confidence: confidence,
+		Priority: confidence * weight, Verdict: verdict,
+	})
+	if s.broadcast != nil && verdict == VerifyVerified {
 		s.broadcast("new_vuln_finding", map[string]any{"target_id": targetID, "type": typ, "url": rawURL})
 	}
 }

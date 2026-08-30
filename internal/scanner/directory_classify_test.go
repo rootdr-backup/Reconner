@@ -38,12 +38,12 @@ func TestSoft404Classification(t *testing.T) {
 
 func TestCTFamily(t *testing.T) {
 	cases := map[string]string{
-		"text/html; charset=utf-8":       "html",
-		"application/json":               "json",
-		"application/xml":                "xml",
-		"text/javascript":                "js",
-		"text/plain":                     "text",
-		"application/zip":                "other",
+		"text/html; charset=utf-8": "html",
+		"application/json":         "json",
+		"application/xml":          "xml",
+		"text/javascript":          "js",
+		"text/plain":               "text",
+		"application/zip":          "other",
 	}
 	for ct, want := range cases {
 		if got := ctFamily(ct); got != want {

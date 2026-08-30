@@ -129,6 +129,6 @@ func TestDASTErrorBasedSQLiCandidate(t *testing.T) {
 		t.Fatalf("expected a sqli candidate: %v", err)
 	}
 	if status != CandDetected {
-		t.Fatalf("error-based SQLi must be a DETECTED candidate (sqlmap proves later), got %q", status)
+		t.Fatalf("error-based SQLi must remain DETECTED until SQL-specific verification proves it, got %q", status)
 	}
 }

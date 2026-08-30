@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -171,13 +170,16 @@ func (s *RaceScanner) candidatePoints(ctx context.Context, targetID string) []in
 
 func (s *RaceScanner) store(targetID, url, param, sev, evidence string, confidence int) {
 	priority := confidence * 2
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'race_condition', ?, ?, ?, '', ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority
-	`, uuid.New().String(), targetID, sev, url, param, evidence, confidence, priority)
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "race_condition", Severity: sev, URL: url,
+		Method: "POST", Parameter: param, Location: "body", Evidence: evidence,
+		Source: "race-native", DetectionMethod: "parallel-replay", Confidence: confidence,
+		Priority: priority, Verdict: verdict,
+	})
 }
 
 func containsAny(hay string, needles []string) bool {

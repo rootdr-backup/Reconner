@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -251,13 +250,16 @@ func setRawQueryParam(rawURL, key, value string) string {
 
 func (s *NoSQLiScanner) store(targetID, sev string, ip insertionPoint, evidence string, confidence int) {
 	priority := confidence * severityWeightIDOR(sev)
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'nosql_injection', ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority
-	`, uuid.New().String(), targetID, sev, ip.URL, ip.Param, ip.Param+"[$ne]", evidence, confidence, priority)
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "nosql_injection", Severity: sev, URL: ip.URL,
+		Method: ip.Method, Parameter: ip.Param, Location: locOf(ip), Payload: ip.Param + "[$ne]",
+		Evidence: evidence, Source: "nosqli-native", DetectionMethod: "operator-differential",
+		Confidence: confidence, Priority: priority, Verdict: verdict,
+	})
 }
 
 func (s *NoSQLiScanner) report(targetID string, ip insertionPoint, logFn LogFunc, kind string) {

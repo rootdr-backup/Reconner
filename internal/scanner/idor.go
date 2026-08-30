@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/secret"
@@ -589,26 +588,17 @@ func (s *IDORScanner) store(targetID, typ, sev, url, param, evidence string, con
 	// neighbouring objects belong to OTHER users — is only a candidate. Without this
 	// the column default ('finding') promoted the heuristic case to a confirmed
 	// finding, a steady source of "verify manually" noise in the main findings list.
-	status := StatusCandidate
+	verdict := CandDetected
 	if confidence >= ConfEvidence {
-		status = StatusFinding
+		verdict = VerifyVerified
 	}
-	newID := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority, status)
-		VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority, status = excluded.status
-	`, newID, targetID, typ, sev, url, param, evidence, confidence, priority, status)
-	// Resolve the stable finding id (on-conflict keeps the original row id).
-	var id string
-	_ = s.db.QueryRow(`SELECT id FROM vuln_findings WHERE target_id=? AND type=? AND url=? AND parameter=?`,
-		targetID, typ, url, param).Scan(&id)
-	if id == "" {
-		id = newID
-	}
-	return id
+	ids, _ := RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Severity: sev, URL: url, Method: "GET",
+		Parameter: param, Location: "path/query", Evidence: evidence, Source: "idor",
+		DetectionMethod: "cross-identity-replay", Confidence: confidence,
+		Priority: priority, Verdict: verdict,
+	})
+	return ids.FindingID
 }
 
 func severityWeightIDOR(sev string) int {

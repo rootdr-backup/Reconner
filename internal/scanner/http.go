@@ -70,7 +70,7 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		hosts = append(hosts, sub)
 	}
 	rows.Close()
-// Per-asset host scope: only probe hosts belonging to this scoped task.
+	// Per-asset host scope: only probe hosts belonging to this scoped task.
 	if hostScopeSet(ctx) != nil {
 		kept := hosts[:0]
 		for _, h := range hosts {

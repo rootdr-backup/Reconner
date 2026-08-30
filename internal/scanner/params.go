@@ -58,7 +58,7 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	if err != nil {
 		return err
 	}
-		var targetURLs []string
+	var targetURLs []string
 	for rows.Next() {
 		var u string
 		if err := rows.Scan(&u); err == nil {
@@ -93,7 +93,7 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 		if line == "" || !strings.Contains(line, "?") {
 			return
 		}
-				// Single-endpoint mode: only keep URLs under the seed endpoint prefix — a
+		// Single-endpoint mode: only keep URLs under the seed endpoint prefix — a
 		// whole-domain wayback/gau dump would otherwise drag the scan far off the one
 		// URL the operator asked for.
 		if !urlInEndpointScope(ctx, line) {

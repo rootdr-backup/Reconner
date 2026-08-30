@@ -62,9 +62,18 @@ func injectPathSegment(rawURL string, idx int, value string) string {
 	if target <= 0 || target >= len(segs) {
 		return rawURL
 	}
-	segs[target] = pathEscapeMinimal(value)
-	u.RawPath = strings.Join(segs, "/")
-	u.Path = u.RawPath // keep RawPath authoritative so our escaping is preserved
+	// Keep RawPath encoded and Path decoded. Assigning an encoded string to both
+	// fields makes url.URL escape '%' again (`%20` -> `%2520`), so path payloads
+	// containing spaces/slashes reached the app still encoded and could not form
+	// executable markup.
+	segs[target] = url.PathEscape(value)
+	rawPath := strings.Join(segs, "/")
+	decodedPath, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return rawURL
+	}
+	u.RawPath = rawPath
+	u.Path = decodedPath
 	return u.String()
 }
 
@@ -93,7 +102,9 @@ var trackingParams = map[string]bool{
 	"oly_enc_id": true, "oly_anon_id": true, "spm": true, "scm": true,
 }
 
-func isTrackingParam(name string) bool { return trackingParams[strings.ToLower(strings.TrimSpace(name))] }
+func isTrackingParam(name string) bool {
+	return trackingParams[strings.ToLower(strings.TrimSpace(name))]
+}
 
 // insertionKey is the LOGICAL identity of an insertion point: method + path + param
 // name, IGNORING the specific parameter VALUES. It collapses ?id=1, ?id=2 … ?id=9999
@@ -152,6 +163,51 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 			continue
 		}
 		key := insertionKey(ip.URL, ip.Param, ip.Method) + "|" + ip.Location
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ip)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// loadXSSInsertionPoints is intentionally broader than the shared injection
+// loader. Analytics parameters and CMS routes are not safe to discard for XSS:
+// both are frequently rendered by templates/plugins, and dropping them is a
+// deterministic false negative. The XSS engine performs its own MIME/context/
+// runtime proof, so this surface expansion does not weaken finding quality.
+func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID string, limit int) []insertionPoint {
+	if limit <= 0 {
+		limit = 1000000
+	}
+	pool := limit
+	if pool < 10000 {
+		pool = 10000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT url,parameter,COALESCE(method,'GET'),COALESCE(content_type,''),COALESCE(location,'query'),COALESCE(is_reflected,0)
+		FROM parameters WHERE target_id=?
+		ORDER BY COALESCE(is_reflected,0) DESC,
+			CASE WHEN UPPER(COALESCE(method,'GET'))='GET' THEN 0 ELSE 1 END,
+			LENGTH(url),url,parameter LIMIT ?`, targetID, pool)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var out []insertionPoint
+	for rows.Next() {
+		var ip insertionPoint
+		var reflected int
+		if rows.Scan(&ip.URL, &ip.Param, &ip.Method, &ip.ContentType, &ip.Location, &reflected) != nil ||
+			ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
+			continue
+		}
+		key := insertionKey(ip.URL, ip.Param, ip.Method) + "|" + strings.ToLower(ip.Location) + "|" + strings.ToLower(ip.ContentType)
 		if seen[key] {
 			continue
 		}
@@ -291,11 +347,28 @@ func sendInjectedFull(ctx context.Context, client *http.Client, ip insertionPoin
 // XSS — the single biggest reflected-XSS false-positive source. A failed request
 // returns ("", 0, "", elapsed).
 func sendInjectedCT(ctx context.Context, client *http.Client, ip insertionPoint, value string, auth map[string]string) (string, int, string, time.Duration) {
+	r := sendInjectedResponse(ctx, client, ip, value, auth)
+	return r.Body, r.Status, r.ContentType, r.Duration
+}
+
+type injectedResponse struct {
+	Body        string
+	Status      int
+	ContentType string
+	NoSniff     bool
+	CSP         string
+	Duration    time.Duration
+}
+
+// sendInjectedResponse is the XSS-grade response primitive. In addition to the
+// body/status/MIME type it preserves browser-relevant headers that decide whether
+// reflected markup can actually execute.
+func sendInjectedResponse(ctx context.Context, client *http.Client, ip insertionPoint, value string, auth map[string]string) injectedResponse {
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := buildInjectedRequest(reqCtx, ip, value, auth)
 	if err != nil {
-		return "", 0, "", 0
+		return injectedResponse{}
 	}
 	host := hostOfURL(ip.URL)
 	hostThrottleWait(reqCtx, host)
@@ -303,12 +376,19 @@ func sendInjectedCT(ctx context.Context, client *http.Client, ip insertionPoint,
 	resp, err := client.Do(req)
 	if err != nil {
 		hostThrottleObserve(host, 0, true)
-		return "", 0, "", time.Since(start)
+		return injectedResponse{Duration: time.Since(start)}
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
 	hostThrottleObserve(host, resp.StatusCode, false)
-	return string(body), resp.StatusCode, resp.Header.Get("Content-Type"), time.Since(start)
+	return injectedResponse{
+		Body:        string(body),
+		Status:      resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		NoSniff:     strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Content-Type-Options")), "nosniff"),
+		CSP:         resp.Header.Get("Content-Security-Policy"),
+		Duration:    time.Since(start),
+	}
 }
 
 func stripQuery(rawURL string) string {

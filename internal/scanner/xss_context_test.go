@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,5 +157,87 @@ func TestCheckParamReflectionContentTypeGate(t *testing.T) {
 	defer htmlApp.Close()
 	if r, _ := checkParamReflection(htmlApp.URL+"/?q=seed", "q"); !r {
 		t.Fatal("verbatim reflection into an HTML body must count as a reflected parameter")
+	}
+}
+
+func TestBrowserRenderMIMEGates(t *testing.T) {
+	if !browserRendersAsHTML("image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, true) {
+		t.Fatal("an SVG document remains an active browser document under nosniff")
+	}
+	if !browserRendersAsHTML("application/xml", `<svg xmlns="http://www.w3.org/2000/svg"></svg>`, true) {
+		t.Fatal("XML carrying an SVG root must be treated as an active SVG document")
+	}
+	if browserRendersAsHTML("application/json", `<svg onload=alert(1)>`, false) {
+		t.Fatal("JSON must never become an HTML/SVG sink from body bytes alone")
+	}
+	for _, ct := range []string{"application/javascript", "text/javascript; charset=utf-8", "application/example+javascript"} {
+		if !scriptLikeContentType(ct) {
+			t.Fatalf("script MIME not recognized: %q", ct)
+		}
+	}
+	if scriptLikeContentType("application/json") {
+		t.Fatal("JSON must not be classified as an executable script resource")
+	}
+}
+
+func TestXSSVerifierKeepsReflectedJavaScriptForRuntimeProof(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write([]byte(`callback("` + r.URL.Query().Get("q") + `")`))
+	}))
+	defer srv.Close()
+
+	// Exercise the deterministic phase directly: a JS resource is not safe merely
+	// because top-level navigation does not render it as HTML. It must be retained
+	// for ConfirmScriptResource instead of being falsely rejected.
+	v := NewXSSContextVerifier(nil)
+	res := v.verifyBrowserless(context.Background(), VulnerabilityCandidate{
+		Type: "xss", Subtype: "reflected", URL: srv.URL + "/asset.js?q=x", Parameter: "q",
+	})
+	if res.Verdict != VerifyInconclusive || res.Method != "xss-script-resource" {
+		t.Fatalf("reflected JS endpoint must be queued for script-resource proof: %+v", res)
+	}
+}
+
+func TestXSSVerifierReplaysPOSTFormInsertionPoint(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<main>"+r.Form.Get("q")+"</main>")
+	}))
+	defer srv.Close()
+
+	v := NewXSSContextVerifier(nil)
+	res := v.verifyBrowserless(context.Background(), VulnerabilityCandidate{
+		Type: "xss", Subtype: "reflected", URL: srv.URL, Method: "POST",
+		Parameter: "q", Location: "body",
+	})
+	if res.Verdict != VerifyVerified {
+		t.Fatalf("POST form reflection must use its real insertion point and verify: %+v", res)
+	}
+}
+
+func TestXSSVerifierDoesNotClaimCSPBlockedInlineExecution(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'nonce-server-only'")
+		_, _ = io.WriteString(w, "<main>"+r.URL.Query().Get("q")+"</main>")
+	}))
+	defer srv.Close()
+
+	v := NewXSSContextVerifier(nil)
+	res := v.verifyBrowserless(context.Background(), VulnerabilityCandidate{
+		Type: "xss", Subtype: "reflected", URL: srv.URL + "/?q=x", Parameter: "q",
+	})
+	if res.Verdict != VerifyInconclusive {
+		t.Fatalf("raw HTML injection blocked by nonce-only CSP needs runtime proof: %+v", res)
 	}
 }

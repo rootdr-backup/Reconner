@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -291,18 +290,16 @@ func (s *SSRFScanner) fetch(ctx context.Context, u, payload string) string {
 }
 
 func (s *SSRFScanner) storeConf(targetID, vulnType, severity, rawURL, param, payload, evidence string, confidence int) {
-	status := StatusFinding
+	verdict := VerifyVerified
 	if confidence < ConfEvidence {
-		status = StatusCandidate
+		verdict = CandDetected
 	}
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, payload = excluded.payload, evidence = excluded.evidence,
-			confidence = excluded.confidence, status = excluded.status
-	`, id, targetID, vulnType, severity, rawURL, param, payload, evidence, confidence, status)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
+		Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
+		Source: "ssrf-native", DetectionMethod: "response-signature", Confidence: confidence,
+		Verdict: verdict,
+	})
 }
 
 func (s *SSRFScanner) notify(targetID, rawURL, param string) {

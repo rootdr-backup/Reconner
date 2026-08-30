@@ -1,6 +1,9 @@
 package scanner
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAnalyzeReflectionMultiOccurrence: input echoed in TWO places — safely
 // HTML-encoded first, raw-executable second — must be judged by the strongest
@@ -59,16 +62,44 @@ func TestAnalyzeReflectionURLAttr(t *testing.T) {
 	}
 }
 
-// TestAnalyzeReflectionEncodedStillRejected: the core FP defense is preserved —
-// a fully HTML-encoded reflection is never executable, in any context.
+// TestAnalyzeReflectionEncodedStillRejected: entity encoding neutralises HTML
+// syntax, except at browser-decoded subcontexts such as an event-handler JS string
+// or a URL value controlled from its first byte.
 func TestAnalyzeReflectionEncodedStillRejected(t *testing.T) {
 	for _, body := range []string{
 		`<div>` + xssMarker + `&lt;&gt;&quot;&#39;</div>`,
 		`<input value="` + xssMarker + `&quot;&lt;&gt;">`,
-		`<a href="` + xssMarker + `&lt;&gt;">`,
+		`<a href="/search?q=` + xssMarker + `&quot;&lt;&gt;">`,
 	} {
 		if a := AnalyzeReflection(body); a.Executable {
 			t.Fatalf("encoded reflection must never be executable: %q → %+v", body, a)
 		}
+	}
+}
+
+func TestAnalyzeReflectionBrowserDecodedSubcontexts(t *testing.T) {
+	// HTML entities are decoded before an event-handler is compiled as JS. The
+	// encoded apostrophe therefore still breaks the inner JS string.
+	a := AnalyzeReflection(`<button onclick="run('` + xssMarker + `&#39;&quot;&lt;&gt;')">`)
+	if a.Context != CtxEventHandler || a.JSQuote != '\'' || !a.Executable || !strings.Contains(a.Decoded, "'") {
+		t.Fatalf("entity-decoded event-handler breakout missed: %+v", a)
+	}
+	// No punctuation is required when the attacker owns the beginning of href:
+	// javascript: is a runtime execution primitive even if angle brackets/quotes
+	// are encoded.
+	b := AnalyzeReflection(`<a href="` + xssMarker + `&#39;&quot;&lt;&gt;">`)
+	if b.Context != CtxURL || !b.URLScheme || !b.Executable {
+		t.Fatalf("scheme-controllable URL sink missed: %+v", b)
+	}
+}
+
+func TestContextTokenizerHandlesEqualsAndScriptComments(t *testing.T) {
+	a := AnalyzeReflection(`<div data-x="a=b" title='` + xssMarker + `\'"<>` + `'>`)
+	if a.Context != CtxQuotedAttr || a.AttrName != "title" || a.Quote != '\'' {
+		t.Fatalf("attribute tokenizer was confused by '=' in a previous value: %+v", a)
+	}
+	b := AnalyzeReflection("<script nonce=\"x\">// ' ignored\nconst value=\"" + xssMarker + `'"<>";</script>`)
+	if b.Context != CtxJSString || b.JSQuote != '"' || !b.Executable {
+		t.Fatalf("JS comment/opening-tag quotes confused JS string state: %+v", b)
 	}
 }

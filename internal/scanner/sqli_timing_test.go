@@ -14,9 +14,9 @@ func TestTimingScalingConfirmed(t *testing.T) {
 	ms := time.Millisecond
 	s := time.Second
 	cases := []struct {
-		name                            string
+		name                             string
 		base, baseMax, i0, i2, i5, i5min time.Duration
-		want                            bool
+		want                             bool
 	}{
 		{"real linear sleep", 200 * ms, 300 * ms, 210 * ms, 2200 * ms, 5200 * ms, 5000 * ms, true},
 		{"real sleep with modest jitter", 300 * ms, 500 * ms, 320 * ms, 2400 * ms, 5300 * ms, 5100 * ms, true},

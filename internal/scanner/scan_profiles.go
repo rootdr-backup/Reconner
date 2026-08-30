@@ -22,17 +22,17 @@ const (
 type CheckFamily string
 
 const (
-	FamDiscovery   CheckFamily = "discovery"    // subdomain/port/tech — supporting phase only
-	FamCrawl       CheckFamily = "crawl"        // crawling + parameter/form extraction
-	FamInjection   CheckFamily = "injection"    // xss/sqli/cmdi/ssti/nosqli/lfi/xxe
-	FamAccess      CheckFamily = "access"       // idor/bola/bfla two-identity authz
-	FamSSRF        CheckFamily = "ssrf"         // ssrf + OAST
-	FamRedirect    CheckFamily = "redirect"     // open redirect
-	FamMisconfig   CheckFamily = "misconfig"    // headers/cors/cookies/exposure
-	FamNuclei      CheckFamily = "nuclei"       // template engine (secondary)
-	FamMutation    CheckFamily = "mutation"     // deep mutation escalation ladder
-	FamRace        CheckFamily = "race"         // controlled authorization race
-	FamProtocol    CheckFamily = "protocol"     // HTTP/1.1 vs HTTP/2 differential
+	FamDiscovery CheckFamily = "discovery" // subdomain/port/tech — supporting phase only
+	FamCrawl     CheckFamily = "crawl"     // crawling + parameter/form extraction
+	FamInjection CheckFamily = "injection" // xss/sqli/cmdi/ssti/nosqli/lfi/xxe
+	FamAccess    CheckFamily = "access"    // idor/bola/bfla two-identity authz
+	FamSSRF      CheckFamily = "ssrf"      // ssrf + OAST
+	FamRedirect  CheckFamily = "redirect"  // open redirect
+	FamMisconfig CheckFamily = "misconfig" // headers/cors/cookies/exposure
+	FamNuclei    CheckFamily = "nuclei"    // template engine (secondary)
+	FamMutation  CheckFamily = "mutation"  // deep mutation escalation ladder
+	FamRace      CheckFamily = "race"      // controlled authorization race
+	FamProtocol  CheckFamily = "protocol"  // HTTP/1.1 vs HTTP/2 differential
 )
 
 // ScanProfile is the resolved, concrete configuration a scan runs with.
@@ -63,8 +63,8 @@ func ResolveScanProfile(name string, customFamilies []string) ScanProfile {
 	switch ScanProfileName(strings.ToLower(strings.TrimSpace(name))) {
 	case ProfileQuick:
 		return ScanProfile{
-			Name:     ProfileQuick,
-			Families: families(FamDiscovery, FamCrawl, FamInjection, FamRedirect, FamMisconfig),
+			Name:        ProfileQuick,
+			Families:    families(FamDiscovery, FamCrawl, FamInjection, FamRedirect, FamMisconfig),
 			Concurrency: 8, MaxDepth: 3, AuthzMode: "safe", Destructive: false,
 			Description: "Fast, high-signal pass: crawl + core injection/redirect/misconfig, read-only authz.",
 		}

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -179,13 +178,16 @@ func (s *XXEScanner) sendXML(ctx context.Context, u, body string, auth map[strin
 }
 
 func (s *XXEScanner) store(targetID, typ, sev, url, param, payload, evidence string, confidence, priority int) {
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority
-	`, uuid.New().String(), targetID, typ, sev, url, param, truncate(payload, 400), evidence, confidence, priority)
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Severity: sev, URL: url, Method: "POST",
+		Parameter: param, Location: "xml", Payload: truncate(payload, 400), Evidence: evidence,
+		Source: "xxe-native", DetectionMethod: "entity-signature", Confidence: confidence,
+		Priority: priority, Verdict: verdict,
+	})
 }
 
 func inbandXXEPayload(fileURI string) string {

@@ -56,7 +56,7 @@ func ParseExclusions(raw string) ExclusionSet {
 		if strings.HasPrefix(tok, "*.") {
 			suf := strings.TrimPrefix(tok, "*.")
 			if suf != "" {
-				e.hosts[suf] = true             // the apex itself
+				e.hosts[suf] = true // the apex itself
 				e.suffixes = append(e.suffixes, "."+suf)
 			}
 			continue

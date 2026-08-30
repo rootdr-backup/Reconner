@@ -220,14 +220,14 @@ func notificationTitle(changeType string) string {
 
 // storeHeaderRegression raises a vuln finding when a security header disappears.
 func (s *MonitorScanner) storeHeaderRegression(targetID, url, header string) {
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'security_header_regression', 'high', ?, ?, '', ?, 80, 240)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, severity = excluded.severity`,
-		uuid.New().String(), targetID, url, header,
-		"Security response header removed since last scan: "+header+
-			" — weakens the site's protection (e.g. clickjacking / TLS downgrade / MIME sniffing).")
+	evidence := "Security response header removed since last scan: " + header +
+		" — weakens the site's protection (e.g. clickjacking / TLS downgrade / MIME sniffing)."
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "security_header_regression", Severity: "high", URL: url,
+		Method: "MONITOR", Parameter: header, Location: "header", Evidence: evidence,
+		Source: "monitor", DetectionMethod: "snapshot-diff", Confidence: 80,
+		Priority: 240, Verdict: CandDetected,
+	})
 }
 
 // storeSecurityFinding raises a vuln finding for a dangerous security-attribute
@@ -248,13 +248,13 @@ func (s *MonitorScanner) storeSecurityFinding(targetID, url string, ch securityC
 	default:
 		title = "Security-sensitive HTML change detected"
 	}
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, ?, ?, ?, '', ?, ?, 70, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, severity = excluded.severity`,
-		uuid.New().String(), targetID, typ, sev, url, ch.attr.Value,
-		title+" — "+ch.attr.Kind+" = "+ch.attr.Value, severityWeightIDOR(sev)*70)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Subtype: ch.attr.Kind, Severity: sev, URL: url,
+		Method: "MONITOR", Location: "html", Payload: ch.attr.Value,
+		Evidence: title + " — " + ch.attr.Kind + " = " + ch.attr.Value,
+		Source:   "monitor", DetectionMethod: "snapshot-diff", Confidence: 70,
+		Priority: severityWeightIDOR(sev) * 70, Verdict: CandDetected,
+	})
 }
 
 func (s *MonitorScanner) fetchHash(ctx context.Context, url string) (hash string, size int, err error) {

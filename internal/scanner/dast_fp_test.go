@@ -12,13 +12,13 @@ func TestHtmlishResponse(t *testing.T) {
 	}{
 		{"text/html; charset=utf-8", "<html>..</html>", true},
 		{"application/xhtml+xml", "<html/>", true},
-		{"text/css", "<rcnq2z> body{}", false},                         // static CSS w/ raw reflection
-		{"application/javascript", "var x='<rcnq2z>'", false},          // JS asset
-		{"text/javascript", "<rcnq2z>", false},                        // push.js style
-		{"application/json", `{"q":"<rcnq2z>"}`, false},                // JSON echo
-		{"text/plain", "<rcnq2z>", false},                             // plain text
-		{"", "<!doctype html><html><rcnq2z></html>", true},            // no CT but real HTML
-		{"", "<rcnq2z> not a page", false},                            // no CT, not HTML
+		{"text/css", "<rcnq2z> body{}", false},                // static CSS w/ raw reflection
+		{"application/javascript", "var x='<rcnq2z>'", false}, // JS asset
+		{"text/javascript", "<rcnq2z>", false},                // push.js style
+		{"application/json", `{"q":"<rcnq2z>"}`, false},       // JSON echo
+		{"text/plain", "<rcnq2z>", false},                     // plain text
+		{"", "<!doctype html><html><rcnq2z></html>", true},    // no CT but real HTML
+		{"", "<rcnq2z> not a page", false},                    // no CT, not HTML
 	}
 	for _, c := range cases {
 		if got := htmlishResponse(c.ct, c.body); got != c.want {

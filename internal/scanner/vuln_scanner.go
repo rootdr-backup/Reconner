@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -1190,7 +1189,7 @@ func (s *VulnScanner) RunCRLF(ctx context.Context, targetID string, logFn LogFun
 	}
 	type up struct{ URL, Param string }
 	var items []up
-		for rows.Next() {
+	for rows.Next() {
 		var u up
 		if err := rows.Scan(&u.URL, &u.Param); err == nil {
 			if !urlHostInScope(ctx, u.URL) {
@@ -1280,34 +1279,26 @@ func (s *VulnScanner) RunCRLF(ctx context.Context, targetID string, logFn LogFun
 // ── Storage ──────────────────────────────────────────────────────────────────
 
 func (s *VulnScanner) storeVuln(targetID, vulnType, severity, rawURL, param, payload, evidence string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity,
-			payload = excluded.payload,
-			evidence = excluded.evidence
-	`, id, targetID, vulnType, severity, rawURL, param, payload, evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL,
+		Method: "GET", Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
+		Source: "vuln-scanner", DetectionMethod: "active-differential",
+		Confidence: ConfEvidence, Verdict: VerifyVerified,
+	})
 }
 
 // storeVulnConf stores a finding with an explicit confidence + status, for
 // checks that actively PROVE the bug (dalfox POC, context-aware XSS breakout in
 // an executable context) so the verify band doesn't demote them to candidate.
 func (s *VulnScanner) storeVulnConf(targetID, vulnType, severity, rawURL, param, payload, evidence string, confidence int) {
-	status := StatusFinding
-	if confidence < ConfEvidence {
-		status = StatusCandidate
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
 	}
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity,
-			payload = excluded.payload,
-			evidence = excluded.evidence,
-			confidence = excluded.confidence,
-			status = excluded.status
-	`, id, targetID, vulnType, severity, rawURL, param, payload, evidence, confidence, status)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL,
+		Method: "GET", Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
+		Source: "vuln-scanner", DetectionMethod: "active-differential",
+		Confidence: confidence, Verdict: verdict,
+	})
 }

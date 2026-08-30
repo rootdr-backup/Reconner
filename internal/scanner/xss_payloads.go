@@ -115,6 +115,19 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		return append([]xssExecPayload{
 			{` autofocus onfocus=` + xssAlert + ` x=`, "", "onfocus=" + xssAlert},
 		}, prefixLadder(`>`)...)
+	case CtxEventHandler:
+		// Nested JavaScript-in-HTML context. Tagless JS breakouts require runtime
+		// proof; an HTML-quote breakout also gets the parsed-element ladder.
+		direct := []xssExecPayload{{`';` + xssAlert + `//`, "", `';` + xssAlert}}
+		if a.JSQuote == '"' {
+			direct[0] = xssExecPayload{`";` + xssAlert + `//`, "", `";` + xssAlert}
+		} else if a.JSQuote == '`' {
+			direct[0] = xssExecPayload{"${" + xssAlert + "}", "", "${" + xssAlert}
+		}
+		if a.Quote != 0 {
+			direct = append(direct, prefixLadder(string(a.Quote)+`>`)...)
+		}
+		return direct
 	case CtxJSString:
 		// close the string/stmt then run; also </script> breakout into HTML text.
 		return append([]xssExecPayload{
@@ -153,7 +166,9 @@ func execPayloadSurvived(body string, p xssExecPayload) bool {
 		return false
 	}
 	if p.Elem == "" {
-		return true // tagless vector (js: scheme / handler / string-breakout)
+		// Exact tagless text survival is still only reflection. Whether a JS
+		// expression/scheme/handler is syntactically live requires runtime proof.
+		return false
 	}
 	return htmlTagInjected(body, p.Elem)
 }

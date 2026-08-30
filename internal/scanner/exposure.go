@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -714,14 +713,17 @@ func (s *ExposureScanner) loadServiceBases(ctx context.Context, targetID string,
 }
 
 func (s *ExposureScanner) store(targetID, vulnType, severity, rawURL, param, evidence string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence)
-		VALUES (?, ?, ?, ?, ?, ?, '', ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity,
-			evidence = excluded.evidence
-	`, id, targetID, vulnType, severity, rawURL, param, evidence)
+	confidence := ConfEvidence
+	verdict := VerifyVerified
+	if severity == "info" || strings.Contains(vulnType, "candidate") {
+		confidence = ConfHiddenCutoff
+		verdict = CandDetected
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
+		Parameter: param, Location: "response", Evidence: evidence, Source: "exposure",
+		DetectionMethod: "content-signature", Confidence: confidence, Verdict: verdict,
+	})
 }
 
 func (s *ExposureScanner) notify(targetID, vulnType, u string) {

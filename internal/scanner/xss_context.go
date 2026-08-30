@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	xhtml "golang.org/x/net/html"
 )
 
 // Reflected-XSS context analysis + verification (Phase 4/5). The single biggest
@@ -25,6 +27,7 @@ const (
 	CtxHTMLText     = "html_text"
 	CtxQuotedAttr   = "quoted_attribute"
 	CtxUnquotedAttr = "unquoted_attribute"
+	CtxEventHandler = "event_handler"
 	CtxJSString     = "js_string"
 	CtxJSExpr       = "js_expression"
 	CtxJSON         = "json"
@@ -37,15 +40,23 @@ const (
 // xssProbe is a unique marker followed by the four key breakout characters.
 const xssMarker = "rcnx9k7"
 const xssProbe = xssMarker + `'"<>`
+const xssProbeSuffix = `'"<>` + "`\\/();= \t"
+
+func xssProbeFor(marker string) string { return marker + xssProbeSuffix }
 
 // ReflectionAnalysis is the result of analysing where/how a probe reflected.
 type ReflectionAnalysis struct {
 	Reflected  bool
 	Context    string
 	Surviving  string // which of ' " < > survived UNENCODED
+	Decoded    string // encoded bytes the HTML tokenizer decodes inside attributes
 	Executable bool
 	Encoded    bool
 	Quote      byte   // the attribute quote char (' or ") when in an attribute, else 0
+	JSQuote    byte   // open JS string quote for script/event-handler contexts
+	AttrName   string // current HTML attribute name, when applicable
+	TagName    string // current HTML element name, when in an opening tag
+	URLScheme  bool   // reflection controls the beginning of a javascript:-capable URL value
 	CloseTag   string // for CtxRCDATA: the close tag needed to break out (e.g. </textarea>)
 }
 
@@ -62,15 +73,29 @@ var rcdataElements = []string{"textarea", "title", "noscript", "xmp", "noembed",
 // verdict (an executable reflection beats a raw-but-unproven one beats an encoded
 // one), so a single exploitable sink anywhere is enough.
 func AnalyzeReflection(body string) ReflectionAnalysis {
+	return AnalyzeReflectionWithMarker(body, xssMarker)
+}
+
+// AnalyzeReflectionWithMarker is the collision-safe production variant. A fresh
+// marker per request prevents a literal marker already present in the page or a
+// cached response from being mistaken for reflection.
+func AnalyzeReflectionWithMarker(body, marker string) ReflectionAnalysis {
+	return analyzeReflectionProbe(body, marker, `'"<>`)
+}
+
+func analyzeReflectionProbe(body, marker, suffix string) ReflectionAnalysis {
 	best := ReflectionAnalysis{Context: CtxNone}
+	if marker == "" {
+		return best
+	}
 	for off := 0; ; {
-		rel := strings.Index(body[off:], xssMarker)
+		rel := strings.Index(body[off:], marker)
 		if rel < 0 {
 			break
 		}
 		idx := off + rel
-		off = idx + len(xssMarker)
-		a := analyzeReflectionAt(body, idx)
+		off = idx + len(marker)
+		a := analyzeReflectionAt(body, idx, marker, suffix)
 		if reflectionStronger(a, best) {
 			best = a
 		}
@@ -99,32 +124,20 @@ func reflectionRank(a ReflectionAnalysis) int {
 func reflectionStronger(a, b ReflectionAnalysis) bool { return reflectionRank(a) > reflectionRank(b) }
 
 // analyzeReflectionAt analyses ONE occurrence of the marker at body[idx:].
-func analyzeReflectionAt(body string, idx int) ReflectionAnalysis {
+func analyzeReflectionAt(body string, idx int, marker, suffix string) ReflectionAnalysis {
 	a := ReflectionAnalysis{Context: CtxNone, Reflected: true}
 
-	// What followed the marker? Widen the window to 16 bytes so HTML-entity
-	// encodings (&quot; is 6 bytes; two entities already exceed 8) are seen.
-	after := body[idx+len(xssMarker):]
-	end := len(after)
-	if end > 16 {
-		end = 16
-	}
-	tail := after[:end]
-	for _, ch := range []string{`<`, `>`, `"`, `'`} {
-		if strings.Contains(tail, ch) {
-			a.Surviving += ch
-		}
-	}
-	// Encoded if the breakout chars come back as HTML entities (named, decimal or
-	// hex) — the hallmark of safe output encoding.
-	if strings.Contains(tail, "&lt;") || strings.Contains(tail, "&gt;") ||
-		strings.Contains(tail, "&quot;") || strings.Contains(tail, "&#39;") ||
-		strings.Contains(tail, "&#x") || strings.Contains(tail, "&#3") ||
-		strings.Contains(tail, "&apos;") {
-		a.Encoded = true
-	}
+	// Parse the reflected diagnostic suffix IN ORDER. Searching an arbitrary tail
+	// for '<'/'>' is unsafe: it mistakes the page's own closing tag after an encoded
+	// reflection for a raw attacker-controlled '<'. Ordered parsing attributes only
+	// bytes that correspond to the exact characters we sent.
+	after := body[idx+len(marker):]
+	a.Surviving, a.Decoded, a.Encoded = parseReflectedSuffix(after, suffix)
 
-	a.Context, a.Quote, a.CloseTag = classifyContext(body[:idx])
+	d := classifyContextDetails(body[:idx])
+	a.Context, a.Quote, a.CloseTag = d.kind, d.quote, d.closeTag
+	a.JSQuote, a.AttrName, a.TagName = d.jsQuote, d.attrName, d.tagName
+	a.URLScheme = d.kind == CtxURL && d.valueStart && javascriptURLCapable(d.tagName, d.attrName)
 
 	// Executable = it landed somewhere markup/script-relevant AND the breakout
 	// character that context needs survived raw. Every VERIFIED verdict below is a
@@ -132,7 +145,7 @@ func analyzeReflectionAt(body string, idx int) ReflectionAnalysis {
 	switch a.Context {
 	case CtxHTMLText:
 		a.Executable = strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">")
-	case CtxQuotedAttr, CtxURL:
+	case CtxQuotedAttr:
 		// Break the ACTUAL opening quote (single or double) → close the tag → new
 		// element/event. Checking a fixed '"' missed every single-quoted attribute.
 		q := string(rune(a.Quote))
@@ -140,10 +153,23 @@ func analyzeReflectionAt(body string, idx int) ReflectionAnalysis {
 			q = `"`
 		}
 		a.Executable = strings.Contains(a.Surviving, q)
+	case CtxURL:
+		q := string(rune(a.Quote))
+		if a.Quote == 0 {
+			q = `"`
+		}
+		a.Executable = strings.Contains(a.Surviving, q) || a.URLScheme
 	case CtxUnquotedAttr:
-		a.Executable = true // unquoted attr: a space + event handler already suffices
+		// Either close the current tag or start a new event attribute with space.
+		a.Executable = strings.Contains(a.Surviving, ">") || strings.Contains(a.Surviving, " ") || strings.Contains(a.Surviving, "\t")
+	case CtxEventHandler:
+		// Event-handler attributes are nested JS contexts. Breaking the HTML quote
+		// OR the inner JS quote/expression is sufficient and must be browser-proven.
+		a.Executable = (a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote))) ||
+			(a.JSQuote != 0 && (strings.Contains(a.Surviving, string(a.JSQuote)) || strings.Contains(a.Decoded, string(a.JSQuote)))) ||
+			(a.JSQuote == 0 && (strings.Contains(a.Surviving, ";") || strings.Contains(a.Surviving, "(")))
 	case CtxJSString:
-		a.Executable = strings.Contains(a.Surviving, "'") || strings.Contains(a.Surviving, `"`) ||
+		a.Executable = (a.JSQuote != 0 && strings.Contains(a.Surviving, string(a.JSQuote))) ||
 			(strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">"))
 	case CtxJSExpr:
 		a.Executable = true
@@ -157,10 +183,63 @@ func analyzeReflectionAt(body string, idx int) ReflectionAnalysis {
 		// breakout sequence and a fresh element.
 		a.Executable = strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">")
 	}
-	if a.Encoded {
-		a.Executable = false
-	}
+	// Mixed encoding is common: one irrelevant character may be encoded while the
+	// exact character needed by this context survives. Executability is therefore
+	// decided per required character above, never by a blanket Encoded veto.
 	return a
+}
+
+func parseReflectedSuffix(after, expected string) (surviving, decoded string, encoded bool) {
+	if len(after) > 512 {
+		after = after[:512]
+	}
+	pos := 0
+	for i := 0; i < len(expected); i++ {
+		ch := expected[i]
+		if pos < len(after) && after[pos] == ch {
+			surviving += string(ch)
+			pos++
+			continue
+		}
+		matched := ""
+		for _, enc := range encodedForms(ch) {
+			if strings.HasPrefix(strings.ToLower(after[pos:]), strings.ToLower(enc)) {
+				matched = enc
+				break
+			}
+		}
+		if matched != "" {
+			encoded = true
+			decoded += string(ch)
+			pos += len(matched)
+		}
+		// If the character was stripped, do not advance: the next expected
+		// character may be the byte currently at pos.
+	}
+	return surviving, decoded, encoded
+}
+
+func encodedForms(ch byte) []string {
+	switch ch {
+	case '\'':
+		return []string{"&#39;", "&#039;", "&#x27;", "&apos;", "%27", `\'`, `\u0027`}
+	case '"':
+		return []string{"&quot;", "&#34;", "&#034;", "&#x22;", "%22", `\"`, `\u0022`}
+	case '<':
+		return []string{"&lt;", "&#60;", "&#060;", "&#x3c;", "%3c", `\x3c`, `\u003c`}
+	case '>':
+		return []string{"&gt;", "&#62;", "&#062;", "&#x3e;", "%3e", `\x3e`, `\u003e`}
+	case '`':
+		return []string{"&#96;", "&#x60;", "%60", `\u0060`}
+	case '\\':
+		return []string{`\\`, `%5c`, `\u005c`}
+	case ' ':
+		return []string{"%20", "+", "&#32;", "&#x20;"}
+	case '\t':
+		return []string{"%09", "&#9;", "&#x9;"}
+	default:
+		return []string{"%" + fmt.Sprintf("%02x", ch)}
+	}
 }
 
 // nosniffNote appends a mention of the nosniff header when present, so the
@@ -182,61 +261,182 @@ var urlAttrs = map[string]bool{
 
 // classifyContext determines the context from the text PRECEDING the marker, the
 // (attribute) quote char, and (for RCDATA) the close tag needed to break out.
+type reflectionContextDetails struct {
+	kind, closeTag, attrName, tagName string
+	quote, jsQuote                    byte
+	valueStart                        bool
+}
+
 func classifyContext(before string) (string, byte, string) {
+	d := classifyContextDetails(before)
+	return d.kind, d.quote, d.closeTag
+}
+
+func classifyContextDetails(before string) reflectionContextDetails {
 	low := strings.ToLower(before)
 	// inside an HTML comment? <!-- … [here] with no --> after the last <!--.
 	if lc := strings.LastIndex(before, "<!--"); lc >= 0 && lc > strings.LastIndex(before, "-->") {
-		return CtxComment, 0, ""
+		return reflectionContextDetails{kind: CtxComment}
 	}
 	// inside a <script> block?
 	lastScript := strings.LastIndex(low, "<script")
 	lastScriptEnd := strings.LastIndex(low, "</script")
 	if lastScript > lastScriptEnd {
-		// inside JS. string if an odd number of unescaped quotes precede us.
-		seg := before[lastScript:]
-		if inQuotedString(seg) {
-			return CtxJSString, 0, ""
+		// If the opening <script ...> tag itself is not closed yet, the marker is
+		// in an HTML attribute, not JavaScript source.
+		tagEnd := strings.IndexByte(before[lastScript:], '>')
+		if tagEnd < 0 {
+			return classifyOpenTag(before[lastScript:])
 		}
-		return CtxJSExpr, 0, ""
+		// inside JS. string if an odd number of unescaped quotes precede us.
+		seg := before[lastScript+tagEnd+1:]
+		if q := openJSQuote(seg); q != 0 {
+			return reflectionContextDetails{kind: CtxJSString, jsQuote: q}
+		}
+		return reflectionContextDetails{kind: CtxJSExpr}
 	}
 	// inside a <style> block?
 	lastStyle := strings.LastIndex(low, "<style")
 	lastStyleEnd := strings.LastIndex(low, "</style")
 	if lastStyle > lastStyleEnd {
-		return CtxCSS, 0, ""
+		return reflectionContextDetails{kind: CtxCSS}
 	}
 	// inside a raw-text/RCDATA element (<textarea>/<title>/…)? Innermost wins.
 	if ctxName, closeTag, ok := rcdataContext(before, low); ok {
 		_ = ctxName
-		return CtxRCDATA, 0, closeTag
+		return reflectionContextDetails{kind: CtxRCDATA, closeTag: closeTag}
 	}
 	// inside an open tag (attribute area)? find last '<' vs last '>'
 	lt := strings.LastIndex(before, "<")
 	gt := strings.LastIndex(before, ">")
 	if lt > gt {
-		tag := before[lt:]
-		// attribute value quoting: look for = just before us
-		eq := strings.LastIndex(tag, "=")
-		if eq >= 0 {
-			name := attrNameBeforeEq(tag, eq)
-			rest := strings.TrimLeft(tag[eq+1:], " ")
-			var quote byte
-			if strings.HasPrefix(rest, `"`) {
-				quote = '"'
-			} else if strings.HasPrefix(rest, "'") {
-				quote = '\''
-			}
-			if urlAttrs[name] {
-				return CtxURL, quote, "" // src/href/… value → URL sink
-			}
-			if quote != 0 {
-				return CtxQuotedAttr, quote, ""
-			}
-			return CtxUnquotedAttr, 0, ""
-		}
-		return CtxUnquotedAttr, 0, ""
+		return classifyOpenTag(before[lt:])
 	}
-	return CtxHTMLText, 0, ""
+	return reflectionContextDetails{kind: CtxHTMLText}
+}
+
+func classifyOpenTag(tag string) reflectionContextDetails {
+	// Tokenize the unfinished opening tag up to the marker. LastIndex("=") is
+	// incorrect when an earlier attribute value itself contains '=' or quotes.
+	i := 0
+	for i < len(tag) && (tag[i] == '<' || tag[i] == '/' || isHTMLSpace(tag[i])) {
+		i++
+	}
+	start := i
+	for i < len(tag) && !isHTMLSpace(tag[i]) && tag[i] != '>' && tag[i] != '/' {
+		i++
+	}
+	tagName := strings.ToLower(tag[start:i])
+	var attrName, value string
+	var quote byte
+	state := "before-attr"
+	for i < len(tag) {
+		c := tag[i]
+		switch state {
+		case "before-attr":
+			if isHTMLSpace(c) || c == '/' {
+				i++
+				continue
+			}
+			if c == '>' {
+				i++
+				continue
+			}
+			attrName, value, quote = "", "", 0
+			state = "attr-name"
+		case "attr-name":
+			if c == '=' {
+				attrName = strings.ToLower(strings.TrimSpace(attrName))
+				state = "before-value"
+				i++
+				continue
+			}
+			if isHTMLSpace(c) {
+				attrName = strings.ToLower(strings.TrimSpace(attrName))
+				state = "after-name"
+				i++
+				continue
+			}
+			if c == '>' {
+				state = "before-attr"
+				i++
+				continue
+			}
+			attrName += string(c)
+			i++
+		case "after-name":
+			if isHTMLSpace(c) {
+				i++
+				continue
+			}
+			if c == '=' {
+				state = "before-value"
+				i++
+				continue
+			}
+			state = "before-attr"
+		case "before-value":
+			if isHTMLSpace(c) {
+				i++
+				continue
+			}
+			if c == '\'' || c == '"' {
+				quote = c
+				state = "quoted-value"
+				i++
+				continue
+			}
+			state = "unquoted-value"
+		case "quoted-value":
+			if c == quote {
+				state = "before-attr"
+				i++
+				continue
+			}
+			value += string(c)
+			i++
+		case "unquoted-value":
+			if isHTMLSpace(c) || c == '>' {
+				state = "before-attr"
+				i++
+				continue
+			}
+			value += string(c)
+			i++
+		}
+	}
+	if state == "before-attr" || state == "attr-name" || state == "after-name" {
+		return reflectionContextDetails{kind: CtxUnquotedAttr, tagName: tagName, attrName: attrName}
+	}
+	d := reflectionContextDetails{quote: quote, attrName: attrName, tagName: tagName, valueStart: strings.TrimSpace(value) == ""}
+	if strings.HasPrefix(attrName, "on") {
+		d.kind, d.jsQuote = CtxEventHandler, openJSQuote(value)
+		return d
+	}
+	if urlAttrs[attrName] {
+		d.kind = CtxURL
+		return d
+	}
+	if quote != 0 {
+		d.kind = CtxQuotedAttr
+	} else {
+		d.kind = CtxUnquotedAttr
+	}
+	return d
+}
+
+func isHTMLSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' }
+
+func javascriptURLCapable(tagName, attrName string) bool {
+	switch attrName {
+	case "href", "xlink:href", "action", "formaction":
+		return true
+	case "src":
+		return tagName == "iframe" || tagName == "script"
+	case "data":
+		return tagName == "object"
+	}
+	return false
 }
 
 // rcdataContext reports whether the marker sits inside the raw-text content of an
@@ -285,10 +485,40 @@ func attrNameBeforeEq(tag string, eq int) string {
 
 // inQuotedString reports whether the segment ends inside an open JS string.
 func inQuotedString(seg string) bool {
+	return openJSQuote(seg) != 0
+}
+
+func openJSQuote(seg string) byte {
 	var q byte
+	lineComment, blockComment := false, false
 	for i := 0; i < len(seg); i++ {
 		c := seg[i]
-		if c == '\\' {
+		if lineComment {
+			if c == '\n' || c == '\r' {
+				lineComment = false
+			}
+			continue
+		}
+		if blockComment {
+			if c == '*' && i+1 < len(seg) && seg[i+1] == '/' {
+				blockComment = false
+				i++
+			}
+			continue
+		}
+		if q == 0 && c == '/' && i+1 < len(seg) {
+			switch seg[i+1] {
+			case '/':
+				lineComment = true
+				i++
+				continue
+			case '*':
+				blockComment = true
+				i++
+				continue
+			}
+		}
+		if q != 0 && c == '\\' {
 			i++
 			continue
 		}
@@ -298,7 +528,7 @@ func inQuotedString(seg string) bool {
 			q = 0
 		}
 	}
-	return q != 0
+	return q
 }
 
 // XSSContextVerifier proves reflected XSS by context analysis. Reuses Replay
@@ -331,12 +561,21 @@ func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidat
 	// "not reflected in the raw HTML" case, which is exactly how a client-rendered
 	// SPA looks (the reflection is injected into the DOM by JS after load).
 	if b := getXSSBrowser(); b != nil {
-		if pl, ok := b.Confirm(ctx, c.URL, c.Parameter); ok {
+		ip := candidateInsertionPoint(c)
+		if res.Method == "xss-script-resource" {
+			if pl, ok := b.ConfirmScriptResource(ctx, ip, identityHeaders(v.identity)); ok {
+				return VerifyResult{
+					Verdict: VerifyVerified, Confidence: 99, Method: "xss-script-resource-browser",
+					Evidence: "reflected XSS PROVEN by loading the injected endpoint as an external JavaScript resource; the payload executed and set the browser nonce. Executable payload: " + pl,
+				}
+			}
+		}
+		if pl, ok := b.ConfirmInsertion(ctx, ip, identityHeaders(v.identity)); ok {
 			return VerifyResult{
 				Verdict:    VerifyVerified,
 				Confidence: 99,
 				Method:     "xss-browser",
-				Evidence:   "reflected XSS PROVEN in a real headless browser: the injected payload EXECUTED (a JS dialog carrying our nonce fired) after the page rendered. This confirms execution on the live/rendered page (works for client-rendered & SPA apps). Executable payload: " + pl,
+				Evidence:   "reflected XSS PROVEN in a real headless browser: the injected JavaScript changed document.title to a random nonce after the page rendered. Reflection alone cannot produce this proof. This works for client-rendered and SPA pages; the reported PoC is the alert(document.domain) equivalent. Executable payload: " + pl,
 			}
 		}
 	}
@@ -344,20 +583,22 @@ func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidat
 }
 
 func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c VulnerabilityCandidate) VerifyResult {
-	probeURL, ok := injectProbe(c.URL, c.Parameter)
-	if !ok {
+	if c.Parameter == "" || c.URL == "" {
 		return VerifyResult{Verdict: VerifyInconclusive, Reason: "could not place probe in parameter", Method: "xss-context"}
 	}
-	r := Replay(ctx, ReplaySpec{Method: "GET", URL: probeURL}, v.identity)
+	ip := candidateInsertionPoint(c)
+	auth := identityHeaders(v.identity)
+	marker := newXSSToken("rcnctx")
+	r := sendInjectedResponse(ctx, dastClient, ip, xssProbeFor(marker), auth)
 	// WAF/block-page gate: if the probe was met by a WAF block/challenge page, any
 	// "reflection" is the WAF echoing our payload into its own block template, not
 	// the app rendering it — it never executes. Reject so a dalfox/nuclei reflection
 	// hit against a blocked endpoint is not promoted to a false finding.
-	if looksLikeBlockPage(r.Status, r.Response.Body) {
-		return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Method: "xss-context",
+	if looksLikeBlockPage(r.Status, r.Body) {
+		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context",
 			Reason: fmt.Sprintf("request was answered by a WAF/edge block or challenge page (HTTP %d) — the reflected value is echoed by the WAF, not rendered by the app, so it does not execute", r.Status)}
 	}
-	a := AnalyzeReflection(r.Response.Body)
+	a := analyzeReflectionProbe(r.Body, marker, xssProbeSuffix)
 	// Content-Type gate: a reflected payload only executes when the browser renders
 	// the response as an HTML document. Input echoed into application/json (or any
 	// declared non-HTML type) — even with the breakout chars '"<> surviving raw —
@@ -367,7 +608,12 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 	// clientId → {"clientId":"…"} with nosniff). Without this gate the body-only
 	// analysis mistakes a JSON reflection for HTML-text context (JSON does not
 	// encode < or >) and wrongly promotes it to VERIFIED.
-	htmlSink := browserRendersAsHTML(r.CT, r.Response.Body, r.Response.NoSniff)
+	htmlSink := browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff)
+	if a.Reflected && !htmlSink && scriptLikeContentType(r.ContentType) {
+		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo,
+			Method: "xss-script-resource",
+			Reason: "input is reflected in a JavaScript/JSONP resource; it must be loaded as an external script in a real browser to prove execution"}
+	}
 	switch {
 	case !a.Reflected:
 		return VerifyResult{Verdict: VerifyInconclusive, Reason: "probe not reflected at this parameter", Method: "xss-context"}
@@ -379,8 +625,8 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 			Reason: "reflected in " + a.Context + " but breakout characters did not survive raw — cannot prove execution", Method: "xss-context"}
 	case !htmlSink:
 		return VerifyResult{Verdict: VerifyRejected, Confidence: 0,
-			Reason: "input is reflected with breakout chars surviving, but the response is " + ctLabel(r.CT) +
-				nosniffNote(r.Response.NoSniff) + " — a browser will not render it as HTML, so it does not execute (reflected XSS requires an HTML-rendered response)",
+			Reason: "input is reflected with breakout chars surviving, but the response is " + ctLabel(r.ContentType) +
+				nosniffNote(r.NoSniff) + " — a browser will not render it as HTML, so it does not execute (reflected XSS requires an HTML-rendered response)",
 			Method: "xss-context"}
 	}
 
@@ -402,17 +648,55 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 		return VerifyResult{Verdict: VerifyInconclusive, Method: "xss-context",
 			Reason: "executable-looking reflection in " + a.Context + " context, but no deterministic browserless breakout applies (needs runtime/DOM proof)"}
 	}
-	baseR := Replay(ctx, ReplaySpec{Method: "GET", URL: injectParam(c.URL, c.Parameter, dastNonce)}, v.identity)
-	confR := Replay(ctx, ReplaySpec{Method: "GET", URL: injectParam(c.URL, c.Parameter, payload)}, v.identity)
-	if browserRendersAsHTML(confR.CT, confR.Response.Body, confR.Response.NoSniff) &&
-		htmlTagInjected(confR.Response.Body, dastElement) &&
-		!strings.Contains(baseR.Response.Body, needle) {
-		ev := "reflected XSS PROVEN in " + a.Context + " context: a benign marker element injected via the context breakout materialised as a LIVE HTML start tag in the rendered response (execution-equivalent, absent from baseline). Executable payload: " +
-			contextPayload(a.Context) + " | context-agnostic polyglot: " + xssPolyglot
-		return VerifyResult{Verdict: VerifyVerified, Confidence: 95, Evidence: ev, Method: "xss-context"}
+	baseR := sendInjectedResponse(ctx, dastClient, ip, newXSSToken("rcnbase"), auth)
+	confR := sendInjectedResponse(ctx, dastClient, ip, payload, auth)
+	if browserRendersResponse(confR.Status, confR.ContentType, confR.Body, confR.NoSniff) &&
+		htmlTagInjected(confR.Body, dastElement) && !strings.Contains(baseR.Body, needle) {
+		// HTML injection is not yet JavaScript execution. Require one exact
+		// executing vector to survive as live markup under an inline-permitting CSP;
+		// otherwise leave it for the Chromium phase rather than over-confirming.
+		for _, p := range buildExecPayloads(a) {
+			execR := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
+			if browserRendersResponse(execR.Status, execR.ContentType, execR.Body, execR.NoSniff) &&
+				cspAllowsInlineScript(execR.CSP) && execPayloadSurvived(execR.Body, p) {
+				ev := "reflected XSS PROVEN in " + a.Context + " context: the context-specific breakout formed live executable markup and the exact handler/script survived unencoded. Executable payload: " +
+					p.Payload + " | context-agnostic polyglot: " + xssPolyglot
+				return VerifyResult{Verdict: VerifyVerified, Confidence: 95, Evidence: ev, Method: "xss-context"}
+			}
+		}
+		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context",
+			Reason: "HTML breakout formed a live element, but no tested executable vector survived CSP/filtering; runtime browser proof required"}
 	}
 	return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Method: "xss-context",
 		Reason: "input is reflected in " + a.Context + " context but the injected marker element did NOT form a live HTML tag (neutralised by the surrounding markup / re-encoded on the confirm request) — not executable, so not a real XSS"}
+}
+
+func candidateInsertionPoint(c VulnerabilityCandidate) insertionPoint {
+	ip := insertionPoint{URL: c.URL, Param: c.Parameter, Method: c.Method, Location: c.Location}
+	if ip.Method == "" {
+		ip.Method = "GET"
+	}
+	switch strings.ToLower(c.Location) {
+	case "json":
+		ip.ContentType = "application/json"
+	case "body", "form":
+		ip.ContentType = "application/x-www-form-urlencoded"
+	}
+	return ip
+}
+
+func identityHeaders(id *Identity) map[string]string {
+	out := map[string]string{}
+	if id == nil {
+		return out
+	}
+	for k, value := range id.Headers {
+		out[k] = value
+	}
+	if id.UserAgent != "" {
+		out["User-Agent"] = id.UserAgent
+	}
+	return out
 }
 
 // xssPolyglot is a single context-breaking payload (adapted from 0xsobky /
@@ -438,6 +722,8 @@ func contextPayload(ctxName string) string {
 		// No quote to break: a leading space starts a new attribute; autofocus makes
 		// onfocus fire with no user interaction. Works where onmouseover would not.
 		return ` autofocus onfocus=alert(document.domain) x=`
+	case CtxEventHandler:
+		return `';alert(document.domain);//`
 	case CtxJSString:
 		// Close the string, terminate the statement, run code, comment out the rest.
 		// If < and > survive, </script><svg onload=…> is the more reliable variant.
@@ -476,4 +762,28 @@ func injectProbe(rawURL, param string) (string, bool) {
 		return "", false
 	}
 	return injectParam(rawURL, param, xssProbe), true
+}
+
+// htmlTagInjected uses the same HTML5 parser model as a browser. The old custom
+// scanner could misread tags after a '>' inside comments and did not implement
+// all RAWTEXT/RCDATA states, creating both false positives and misses.
+func htmlTagInjected(body, name string) bool {
+	doc, err := xhtml.Parse(strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	var walk func(*xhtml.Node) bool
+	walk = func(n *xhtml.Node) bool {
+		if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, name) {
+			return true
+		}
+		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+			if walk(ch) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(doc)
 }

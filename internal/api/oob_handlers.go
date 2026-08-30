@@ -1,11 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/recon-platform/internal/scanner"
 )
 
 // handleOOBCallback records an out-of-band interaction proving blind SSRF or
@@ -66,13 +67,12 @@ func (h *Handler) RecordOOBHit(token, srcIP, method, ua, via string) bool {
 		SET hit_count = hit_count + 1, last_hit = CURRENT_TIMESTAMP, evidence = ?
 		WHERE token = ?`, evidence, token)
 
-	id := uuid.New().String()
-	_, _ = h.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, ?, 'critical', ?, ?, ?, ?, 100, 500)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, confidence = 100, priority = 500
-	`, id, targetID, vulnType, injURL, param, "oob token="+token, evidence)
+	_, _ = scanner.RecordDetectorObservation(context.Background(), h.db, scanner.DetectorObservation{
+		TargetID: targetID, Type: vulnType, Subtype: kind, Severity: "critical",
+		URL: injURL, Method: "CALLBACK", Parameter: param, Location: sink,
+		Payload: "oob token=" + token, Evidence: evidence, Source: "oast-callback",
+		DetectionMethod: via, Confidence: 100, Priority: 500, Verdict: scanner.VerifyVerified,
+	})
 
 	if priorHits == 0 && h.sched != nil {
 		h.sched.EmitVulnFinding(map[string]any{

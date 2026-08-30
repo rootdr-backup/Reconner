@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -244,10 +243,10 @@ func (s *SmugglingScanner) aliveRoots(ctx context.Context, targetID string) []st
 }
 
 func (s *SmugglingScanner) store(targetID, url, variant, evidence string) {
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'request_smuggling', 'high', ?, '', ?, ?, 75, 300)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, confidence = 75, priority = 300
-	`, uuid.New().String(), targetID, url, variant+" desync", evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "request_smuggling", Subtype: variant, Severity: "high",
+		URL: url, Method: "RAW", Location: "connection", Payload: variant + " desync",
+		Evidence: evidence, Source: "smuggling", DetectionMethod: "desync-differential",
+		Confidence: 75, Priority: 300, Verdict: CandDetected,
+	})
 }
