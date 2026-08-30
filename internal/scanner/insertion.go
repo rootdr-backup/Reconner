@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -171,9 +172,64 @@ func isTrackingParam(name string) bool {
 func insertionKey(rawURL, param, method string) string {
 	path := rawURL
 	if u, err := url.Parse(rawURL); err == nil {
-		path = strings.ToLower(u.Host) + u.Path
+		// Values vary constantly across crawl/history sources, but the set of query
+		// field names is part of the request contract. /search?id=1&mode=admin must
+		// not collapse into /search?id=1&mode=public, while id=1/id=2 should.
+		var names []string
+		for name := range u.Query() {
+			names = append(names, strings.ToLower(name))
+		}
+		sort.Strings(names)
+		path = strings.ToLower(u.Host) + u.Path + "?" + strings.Join(names, ",")
 	}
 	return strings.ToUpper(method) + " " + path + " |" + strings.ToLower(param)
+}
+
+var (
+	semanticNumericSegment = regexp.MustCompile(`^[0-9]{1,20}$`)
+	semanticUUIDSegment    = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	semanticHexSegment     = regexp.MustCompile(`(?i)^[0-9a-f]{16,64}$`)
+)
+
+// semanticRouteIdentity collapses concrete object values that clearly map to the
+// same route handler (/orders/1001 and /orders/1002), while preserving method,
+// parameter, placement, content type and query-field shape. Callers retain two
+// representatives per normalized route, so a valid/invalid or public/private
+// object variant still gets exercised without testing thousands of IDs through
+// identical code.
+func semanticRouteIdentity(ip insertionPoint) (string, bool) {
+	u, err := url.Parse(ip.URL)
+	if err != nil {
+		return insertionIdentity(ip), false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	changed := false
+	for i, raw := range parts {
+		part, err := url.PathUnescape(raw)
+		if err != nil {
+			part = raw
+		}
+		switch {
+		case semanticNumericSegment.MatchString(part):
+			parts[i], changed = "{n}", true
+		case semanticUUIDSegment.MatchString(part):
+			parts[i], changed = "{uuid}", true
+		case semanticHexSegment.MatchString(part):
+			parts[i], changed = "{hex}", true
+		}
+	}
+	if !changed {
+		return insertionIdentity(ip), false
+	}
+	var queryNames []string
+	for name := range u.Query() {
+		queryNames = append(queryNames, strings.ToLower(name))
+	}
+	sort.Strings(queryNames)
+	key := strings.ToUpper(ip.Method) + " " + strings.ToLower(u.Host) + "/" + strings.Join(parts, "/") +
+		"?" + strings.Join(queryNames, ",") + " |" + strings.ToLower(ip.Param) + "|" +
+		insertionLocation(ip) + "|" + strings.ToLower(strings.TrimSpace(ip.ContentType))
+	return key, true
 }
 
 // loadInsertionPoints returns the highest-value, DISTINCT insertion points for the
@@ -204,6 +260,7 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 	// nuclei's CMS templates still cover the real known-CVE surface.
 	cmsSkip := loadCMSSkipHosts(db, targetID)
 	seen := make(map[string]bool)
+	semanticCounts := make(map[string]int)
 	var out []insertionPoint
 	for rows.Next() {
 		var ip insertionPoint
@@ -225,6 +282,12 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 			continue
 		}
 		seen[key] = true
+		if routeKey, normalized := semanticRouteIdentity(ip); normalized {
+			if semanticCounts[routeKey] >= 2 {
+				continue
+			}
+			semanticCounts[routeKey]++
+		}
 		out = append(out, ip)
 		if len(out) >= limit {
 			break
@@ -257,6 +320,7 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 	}
 	defer rows.Close()
 	seen := map[string]bool{}
+	semanticCounts := map[string]int{}
 	var out []insertionPoint
 	for rows.Next() {
 		var ip insertionPoint
@@ -270,6 +334,12 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 			continue
 		}
 		seen[key] = true
+		if routeKey, normalized := semanticRouteIdentity(ip); normalized {
+			if semanticCounts[routeKey] >= 2 {
+				continue
+			}
+			semanticCounts[routeKey]++
+		}
 		out = append(out, ip)
 		if len(out) >= limit {
 			break
@@ -603,6 +673,11 @@ func sendInjectedFull(ctx context.Context, client *http.Client, ip insertionPoin
 	// this host has been timing out / rate-limiting. Done BEFORE the timing window
 	// so a time-based detector's measurement is never inflated by the backoff.
 	host := hostOfURL(ip.URL)
+	release, acquired := hostRequestAcquire(reqCtx, host)
+	if !acquired {
+		return "", 0, 0
+	}
+	defer release()
 	hostThrottleWait(reqCtx, host)
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -647,6 +722,11 @@ func sendInjectedResponse(ctx context.Context, client *http.Client, ip insertion
 		return injectedResponse{}
 	}
 	host := hostOfURL(ip.URL)
+	release, acquired := hostRequestAcquire(reqCtx, host)
+	if !acquired {
+		return injectedResponse{}
+	}
+	defer release()
 	hostThrottleWait(reqCtx, host)
 	start := time.Now()
 	resp, err := client.Do(req)

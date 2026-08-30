@@ -900,9 +900,10 @@ func loadDOMPageTargets(ctx context.Context, db *database.DB, targetID string, l
 		}
 		rows.Close()
 	}
-	if len(hints) == 0 {
-		hints = []string{"q", "search", "query", "input"}
-	}
+	// Do not invent q/search/query/input on every page. The native DAST pass already
+	// tests every discovered insertion point; this DOM verifier adds only parameter
+	// names actually observed in URLs or extracted from JavaScript URLSearchParams.
+	// The old four-name fallback multiplied every page by 80 browser navigations.
 	for _, t := range targets {
 		for _, p := range hints {
 			if len(t.Params) >= 12 {
@@ -957,10 +958,27 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 	var nameLead, messageLead int
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='dom_xss' AND evidence LIKE '%window.name%'`, targetID).Scan(&nameLead)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='dom_xss' AND evidence LIKE '%postMessage%'`, targetID).Scan(&messageLead)
+	staticLeadHosts := map[string]bool{}
+	if rows, err := db.QueryContext(ctx, `SELECT DISTINCT url FROM candidates WHERE target_id=? AND type='dom_xss' AND subtype='static-flow'`, targetID); err == nil {
+		for rows.Next() {
+			var raw string
+			if rows.Scan(&raw) == nil {
+				fields := strings.Fields(raw)
+				if len(fields) == 0 {
+					continue
+				}
+				if h := hostOfURL(fields[0]); h != "" {
+					staticLeadHosts[h] = true
+				}
+			}
+		}
+		rows.Close()
+	}
 	logFn("info", "dom_xss", fmt.Sprintf("Verifying DOM XSS in Chromium across %d real page route(s), discovered query names, hash, window.name and postMessage sources...", len(pages)))
 
 	confirmed := 0
 	budget := 600 // source attempts; each result still requires runtime execution
+	staticFallbacks := map[string]int{}
 	for _, page := range pages {
 		if ctx.Err() != nil || budget <= 0 {
 			break
@@ -985,6 +1003,18 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		for _, test := range tests {
 			if budget <= 0 {
 				break
+			}
+			// One inert DOM canary prevents the complete cross-context payload
+			// ladder from running on sources the page never consumes. A static
+			// source→sink lead gets up to two preflight-bypass attempts per host/mode
+			// so direct eval/Function sinks (which need not reflect text into DOM)
+			// remain covered on representative routes.
+			if !b.DOMSourceReflects(ctx, page.URL, test.mode, test.param, auth) {
+				fallbackKey := hostOfURL(page.URL) + "|" + test.mode
+				if !staticLeadHosts[hostOfURL(page.URL)] || staticFallbacks[fallbackKey] >= 2 {
+					continue
+				}
+				staticFallbacks[fallbackKey]++
 			}
 			budget--
 			pl, ok := b.ConfirmDOMSource(ctx, page.URL, test.mode, test.param, auth)

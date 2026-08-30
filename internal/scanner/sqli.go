@@ -367,6 +367,22 @@ func (s *SQLiScanner) selectCandidates(ctx context.Context, targetID string) []i
 		}
 		return insertionIdentity(ranked[i].ip) < insertionIdentity(ranked[j].ip)
 	})
+	// Concrete IDs discovered from crawl/history often produce thousands of rows
+	// for one route handler. Keep two semantically distinct representatives per
+	// normalized route (valid/invalid or public/private variance) while retaining
+	// every literal route and every distinct request contract.
+	semanticCounts := map[string]int{}
+	compacted := ranked[:0]
+	for _, r := range ranked {
+		if routeKey, normalized := semanticRouteIdentity(r.ip); normalized {
+			if semanticCounts[routeKey] >= 2 {
+				continue
+			}
+			semanticCounts[routeKey]++
+		}
+		compacted = append(compacted, r)
+	}
+	ranked = compacted
 	limit := sqliFallbackMaxParams
 	if s.cfg != nil {
 		limit = s.cfg.URLLimit()
@@ -458,7 +474,7 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	// Error-based: try quote/identifier/parenthesis boundaries independently. A
 	// single payload containing every quote type is easy for a WAF to block and can
 	// be syntactically invalid in a way that hides the engine's useful error.
-	base, baseStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
+	base, baseStatus, baseDuration := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
 	for _, suffix := range []string{"'", `"`, "`", "')", `\")`, "\\"} {
 		injected := baselineValue + suffix
 		errResp, errStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, injected, auth)
@@ -510,7 +526,8 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	// constants — a dynamic page that wobbles hundreds of bytes on its own no
 	// longer trips the boolean differential. Also a WAF gate: if the benign
 	// baseline itself is a block/challenge page, boolean testing is meaningless.
-	vol := measureVolatility(ctx, sqliHTTPClient, ip, auth, baselineValue)
+	vol := measureVolatilitySeeded(ctx, sqliHTTPClient, ip, auth, baselineValue,
+		base, baseStatus, baseDuration, true)
 	if vol.blocked {
 		return "", ""
 	}
@@ -873,23 +890,52 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth ma
 	if s.cfg != nil {
 		limit = s.cfg.URLLimit()
 	}
+	if limit <= 0 {
+		limit = 1000000
+	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT url FROM http_services
+		SELECT url, COALESCE(content_type,'') FROM http_services
 		WHERE target_id = ? AND status_code BETWEEN 200 AND 403
 		ORDER BY url LIMIT ?
 	`, targetID, limit)
 	if err != nil {
 		return
 	}
-	var urls []string
+	type headerSurface struct{ url, contentType string }
+	var surfaces []headerSurface
 	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err == nil {
-			urls = append(urls, u)
+		var surface headerSurface
+		if err := rows.Scan(&surface.url, &surface.contentType); err == nil {
+			surfaces = append(surfaces, surface)
 		}
 	}
 	rows.Close()
-	urls = filterURLsByHostScope(ctx, urls)
+	// Header sinks generally live in middleware/logging or a route handler. Collapse
+	// value variants of the same semantic route, but retain distinct controllers,
+	// query-field shapes and API paths. Static resources cannot reach SQL business
+	// logic and are dropped.
+	seenRoutes := map[string]bool{}
+	var urls []string
+	hostRepresentative := map[string]string{}
+	for _, surface := range surfaces {
+		if !urlHostInScope(ctx, surface.url) || isStaticAssetURL(surface.url) {
+			continue
+		}
+		ct := strings.ToLower(surface.contentType)
+		if strings.Contains(ct, "image/") || strings.Contains(ct, "font/") || strings.Contains(ct, "text/css") || strings.Contains(ct, "javascript") {
+			continue
+		}
+		shape, _ := semanticRouteIdentity(insertionPoint{URL: surface.url, Param: "@header", Method: "GET", Location: "header"})
+		if seenRoutes[shape] {
+			continue
+		}
+		seenRoutes[shape] = true
+		urls = append(urls, surface.url)
+		host := hostOfURL(surface.url)
+		if hostRepresentative[host] == "" {
+			hostRepresentative[host] = surface.url
+		}
+	}
 	if len(urls) == 0 {
 		return
 	}
@@ -961,12 +1007,26 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth ma
 					loc = "cookie"
 				}
 				hip := insertionPoint{URL: target, Param: vec.parameter, Value: vec.value, Method: "GET", Location: loc}
-				kind, ev := s.quickProbe(ctx, hip, auth)
-				if kind == "" && (s.cfg == nil || s.cfg.SQLiTimeBased) {
-					if dbms, timingEvidence, ok := s.timeBasedSQLi(ctx, hip, auth); ok {
-						kind = "time_based"
-						ev = timingEvidence + " (header DBMS: " + dbms + ")"
+				// Cookies are request/business-state fields, so every distinct route
+				// receives the complete deterministic+timing ladder. User-Agent and
+				// client-IP logging are normally host-wide middleware: run the deep
+				// blind ladder once per host, while every other route/header still gets
+				// a reproduced DB-error probe. This retains route-specific error SQLi
+				// coverage without multiplying the ~full SQLi engine by 8 headers and
+				// every concrete object URL.
+				deep := hdr == "Cookie" || (hostRepresentative[hostOfURL(target)] == target &&
+					(hdr == "User-Agent" || hdr == "X-Forwarded-For"))
+				kind, ev := "", ""
+				if deep {
+					kind, ev = s.quickProbe(ctx, hip, auth)
+					if kind == "" && (s.cfg == nil || s.cfg.SQLiTimeBased) {
+						if dbms, timingEvidence, ok := s.timeBasedSQLi(ctx, hip, auth); ok {
+							kind = "time_based"
+							ev = timingEvidence + " (header DBMS: " + dbms + ")"
+						}
 					}
+				} else {
+					kind, ev = s.headerProbe(ctx, target, hdr, vec.parameter, auth)
 				}
 				if kind != "" {
 					val := vec.value + "<INJECT>"

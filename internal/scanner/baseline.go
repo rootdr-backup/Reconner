@@ -2,9 +2,12 @@ package scanner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,12 +61,31 @@ type volEntry struct {
 // short enough that a later scan of the same target gets a fresh measurement.
 const volTTL = 10 * time.Minute
 
-func volKey(ip insertionPoint, benign string) string {
+func authFingerprint(auth map[string]string) string {
+	if len(auth) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(auth))
+	for k := range auth {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return strings.ToLower(keys[i]) < strings.ToLower(keys[j]) })
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(k))))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(auth[k]))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+func volKey(ip insertionPoint, benign string, auth map[string]string) string {
 	host, path := ip.URL, ""
 	if u, err := url.Parse(ip.URL); err == nil {
 		host, path = u.Host, u.Path
 	}
-	return ip.Method + "\x00" + host + "\x00" + path + "\x00" + ip.Param + "\x00" + benign
+	return insertionIdentity(ip) + "\x00" + host + "\x00" + path + "\x00" + benign + "\x00" + authFingerprint(auth)
 }
 
 // measureVolatility samples the endpoint's benign response `volSamples` times and
@@ -74,7 +96,17 @@ func volKey(ip insertionPoint, benign string) string {
 const volSamples = 3
 
 func measureVolatility(ctx context.Context, client *http.Client, ip insertionPoint, auth map[string]string, benign string) volProfile {
-	key := volKey(ip, benign)
+	return measureVolatilitySeeded(ctx, client, ip, auth, benign, "", 0, 0, false)
+}
+
+// measureVolatilitySeeded reuses a baseline response the caller already fetched
+// as the first volatility sample. SQLi needs that body for error/content checks;
+// historically it then sent three MORE identical baselines just to measure noise.
+// Reusing the response removes one request per insertion point without changing
+// the three-sample statistical bar.
+func measureVolatilitySeeded(ctx context.Context, client *http.Client, ip insertionPoint, auth map[string]string, benign,
+	seedBody string, seedStatus int, seedDuration time.Duration, haveSeed bool) volProfile {
+	key := volKey(ip, benign, auth)
 	if v, ok := volCache.Load(key); ok {
 		if e := v.(volEntry); time.Since(e.at) < volTTL {
 			return e.p
@@ -85,7 +117,13 @@ func measureVolatility(ctx context.Context, client *http.Client, ip insertionPoi
 	var durs []time.Duration
 	blocked := false
 	ok := 0
-	for i := 0; i < volSamples; i++ {
+	if haveSeed && (seedStatus != 0 || seedBody != "") {
+		ok++
+		blocked = looksLikeWAFBlock(seedStatus, seedBody)
+		lens = append(lens, len(seedBody))
+		durs = append(durs, seedDuration)
+	}
+	for i := ok; i < volSamples; i++ {
 		if ctx.Err() != nil {
 			break
 		}

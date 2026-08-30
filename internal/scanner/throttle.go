@@ -26,12 +26,18 @@ import (
 type hostThrottleState struct {
 	mu      sync.Mutex
 	backoff time.Duration
+	slots   chan struct{}
 }
 
 const (
 	throttleMax      = 2 * time.Second       // hard ceiling on per-request delay
 	throttleBumpBase = 60 * time.Millisecond // added on each unhealthy response
 	throttleEase     = 30 * time.Millisecond // removed on each healthy response
+	// Independent modules used to multiply their private worker pools into dozens
+	// of simultaneous requests to one app. Twelve keeps a healthy DAST worker pool
+	// fully busy while bounding cross-module bursts that cause 429/challenges and
+	// timeout-driven misses. This is shared per host across every target/module.
+	hostMaxInFlight = 12
 )
 
 var hostThrottles sync.Map // host -> *hostThrottleState
@@ -40,8 +46,23 @@ func throttleFor(host string) *hostThrottleState {
 	if v, ok := hostThrottles.Load(host); ok {
 		return v.(*hostThrottleState)
 	}
-	v, _ := hostThrottles.LoadOrStore(host, &hostThrottleState{})
+	v, _ := hostThrottles.LoadOrStore(host, &hostThrottleState{slots: make(chan struct{}, hostMaxInFlight)})
 	return v.(*hostThrottleState)
+}
+
+// hostRequestAcquire reserves one shared per-host request slot. Waiting occurs
+// before any detector timing window, and cancellation releases waiters promptly.
+func hostRequestAcquire(ctx context.Context, host string) (func(), bool) {
+	if host == "" {
+		return func() {}, true
+	}
+	st := throttleFor(host)
+	select {
+	case st.slots <- struct{}{}:
+		return func() { <-st.slots }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // hostThrottleWait sleeps the host's current adaptive backoff (0 for a healthy

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,6 +77,20 @@ type browserXSSConfirmer struct {
 var (
 	xssBrowserOnce sync.Once
 	xssBrowserInst *browserXSSConfirmer
+	domReflectMemo = struct {
+		sync.Mutex
+		entries map[string]domReflectEntry
+	}{entries: map[string]domReflectEntry{}}
+)
+
+type domReflectEntry struct {
+	reflected bool
+	at        time.Time
+}
+
+const (
+	domReflectTTL        = 10 * time.Minute
+	domReflectMaxEntries = 20000
 )
 
 const xssProfilePrefix = "reconner-xss-"
@@ -273,6 +288,72 @@ func xssBrowserPayloads() []string {
 	}
 }
 
+// xssBrowserPayloadsForAnalysis keeps runtime verification context-aware. The
+// raw reflection analyzer has already told us whether the value is HTML text, a
+// specific quote-delimited attribute, JavaScript, CSS, URL, comment or RCDATA.
+// Replaying all ~20 cross-context payloads in Chromium after that classification
+// was redundant and made one safe candidate cost tens of serialized navigations.
+// The selected ladders retain multiple syntactic/WAF variants for the relevant
+// context; unknown DOM-only contexts still receive the complete ladder.
+func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
+	if a == nil || a.Context == "" || a.Context == CtxNone {
+		return xssBrowserPayloads()
+	}
+	clean := `<img src=x onerror="top.document.title='%s'">`
+	svg := `<svg onload="top.document.title='%s'">`
+	doubleBreak := `"><img src=x onerror="top.document.title='%s'">`
+	singleBreak := `'><img src=x onerror="top.document.title='%s'">`
+	var out []string
+	switch a.Context {
+	case CtxHTMLText:
+		out = []string{clean, svg, `<details open ontoggle="top.document.title='%s'">`, `</script><script>top.document.title='%s'</script>`}
+	case CtxQuotedAttr, CtxURL:
+		if a.Context == CtxURL && a.URLScheme {
+			out = append(out, `javascript:top.document.title='%s'`)
+		}
+		if a.Quote == '\'' {
+			out = append(out, singleBreak, `' autofocus onfocus="top.document.title='%s'" x='`)
+		} else {
+			out = append(out, doubleBreak, `" autofocus onfocus="top.document.title='%s'" x="`)
+		}
+		out = append(out, `"><svg onload="top.document.title='%s'">`, `</script><script>top.document.title='%s'</script>`)
+	case CtxUnquotedAttr:
+		out = []string{` autofocus onfocus="top.document.title='%s'" x=`, `><svg onload="top.document.title='%s'">`, `><img src=x onerror="top.document.title='%s'">`}
+	case CtxEventHandler, CtxJSString:
+		if a.JSQuote == '\'' {
+			out = []string{`';top.document.title='%s';//`, `');top.document.title='%s';//`}
+		} else if a.JSQuote == '`' {
+			out = []string{"`;top.document.title='%s';//", "${top.document.title='%s'}"}
+		} else {
+			out = []string{`";top.document.title='%s';//`, `);top.document.title='%s';//`}
+		}
+		out = append(out, `</script><script>top.document.title='%s'</script>`)
+	case CtxJSExpr:
+		out = []string{`;top.document.title='%s';//`, `${top.document.title='%s'}`, `</script><script>top.document.title='%s'</script>`}
+	case CtxCSS:
+		out = []string{`</style><svg onload="top.document.title='%s'">`}
+	case CtxComment:
+		out = []string{`--><svg onload="top.document.title='%s'">`}
+	case CtxRCDATA:
+		if a.CloseTag != "" {
+			out = []string{a.CloseTag + `<svg onload="top.document.title='%s'">`}
+		} else {
+			out = []string{`</textarea><svg onload="top.document.title='%s'">`, `</title><svg onload="top.document.title='%s'">`}
+		}
+	default:
+		return xssBrowserPayloads()
+	}
+	seen := map[string]bool{}
+	deduped := out[:0]
+	for _, p := range out {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			deduped = append(deduped, p)
+		}
+	}
+	return deduped
+}
+
 func randNonce() string {
 	var b [6]byte
 	_, _ = rand.Read(b[:])
@@ -295,10 +376,26 @@ func (b *browserXSSConfirmer) Confirm(parent context.Context, rawURL, param stri
 // bodies are not emulated as document navigations because fetch() does not render
 // a JSON response and pretending it does would create false positives.
 func (b *browserXSSConfirmer) ConfirmInsertion(parent context.Context, ip insertionPoint, auth map[string]string) (payload string, ok bool) {
+	return b.ConfirmInsertionWithAnalysis(parent, ip, auth, nil)
+}
+
+func browserFormValues(ip insertionPoint, value string) url.Values {
+	values := url.Values{}
+	for k, v := range ip.Siblings {
+		values.Set(k, v)
+	}
+	values.Set(ip.Param, value)
+	return values
+}
+
+// ConfirmInsertionWithAnalysis is ConfirmInsertion with an optional reflection
+// context. Passing the context avoids cross-context browser payload spray while
+// preserving the full ladder for DOM-only/unknown sinks.
+func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysis(parent context.Context, ip insertionPoint, auth map[string]string, a *ReflectionAnalysis) (payload string, ok bool) {
 	if b == nil {
 		return "", false
 	}
-	for _, tmpl := range xssBrowserPayloads() {
+	for _, tmpl := range xssBrowserPayloadsForAnalysis(a) {
 		if parent.Err() != nil {
 			return "", false
 		}
@@ -310,9 +407,7 @@ func (b *browserXSSConfirmer) ConfirmInsertion(parent context.Context, ip insert
 		case method == "POST" && strings.Contains(strings.ToLower(ip.ContentType), "json"):
 			continue
 		case method == "POST":
-			values := siblingValues(ip.URL)
-			values.Set(ip.Param, pl)
-			fired = b.fireForm(parent, stripQuery(ip.URL), values, auth, nonce)
+			fired = b.fireForm(parent, ip.URL, browserFormValues(ip, pl), auth, nonce)
 		default:
 			req, err := buildInjectedRequest(parent, ip, pl, auth)
 			if err == nil {
@@ -365,11 +460,73 @@ func (b *browserXSSConfirmer) ConfirmScriptResource(parent context.Context, ip i
 // reflections that never appear in the raw HTML the HTTP checker sees — the reason
 // mature JS sites looked "0 reflected". Bounded by the caller's budget.
 func (b *browserXSSConfirmer) DOMReflects(parent context.Context, rawURL, param string) bool {
+	return b.DOMReflectsInsertion(parent, insertionPoint{URL: rawURL, Param: param, Method: "GET", Location: "query"}, nil)
+}
+
+func domReflectKey(ip insertionPoint, auth map[string]string) string {
+	keys := make([]string, 0, len(ip.Siblings))
+	for k := range ip.Siblings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var shape strings.Builder
+	for _, k := range keys {
+		shape.WriteString(k)
+		shape.WriteByte('=')
+		shape.WriteString(ip.Siblings[k])
+		shape.WriteByte(0)
+	}
+	return ip.URL + "\x00" + insertionIdentity(ip) + "\x00" + shape.String() + "\x00" + authFingerprint(auth)
+}
+
+func cachedDOMReflection(key string) (bool, bool) {
+	domReflectMemo.Lock()
+	defer domReflectMemo.Unlock()
+	e, ok := domReflectMemo.entries[key]
+	if !ok {
+		return false, false
+	}
+	if time.Since(e.at) >= domReflectTTL {
+		delete(domReflectMemo.entries, key)
+		return false, false
+	}
+	return e.reflected, true
+}
+
+func storeDOMReflection(key string, reflected bool) {
+	domReflectMemo.Lock()
+	defer domReflectMemo.Unlock()
+	if len(domReflectMemo.entries) >= domReflectMaxEntries {
+		now := time.Now()
+		for k, e := range domReflectMemo.entries {
+			if now.Sub(e.at) >= domReflectTTL {
+				delete(domReflectMemo.entries, k)
+			}
+		}
+		if len(domReflectMemo.entries) >= domReflectMaxEntries {
+			domReflectMemo.entries = map[string]domReflectEntry{}
+		}
+	}
+	domReflectMemo.entries[key] = domReflectEntry{reflected: reflected, at: time.Now()}
+}
+
+// DOMReflectsInsertion performs one inert rendered-DOM canary navigation before
+// the expensive execution ladder. Negative results are memoized briefly so the
+// param-reflection and XSS modules do not repeat the same browser work.
+func (b *browserXSSConfirmer) DOMReflectsInsertion(parent context.Context, ip insertionPoint, auth map[string]string) bool {
 	if b == nil {
 		return false
 	}
+	loc := insertionLocation(ip)
+	method := strings.ToUpper(strings.TrimSpace(ip.Method))
+	if loc == "json" || loc == "multipart" || loc == "xml" || (method != "" && method != "GET" && method != "POST") {
+		return false
+	}
+	key := domReflectKey(ip, auth)
+	if reflected, ok := cachedDOMReflection(key); ok {
+		return reflected
+	}
 	canary := randNonce()
-	u := injectParam(rawURL, param, canary)
 	select {
 	case b.navGate <- struct{}{}:
 		defer func() { <-b.navGate }()
@@ -382,13 +539,97 @@ func (b *browserXSSConfirmer) DOMReflects(parent context.Context, rawURL, param 
 	}
 	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
 	defer cancel()
+	set := network.Headers{}
+	for k, v := range auth {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
 	var dom string
-	_ = chromedp.Run(ctx,
-		chromedp.Navigate(u),
-		chromedp.Sleep(800*time.Millisecond),
-		chromedp.Evaluate(`document.documentElement.outerHTML`, &dom),
-	)
+	if method == "POST" {
+		parsed, err := url.Parse(ip.URL)
+		if err == nil {
+			origin := parsed.Scheme + "://" + parsed.Host + "/"
+			actionJSON, _ := json.Marshal(ip.URL)
+			valuesJSON, _ := json.Marshal(browserFormValues(ip, canary))
+			script := fmt.Sprintf(`(()=>{const a=%s,v=%s,f=document.createElement('form');f.method='POST';f.action=a;for(const [k,vs] of Object.entries(v)){for(const x of vs){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=x;f.appendChild(i)}}document.body.appendChild(f);f.submit()})()`, actionJSON, valuesJSON)
+			_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(origin), chromedp.Evaluate(script, nil), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+		}
+	} else if req, err := buildInjectedRequest(ctx, ip, canary, auth); err == nil {
+		_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(req.URL.String()), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+	}
+	reflected := strings.Contains(dom, canary)
+	storeDOMReflection(key, reflected)
+	return reflected
+}
+
+func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, rawURL string, headers map[string]string, canary string) bool {
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return false
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	defer cancel()
+	set := network.Headers{}
+	for k, v := range headers {
+		if !strings.EqualFold(k, "content-type") && v != "" {
+			set[k] = v
+		}
+	}
+	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	var dom string
+	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(rawURL),
+		chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
 	return strings.Contains(dom, canary)
+}
+
+// DOMSourceReflects is the source-mode preflight used by the broad DOM-XSS pass.
+// A harmless canary costs one navigation for query/path sources and at most four
+// fragment shapes for hash routers; only a rendered reflection pays for the full
+// execution ladder. Static source→eval leads can bypass this preflight through a
+// small fallback budget in VerifyDOMXSSOnPages because eval need not write text.
+func (b *browserXSSConfirmer) DOMSourceReflects(parent context.Context, pageURL, mode, param string, auth map[string]string) bool {
+	base := strings.SplitN(pageURL, "#", 2)[0]
+	switch mode {
+	case "query":
+		if param == "" {
+			param = "rcx"
+		}
+		return b.DOMReflectsInsertion(parent, insertionPoint{URL: base, Param: param, Method: "GET", Location: "query"}, auth)
+	case "path":
+		return b.DOMReflectsInsertion(parent, insertionPoint{URL: base, Param: "path", Method: "GET", Location: param}, auth)
+	case "hash":
+		key := "dom-source\x00" + base + "\x00hash\x00" + param + "\x00" + authFingerprint(auth)
+		if reflected, ok := cachedDOMReflection(key); ok {
+			return reflected
+		}
+		canary := randNonce()
+		placements := []string{}
+		if param != "" {
+			placements = append(placements, "#"+url.QueryEscape(param)+"="+url.QueryEscape(canary))
+		}
+		placements = append(placements, "#"+canary, "#/"+canary, "#!/"+canary)
+		for _, suffix := range placements {
+			if b.renderedDOMURLContains(parent, base+suffix, auth, canary) {
+				storeDOMReflection(key, true)
+				return true
+			}
+		}
+		storeDOMReflection(key, false)
+		return false
+	default:
+		// window.name/postMessage are only scheduled from static leads and have
+		// dedicated faithful-origin runtime drivers; do not synthesize a weaker
+		// canary model for them here.
+		return true
+	}
 }
 
 // ConfirmDOMSource proves DOM XSS by placing an EXECUTING payload in a URL source

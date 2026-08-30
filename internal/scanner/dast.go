@@ -296,11 +296,21 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 		// to a real headless browser, bounded by the per-scan budget, and confirm
 		// actual execution. Only for the standalone XSS objective so a full combined
 		// scan isn't slowed by browser navigations on every non-reflected param.
-		if s.browserBudget.Add(-1) >= 0 {
-			if b := getXSSBrowser(); b != nil {
-				if pl, ok := b.ConfirmInsertion(ctx, ip, auth); ok {
-					s.confirmXSS(ctx, targetID, ip, "dom", pl, "browser", 99)
-					out.xssConfirmed++
+		if b := getXSSBrowser(); b != nil {
+			cachedReflected, cached := cachedDOMReflection(domReflectKey(ip, auth))
+			// A cached negative from param_reflection costs no browser navigation
+			// here and therefore must not consume the limited escalation budget.
+			if (!cached || cachedReflected) && s.browserBudget.Add(-1) >= 0 {
+				// One inert rendered-DOM canary eliminates parameters that are not
+				// consumed client-side. The old path immediately sprayed the complete
+				// browser payload ladder (up to ~20 serialized navigations) at every
+				// raw-negative HTML parameter, even after reflection scanning had
+				// already shown it was inert.
+				if b.DOMReflectsInsertion(ctx, ip, auth) {
+					if pl, ok := b.ConfirmInsertion(ctx, ip, auth); ok {
+						s.confirmXSS(ctx, targetID, ip, "dom", pl, "browser", 99)
+						out.xssConfirmed++
+					}
 				}
 			}
 		}
@@ -562,7 +572,7 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 	//    also catches client-rendered / SPA reflections the raw-HTML pass can't see.
 	browserPayload := ""
 	if b := getXSSBrowser(); b != nil {
-		if pl, ok := b.ConfirmInsertion(ctx, ip, auth); ok {
+		if pl, ok := b.ConfirmInsertionWithAnalysis(ctx, ip, auth, &a); ok {
 			browserPayload = pl
 		}
 	}
