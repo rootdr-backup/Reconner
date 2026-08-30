@@ -151,6 +151,82 @@ func TestBlindBooleanCoincidenceNoFinding(t *testing.T) {
 	}
 }
 
+// TestBlindBooleanStatusOracle covers APIs that encode row/no-row solely in the
+// HTTP status (for example 204 vs 404) with identical empty bodies. The old
+// body-length-only classifier discarded this real extraction channel.
+func TestBlindBooleanStatusOracle(t *testing.T) {
+	const dbname = "statusdb"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if evalPayload(r.URL.Query().Get("id"), dbname) {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &SQLiScanner{}
+	ip := insertionPoint{URL: srv.URL + "/item?id=1", Param: "id", Value: "1", Method: "GET"}
+	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	if kind != "boolean_based" || !strings.Contains(ev, dbname) {
+		t.Fatalf("status-only boolean oracle must be extracted; kind=%q evidence=%q", kind, ev)
+	}
+}
+
+func TestOrderByBooleanOracleExtraction(t *testing.T) {
+	const dbname = "ordersdb"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("sort")
+		truth := true
+		if i := strings.Index(v, "CASE WHEN ("); i >= 0 {
+			rest := v[i+len("CASE WHEN ("):]
+			if end := strings.Index(rest, ") THEN 1 ELSE 2 END"); end >= 0 {
+				truth = evalCond(rest[:end], dbname)
+			}
+		}
+		if truth {
+			w.Write([]byte("row-alice,row-bob,row-carol"))
+		} else {
+			w.Write([]byte("row-carol,row-bob,row-alice"))
+		}
+	}))
+	defer srv.Close()
+
+	s := &SQLiScanner{}
+	ip := insertionPoint{URL: srv.URL + "/users?sort=name", Param: "sort", Value: "name", Method: "GET"}
+	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	if kind != "boolean_based" || !strings.Contains(ev, dbname) || !strings.Contains(ev, "ORDER BY") {
+		t.Fatalf("ORDER BY SQLi must be proven by extraction; kind=%q evidence=%q", kind, ev)
+	}
+}
+
+func TestORBooleanOracleWhenBaselineSelectsNoRow(t *testing.T) {
+	const dbname = "missingrowdb"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("id")
+		truth := false // id=999 does not exist
+		if i := strings.Index(v, " OR ("); i >= 0 {
+			rest := strings.TrimSuffix(v[i+len(" OR ("):], "-- -")
+			rest = strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+			truth = evalCond(rest, dbname)
+		}
+		if truth {
+			w.Write([]byte("selected-row-from-database"))
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("no-row"))
+		}
+	}))
+	defer srv.Close()
+
+	s := &SQLiScanner{}
+	ip := insertionPoint{URL: srv.URL + "/item?id=999", Param: "id", Value: "999", Method: "GET"}
+	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	if kind != "boolean_based" || !strings.Contains(ev, dbname) || !strings.Contains(ev, "OR-based") {
+		t.Fatalf("OR oracle must recover SQLi when baseline has no row; kind=%q evidence=%q", kind, ev)
+	}
+}
+
 // TestBlindExtractDirectRejectsNonOracle unit-tests the extractor: against the
 // coincidence endpoint it must return ok=false (nothing extracted).
 func TestBlindExtractDirectRejectsNonOracle(t *testing.T) {

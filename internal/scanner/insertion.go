@@ -1,11 +1,17 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,15 +23,67 @@ import (
 // query string (GET), form body (POST), or JSON body. This is what lets the
 // scanner cover POST forms and JSON APIs, not just GET params.
 type insertionPoint struct {
-	URL         string
-	Param       string
-	Method      string // GET | POST
-	ContentType string // "", application/x-www-form-urlencoded, application/json
+	URL   string
+	Param string
+	// Value is the value discovered for this exact insertion point. Active
+	// detectors must mutate the real value instead of silently replacing every
+	// parameter with "1": doing the latter changes UUID/string/date lookups to a
+	// different route/object before the SQL probe even reaches the application.
+	Value string
+	// Siblings preserves the other discovered fields of the same form/JSON
+	// request. Omitting required siblings makes the application reject the request
+	// during validation, before the mutated field can ever reach its SQL sink.
+	Siblings     map[string]string
+	SiblingTypes map[string]string // JSON sibling path -> string|number|integer|boolean|object|array
+	Method       string            // GET | POST
+	ContentType  string            // "", application/x-www-form-urlencoded, application/json
 	// Location tells the injector WHERE the value lives: "" / "query" (a
 	// ?name=value pair, the default) or "path:<index>" for a REST-style path
 	// segment (e.g. /appointment/<id>). Body/JSON placement is still derived from
 	// Method+ContentType; Location only distinguishes query- vs path-based GETs.
 	Location string
+}
+
+// insertionLocation returns the normalized candidate/request location while
+// preserving explicit path/header/cookie locations. A database row commonly
+// carries the historical default "query" even for a POST form, so method and
+// content type are authoritative for body placement.
+func insertionLocation(ip insertionPoint) string {
+	loc := strings.ToLower(strings.TrimSpace(ip.Location))
+	if strings.HasPrefix(loc, "path:") || strings.HasPrefix(loc, "graphql:") || loc == "path" || loc == "header" || loc == "cookie" {
+		return loc
+	}
+	if !strings.EqualFold(ip.Method, "GET") && strings.TrimSpace(ip.Method) != "" {
+		// Explicit query placement with no request-body content type is used by
+		// OpenAPI operations such as POST /search?page=2. Historical form rows also
+		// defaulted location to "query", but their content type identifies the body.
+		if loc == "query" && strings.TrimSpace(ip.ContentType) == "" {
+			return "query"
+		}
+		ct := strings.ToLower(ip.ContentType)
+		if strings.Contains(ct, "multipart/form-data") {
+			return "multipart"
+		}
+		if strings.Contains(ct, "xml") {
+			return "xml"
+		}
+		if strings.Contains(ct, "json") {
+			return "json"
+		}
+		return "body"
+	}
+	if loc == "json" || loc == "body" {
+		return loc
+	}
+	return "query"
+}
+
+// insertionIdentity distinguishes placements that happen to share a URL and
+// parameter name. Without method/location/content-type in this key, a GET hit
+// can suppress the POST/JSON/path version of the same logical field.
+func insertionIdentity(ip insertionPoint) string {
+	return insertionKey(ip.URL, ip.Param, ip.Method) + "|" +
+		insertionLocation(ip) + "|" + strings.ToLower(strings.TrimSpace(ip.ContentType))
 }
 
 // isPathLocation reports whether the insertion point injects into a path segment,
@@ -130,7 +188,7 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 		pool = 5000
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT url, parameter, COALESCE(method,'GET'), COALESCE(content_type,''), COALESCE(location,'query'), COALESCE(is_reflected,0)
+		SELECT url, parameter, COALESCE(value,''), COALESCE(method,'GET'), COALESCE(content_type,''), COALESCE(location,'query'), COALESCE(is_reflected,0)
 		FROM parameters WHERE target_id = ?
 		ORDER BY COALESCE(is_reflected,0) DESC
 		LIMIT ?
@@ -150,7 +208,7 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 	for rows.Next() {
 		var ip insertionPoint
 		var reflected int
-		if err := rows.Scan(&ip.URL, &ip.Param, &ip.Method, &ip.ContentType, &ip.Location, &reflected); err != nil {
+		if err := rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected); err != nil {
 			continue
 		}
 		if !urlHostInScope(ctx, ip.URL) {
@@ -162,7 +220,7 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 		if hostSkippedByCMS(ip.URL, cmsSkip) {
 			continue
 		}
-		key := insertionKey(ip.URL, ip.Param, ip.Method) + "|" + ip.Location
+		key := insertionIdentity(ip)
 		if seen[key] {
 			continue
 		}
@@ -189,7 +247,7 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 		pool = 10000
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT url,parameter,COALESCE(method,'GET'),COALESCE(content_type,''),COALESCE(location,'query'),COALESCE(is_reflected,0)
+		SELECT url,parameter,COALESCE(value,''),COALESCE(method,'GET'),COALESCE(content_type,''),COALESCE(location,'query'),COALESCE(is_reflected,0)
 		FROM parameters WHERE target_id=?
 		ORDER BY COALESCE(is_reflected,0) DESC,
 			CASE WHEN UPPER(COALESCE(method,'GET'))='GET' THEN 0 ELSE 1 END,
@@ -203,11 +261,11 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 	for rows.Next() {
 		var ip insertionPoint
 		var reflected int
-		if rows.Scan(&ip.URL, &ip.Param, &ip.Method, &ip.ContentType, &ip.Location, &reflected) != nil ||
+		if rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected) != nil ||
 			ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
 			continue
 		}
-		key := insertionKey(ip.URL, ip.Param, ip.Method) + "|" + strings.ToLower(ip.Location) + "|" + strings.ToLower(ip.ContentType)
+		key := insertionIdentity(ip)
 		if seen[key] {
 			continue
 		}
@@ -244,6 +302,39 @@ func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, 
 
 	var req *http.Request
 	var err error
+	loc := insertionLocation(ip)
+	if loc == "header" || loc == "cookie" {
+		req, err = http.NewRequestWithContext(ctx, method, ip.URL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		if loc == "cookie" {
+			req.Header.Set("Cookie", replaceCookieValue(req.Header.Get("Cookie"), ip.Param, value))
+		} else {
+			req.Header.Set(ip.Param, value)
+		}
+		return req, nil
+	}
+	if strings.HasPrefix(strings.ToLower(ip.Location), "graphql:") {
+		body, ok := buildGraphQLInjectionBody(ip, value)
+		if !ok {
+			return nil, errors.New("invalid GraphQL insertion location")
+		}
+		req, err = http.NewRequestWithContext(ctx, "POST", ip.URL, strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		return req, nil
+	}
 
 	// Path-segment injection (REST-style value in the URL path). Independent of
 	// method, though in practice these are GETs; the value replaces the target
@@ -261,16 +352,46 @@ func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, 
 	}
 
 	switch {
-	case method == "POST" && strings.Contains(ip.ContentType, "json"):
-		// JSON body: { "param": "value" }
-		payload := map[string]string{ip.Param: value}
-		b, _ := json.Marshal(payload)
-		req, err = http.NewRequestWithContext(ctx, "POST", stripQuery(ip.URL), strings.NewReader(string(b)))
+	case loc == "json":
+		payload := make(map[string]string, len(ip.Siblings)+1)
+		for k, v := range ip.Siblings {
+			payload[k] = v
+		}
+		payload[ip.Param] = value
+		body := buildJSONFieldsTyped(payload, ip.SiblingTypes, ip.Param)
+		req, err = http.NewRequestWithContext(ctx, method, ip.URL, strings.NewReader(body))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-	case method == "POST":
-		// form body: param=value (plus siblings from the original query, if any).
+	case loc == "multipart":
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		for k, v := range ip.Siblings {
+			if k != ip.Param {
+				_ = mw.WriteField(k, v)
+			}
+		}
+		_ = mw.WriteField(ip.Param, value)
+		_ = mw.Close()
+		req, err = http.NewRequestWithContext(ctx, method, ip.URL, &body)
+		if err == nil {
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+		}
+	case loc == "xml":
+		fields := make(map[string]string, len(ip.Siblings)+1)
+		for k, v := range ip.Siblings {
+			fields[k] = v
+		}
+		fields[ip.Param] = value
+		body := buildXMLFields(fields)
+		req, err = http.NewRequestWithContext(ctx, method, ip.URL, strings.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/xml")
+		}
+	case loc == "body":
+		// form body: param=value plus fields discovered in the same form. Query
+		// parameters on the form action remain in the URL; moving them into the body
+		// changes routing/validation semantics and can hide the SQL sink.
 		// The injected value is encoded with the SAME minimal escaping as the GET
 		// path (queryEscapeMinimal), NOT url.Values.Encode(): the latter re-encodes a
 		// stray '%', so a pre-encoded bypass payload (%0a, ..%2f, %00) becomes %250a /
@@ -278,7 +399,12 @@ func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, 
 		// slash — a silent false negative for POST-body injection that the GET path
 		// already avoids. Only structural characters (space, &, #, +, control bytes,
 		// a stray %) are escaped, so field boundaries stay intact.
-		sibs := siblingValues(ip.URL)
+		sibs := url.Values{}
+		for k, v := range ip.Siblings {
+			if k != ip.Param {
+				sibs.Set(k, v)
+			}
+		}
 		delete(sibs, ip.Param)
 		var body strings.Builder
 		if enc := sibs.Encode(); enc != "" {
@@ -288,13 +414,13 @@ func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, 
 		body.WriteString(url.QueryEscape(ip.Param))
 		body.WriteByte('=')
 		body.WriteString(queryEscapeMinimal(value))
-		req, err = http.NewRequestWithContext(ctx, "POST", stripQuery(ip.URL), strings.NewReader(body.String()))
+		req, err = http.NewRequestWithContext(ctx, method, ip.URL, strings.NewReader(body.String()))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
 	default:
 		// GET query string
-		req, err = http.NewRequestWithContext(ctx, "GET", injectParam(ip.URL, ip.Param, value), nil)
+		req, err = http.NewRequestWithContext(ctx, method, injectParam(ip.URL, ip.Param, value), nil)
 	}
 	if err != nil {
 		return nil, err
@@ -304,6 +430,156 @@ func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, 
 		req.Header.Set(k, v)
 	}
 	return req, nil
+}
+
+func buildJSONFields(fields map[string]string) string {
+	return buildJSONFieldsTyped(fields, nil, "")
+}
+
+func buildJSONFieldsTyped(fields, types map[string]string, forceStringPath string) string {
+	root := map[string]interface{}{}
+	for path, value := range fields {
+		parts := strings.Split(path, ".")
+		cur := root
+		for i, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if i == len(parts)-1 {
+				cur[part] = jsonFieldValue(value, types[path], path == forceStringPath)
+				continue
+			}
+			next, ok := cur[part].(map[string]interface{})
+			if !ok {
+				next = map[string]interface{}{}
+				cur[part] = next
+			}
+			cur = next
+		}
+	}
+	b, _ := json.Marshal(root)
+	return string(b)
+}
+
+func jsonFieldValue(value, typ string, forceString bool) interface{} {
+	if forceString {
+		return value
+	}
+	switch strings.ToLower(typ) {
+	case "integer":
+		if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			return n
+		}
+		return int64(1)
+	case "number":
+		if n, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
+			return n
+		}
+		return float64(1)
+	case "boolean", "bool":
+		if v, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			return v
+		}
+		return true
+	case "object":
+		var v map[string]interface{}
+		if json.Unmarshal([]byte(value), &v) == nil {
+			return v
+		}
+		return map[string]interface{}{}
+	case "array":
+		var v []interface{}
+		if json.Unmarshal([]byte(value), &v) == nil {
+			return v
+		}
+		return []interface{}{}
+	default:
+		return value
+	}
+}
+
+func buildXMLFields(fields map[string]string) string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b bytes.Buffer
+	b.WriteString("<request>")
+	for _, rawName := range names {
+		name := safeXMLName(rawName)
+		b.WriteByte('<')
+		b.WriteString(name)
+		b.WriteByte('>')
+		_ = xml.EscapeText(&b, []byte(fields[rawName]))
+		b.WriteString("</")
+		b.WriteString(name)
+		b.WriteByte('>')
+	}
+	b.WriteString("</request>")
+	return b.String()
+}
+
+func safeXMLName(name string) string {
+	var b strings.Builder
+	for i, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' ||
+			(i > 0 && ((r >= '0' && r <= '9') || r == '-' || r == '.'))
+		if ok {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "field"
+	}
+	return b.String()
+}
+
+// buildGraphQLInjectionBody turns a harvested GraphQL argument insertion point
+// into a syntactically valid operation. Other arguments from the same operation
+// are replayed as siblings so required-argument validation does not stop the
+// request before resolver/SQL execution.
+func buildGraphQLInjectionBody(ip insertionPoint, value string) (string, bool) {
+	parts := strings.Split(ip.Location, ":")
+	if len(parts) < 4 || !strings.EqualFold(parts[0], "graphql") {
+		return "", false
+	}
+	kind, operation, targetArg := strings.ToLower(parts[1]), parts[2], parts[3]
+	if kind != "query" && kind != "mutation" {
+		kind = "query"
+	}
+	args := map[string]string{}
+	prefix := operation + "."
+	for name, v := range ip.Siblings {
+		if strings.HasPrefix(name, prefix) {
+			args[strings.TrimPrefix(name, prefix)] = v
+		}
+	}
+	args[targetArg] = value
+	names := make([]string, 0, len(args))
+	for name := range args {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var encoded []string
+	for _, name := range names {
+		v := args[name]
+		if v == "" {
+			v = "1"
+		}
+		b, _ := json.Marshal(v)
+		encoded = append(encoded, name+":"+string(b))
+	}
+	selection := "{__typename}"
+	if len(parts) >= 5 && strings.EqualFold(parts[4], "scalar") {
+		selection = ""
+	}
+	query := kind + "{" + operation + "(" + strings.Join(encoded, ",") + ")" + selection + "}"
+	b, _ := json.Marshal(map[string]string{"query": query})
+	return string(b), true
 }
 
 // sendInjected performs the injected request and returns body + elapsed time.

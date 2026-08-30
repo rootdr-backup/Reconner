@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // OpenAPI / Swagger ingestion.
@@ -35,11 +37,19 @@ var pathParamRE = regexp.MustCompile(`\{[^}]+\}`)
 
 // apiEndpoint is one documented operation reduced to what the scanner tests.
 type apiEndpoint struct {
-	Method string
-	URL    string // absolute; path templates ({id}) substituted with a sample value
-	Query  []string
-	Body   []string
-	JSON   bool
+	Method      string
+	URL         string // absolute; path templates ({id}) substituted with a sample value
+	Query       []string
+	Body        []string
+	Path        []apiPathParameter
+	JSON        bool
+	ContentType string
+	BodyTypes   map[string]string
+}
+
+type apiPathParameter struct {
+	Name  string
+	Index int // 0-based segment index in the final absolute URL path
 }
 
 // harvestAPISpecs probes each in-scope origin for an OpenAPI/Swagger document,
@@ -77,18 +87,34 @@ func (s *ParamScanner) harvestAPISpecs(ctx context.Context, targetID string, tar
 			logFn("info", "param_discovery", fmt.Sprintf("OpenAPI/Swagger spec found at %s%s — %d endpoint(s).", origin, sp, len(eps)))
 			for _, ep := range eps {
 				endpoints++
+				for _, p := range ep.Path {
+					method := ep.Method
+					if method == "" {
+						method = "GET"
+					}
+					if s.storeParameter(targetID, paramEntry{URL: ep.URL, Param: p.Name, Value: "1", Source: "openapi", Method: method, Location: "path:" + itoa(p.Index)}) == nil {
+						stored++
+					}
+				}
 				for _, q := range ep.Query {
 					sep := "?"
 					if strings.Contains(ep.URL, "?") {
 						sep = "&"
 					}
-					if s.storeParameter(targetID, paramEntry{URL: ep.URL + sep + q + "=", Param: q, Value: "", Source: "openapi"}) == nil {
+					method := ep.Method
+					if method == "" {
+						method = "GET"
+					}
+					if s.storeParameter(targetID, paramEntry{URL: ep.URL + sep + q + "=", Param: q, Value: "", Source: "openapi", Method: method, Location: "query"}) == nil {
 						stored++
 					}
 				}
 				if len(ep.Body) > 0 {
-					ct := "application/x-www-form-urlencoded"
-					if ep.JSON {
+					ct := ep.ContentType
+					if ct == "" {
+						ct = "application/x-www-form-urlencoded"
+					}
+					if ep.JSON && ep.ContentType == "" {
 						ct = "application/json"
 					}
 					method := ep.Method
@@ -96,7 +122,13 @@ func (s *ParamScanner) harvestAPISpecs(ctx context.Context, targetID string, tar
 						method = "POST"
 					}
 					for _, b := range ep.Body {
-						if s.storeFormParameter(targetID, ep.URL, b, method, ct) {
+						storedOK := false
+						if strings.Contains(ct, "json") {
+							storedOK = s.storeJSONParameter(targetID, ep.URL, b, ep.BodyTypes[b], method, ct)
+						} else {
+							storedOK = s.storeFormParameter(targetID, ep.URL, b, method, ct)
+						}
+						if storedOK {
 							stored++
 						}
 					}
@@ -144,9 +176,9 @@ func (s *ParamScanner) fetchSpec(ctx context.Context, client *http.Client, u str
 }
 
 // parseAPISpec parses a Swagger 2.0 or OpenAPI 3.x JSON document into endpoints.
-// It navigates generic maps defensively (never panics on an unexpected shape) and
-// does NOT resolve $ref chains — it extracts what's inline, which covers the vast
-// majority of real specs and keeps the parser bounded.
+// It navigates generic maps defensively and resolves bounded LOCAL $ref chains
+// (#/components/schemas or Swagger #/definitions), which is where most real specs
+// keep their request-body properties.
 func parseAPISpec(body []byte, origin string) []apiEndpoint {
 	var doc map[string]interface{}
 	if json.Unmarshal(body, &doc) != nil {
@@ -158,6 +190,7 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 	}
 	isV3 := strings.HasPrefix(asStr(doc["openapi"]), "3")
 	bases := specBaseURLs(doc, origin, isV3)
+	docConsumes := stringSlice(doc["consumes"])
 	methods := map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true}
 
 	var eps []apiEndpoint
@@ -186,7 +219,13 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 			}
 			query := append([]string{}, sharedQuery...)
 			var body []string
+			bodyTypes := map[string]string{}
 			isJSON := false
+			contentType := ""
+			consumes := stringSlice(op["consumes"])
+			if len(consumes) == 0 {
+				consumes = docConsumes
+			}
 			for _, p := range asSlice(op["parameters"]) {
 				pm := asMap(p)
 				if pm == nil {
@@ -201,16 +240,25 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 					query = append(query, name)
 				case "formData":
 					body = append(body, name)
+					bodyTypes[name] = strings.ToLower(asStr(pm["type"]))
+					contentType = preferredRequestContentType(consumes, "application/x-www-form-urlencoded")
 				case "body": // Swagger 2.0 body: schema.properties
-					body = append(body, schemaProps(pm["schema"])...)
+					body = append(body, schemaPropsResolved(doc, pm["schema"])...)
+					mergeStringMap(bodyTypes, schemaPropTypesResolved(doc, pm["schema"], "", 0))
 					isJSON = true
+					contentType = preferredRequestContentType(consumes, "application/json")
 				}
 			}
 			// OpenAPI 3.x request body
 			if rb := asMap(op["requestBody"]); rb != nil {
 				for mt, c := range asMap(rb["content"]) {
 					if cm := asMap(c); cm != nil {
-						body = append(body, schemaProps(cm["schema"])...)
+						props := schemaPropsResolved(doc, cm["schema"])
+						body = append(body, props...)
+						mergeStringMap(bodyTypes, schemaPropTypesResolved(doc, cm["schema"], "", 0))
+						if len(props) > 0 {
+							contentType = preferContentType(contentType, mt)
+						}
 						if strings.Contains(mt, "json") {
 							isJSON = true
 						}
@@ -218,12 +266,16 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 				}
 			}
 			for _, base := range bases {
+				concreteURL, pathParams := joinAPIURLWithParams(base, rawPath)
 				eps = append(eps, apiEndpoint{
-					Method: strings.ToUpper(m),
-					URL:    joinAPIURL(base, rawPath),
-					Query:  dedupeStrings(query),
-					Body:   dedupeStrings(body),
-					JSON:   isJSON,
+					Method:      strings.ToUpper(m),
+					URL:         concreteURL,
+					Query:       dedupeStrings(query),
+					Body:        dedupeStrings(body),
+					Path:        pathParams,
+					JSON:        isJSON,
+					ContentType: contentType,
+					BodyTypes:   bodyTypes,
 				})
 			}
 		}
@@ -271,33 +323,220 @@ func resolveSpecBase(origin, server string) string {
 // so the stored endpoint is fetchable (real IDOR path-param testing is a later
 // phase; here we just need a valid URL for query/body parameter testing).
 func joinAPIURL(base, path string) string {
+	u, _ := joinAPIURLWithParams(base, path)
+	return u
+}
+
+func joinAPIURLWithParams(base, path string) (string, []apiPathParameter) {
+	basePathSegments := 0
+	if u, err := url.Parse(base); err == nil {
+		basePathSegments = len(nonEmptyPathSegments(u.Path))
+	}
+	var params []apiPathParameter
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for i, segment := range segments {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") && len(segment) > 2 {
+			name := strings.TrimSpace(segment[1 : len(segment)-1])
+			if name != "" {
+				params = append(params, apiPathParameter{Name: name, Index: basePathSegments + i})
+				segments[i] = "1"
+			}
+		}
+	}
+	path = strings.Join(segments, "/")
 	path = pathParamRE.ReplaceAllString(path, "1")
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	return strings.TrimRight(base, "/") + path
+	return strings.TrimRight(base, "/") + path, params
+}
+
+func nonEmptyPathSegments(path string) []string {
+	var out []string
+	for _, s := range strings.Split(strings.Trim(path, "/"), "/") {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func schemaProps(v interface{}) []string {
-	sc := asMap(v)
+	return schemaPropPathsResolved(nil, v, "", 0)
+}
+
+func schemaPropsResolved(doc map[string]interface{}, v interface{}) []string {
+	return schemaPropPathsResolved(doc, v, "", 0)
+}
+
+func schemaPropPathsResolved(doc map[string]interface{}, v interface{}, prefix string, depth int) []string {
+	if depth > 5 {
+		return nil
+	}
+	sc := resolveLocalSchemaRef(doc, asMap(v), depth)
 	if sc == nil {
 		return nil
 	}
 	props := asMap(sc["properties"])
 	if props == nil {
-		return nil
+		var out []string
+		for _, key := range []string{"allOf", "oneOf", "anyOf"} {
+			for _, part := range asSlice(sc[key]) {
+				out = append(out, schemaPropPathsResolved(doc, part, prefix, depth+1)...)
+			}
+		}
+		return dedupeStrings(out)
 	}
-	out := make([]string, 0, len(props))
-	for k := range props {
-		out = append(out, k)
+	var out []string
+	for name, raw := range props {
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		nested := schemaPropPathsResolved(doc, raw, path, depth+1)
+		if len(nested) > 0 {
+			out = append(out, nested...)
+		} else {
+			out = append(out, path)
+		}
 	}
 	return out
+}
+
+func schemaPropTypesResolved(doc map[string]interface{}, v interface{}, prefix string, depth int) map[string]string {
+	out := map[string]string{}
+	if depth > 5 {
+		return out
+	}
+	sc := resolveLocalSchemaRef(doc, asMap(v), depth)
+	if len(asMap(sc["properties"])) == 0 {
+		for _, key := range []string{"allOf", "oneOf", "anyOf"} {
+			for _, part := range asSlice(sc[key]) {
+				mergeStringMap(out, schemaPropTypesResolved(doc, part, prefix, depth+1))
+			}
+		}
+		return out
+	}
+	for name, raw := range asMap(sc["properties"]) {
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		nested := schemaPropTypesResolved(doc, raw, path, depth+1)
+		if len(nested) > 0 {
+			mergeStringMap(out, nested)
+		} else {
+			typ := strings.ToLower(asStr(asMap(raw)["type"]))
+			if typ == "" {
+				typ = "string"
+			}
+			out[path] = typ
+		}
+	}
+	return out
+}
+
+func resolveLocalSchemaRef(doc, schema map[string]interface{}, depth int) map[string]interface{} {
+	if schema == nil || doc == nil || depth > 5 {
+		return schema
+	}
+	ref := asStr(schema["$ref"])
+	if !strings.HasPrefix(ref, "#/") {
+		return schema
+	}
+	var cur interface{} = doc
+	for _, raw := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+		part := strings.ReplaceAll(strings.ReplaceAll(raw, "~1", "/"), "~0", "~")
+		m := asMap(cur)
+		if m == nil {
+			return schema
+		}
+		cur = m[part]
+	}
+	resolved := asMap(cur)
+	if resolved == nil {
+		return schema
+	}
+	return resolveLocalSchemaRef(doc, resolved, depth+1)
+}
+
+func mergeStringMap(dst, src map[string]string) {
+	for k, v := range src {
+		dst[k] = v
+	}
+}
+
+func (s *ParamScanner) storeJSONParameter(targetID, endpoint, name, typ, method, contentType string) bool {
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	if typ == "" {
+		typ = "string"
+	}
+	value := ""
+	switch typ {
+	case "integer", "number":
+		value = "1"
+	case "boolean", "bool":
+		value = "true"
+	case "object":
+		value = "{}"
+	case "array":
+		value = "[]"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,?,'openapi',?,?,?)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET value=excluded.value`,
+		uuid.New().String(), targetID, endpoint, name, value, method, contentType, "json:"+typ)
+	return err == nil
 }
 
 // small defensive accessors over decoded JSON.
 func asMap(v interface{}) map[string]interface{} { m, _ := v.(map[string]interface{}); return m }
 func asSlice(v interface{}) []interface{}        { s, _ := v.([]interface{}); return s }
 func asStr(v interface{}) string                 { s, _ := v.(string); return s }
+
+func stringSlice(v interface{}) []string {
+	var out []string
+	for _, item := range asSlice(v) {
+		if s := strings.ToLower(strings.TrimSpace(asStr(item))); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func preferredRequestContentType(values []string, fallback string) string {
+	chosen := ""
+	for _, v := range values {
+		chosen = preferContentType(chosen, v)
+	}
+	if chosen == "" {
+		return fallback
+	}
+	return chosen
+}
+
+func preferContentType(current, candidate string) string {
+	candidate = strings.ToLower(candidate)
+	rank := func(v string) int {
+		switch {
+		case strings.Contains(v, "json"):
+			return 4
+		case strings.Contains(v, "multipart/form-data"):
+			return 3
+		case strings.Contains(v, "xml"):
+			return 2
+		case strings.Contains(v, "x-www-form-urlencoded"):
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(candidate) > rank(current) {
+		return candidate
+	}
+	return current
+}
 
 func dedupeStrings(in []string) []string {
 	if len(in) < 2 {

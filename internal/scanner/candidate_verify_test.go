@@ -81,6 +81,74 @@ func TestSQLmapArgsAreStructuredAndSafe(t *testing.T) {
 	}
 }
 
+func TestSQLmapArgsPreserveInsertionLocationAndAuth(t *testing.T) {
+	auth := map[string]string{"Cookie": "session=abc; cart=7", "Authorization": "Bearer token"}
+	tests := []struct {
+		name string
+		c    VulnerabilityCandidate
+		want []string
+		not  []string
+	}{
+		{
+			name: "form body",
+			c:    VulnerabilityCandidate{URL: "https://x.test/save?keep=yes", Method: "POST", Location: "body", Parameter: "title", Payload: "error_based"},
+			want: []string{"-u https://x.test/save?keep=yes", "--method=POST", "--data title=1", "-p title", "Authorization: Bearer token"},
+			not:  []string{"--data error_based"},
+		},
+		{
+			name: "json body",
+			c:    VulnerabilityCandidate{URL: "https://x.test/api", Method: "POST", Location: "json", Parameter: "lookup"},
+			want: []string{`--data {"lookup":"1*"}`, "Content-Type: application/json"},
+			not:  []string{"-p lookup"},
+		},
+		{
+			name: "multipart body",
+			c:    VulnerabilityCandidate{URL: "https://x.test/upload", Method: "POST", Location: "multipart", Parameter: "title"},
+			want: []string{"Content-Type: multipart/form-data; boundary=----ReconnerSQLmapBoundary", `name="title"`, "1*"},
+			not:  []string{"-p title"},
+		},
+		{
+			name: "xml body marker",
+			c:    VulnerabilityCandidate{URL: "https://x.test/xml", Method: "POST", Location: "xml", Parameter: "lookup"},
+			want: []string{"Content-Type: application/xml", "<lookup>1*</lookup>"},
+			not:  []string{"-p lookup"},
+		},
+		{
+			name: "path marker",
+			c:    VulnerabilityCandidate{URL: "https://x.test/orders/847/items?view=full", Method: "GET", Location: "path:1", Parameter: "path1"},
+			want: []string{"-u https://x.test/orders/847*/items?view=full"},
+			not:  []string{"-p path1"},
+		},
+		{
+			name: "existing cookie marker",
+			c:    VulnerabilityCandidate{URL: "https://x.test/account", Method: "GET", Location: "cookie", Parameter: "cart"},
+			want: []string{"--cookie session=abc; cart=7*"},
+			not:  []string{"-p cart"},
+		},
+		{
+			name: "forwarded header marker",
+			c:    VulnerabilityCandidate{URL: "https://x.test/audit", Method: "GET", Location: "header", Parameter: "X-Forwarded-For"},
+			want: []string{"X-Forwarded-For: 127.0.0.1, 127.0.0.1*"},
+			not:  []string{"-p X-Forwarded-For"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			joined := strings.Join(buildSQLmapArgsWithHeaders(tt.c, auth), " ")
+			for _, want := range tt.want {
+				if !strings.Contains(joined, want) {
+					t.Errorf("args missing %q: %s", want, joined)
+				}
+			}
+			for _, not := range tt.not {
+				if strings.Contains(joined, not) {
+					t.Errorf("args unexpectedly contain %q: %s", not, joined)
+				}
+			}
+		})
+	}
+}
+
 func TestParseSQLmapOutput(t *testing.T) {
 	pos := `sqlmap identified the following injection point
 Parameter: id (GET)

@@ -225,9 +225,9 @@ func storeQueryParams(db *database.DB, targetID, rawURL string) int {
 		}
 		id := uuid.New().String()
 		res, err := db.Exec(`
-			INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type)
-			VALUES (?, ?, ?, ?, ?, 'js', 'GET', '')
-			ON CONFLICT(target_id, url, parameter) DO NOTHING
+			INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+			VALUES (?,?,?,?,?,'js','GET','','query')
+			ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING
 		`, id, targetID, rawURL, name, val)
 		if err == nil {
 			if a, _ := res.RowsAffected(); a > 0 {

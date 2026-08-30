@@ -14,17 +14,21 @@ func TestSQLiOOBPayloadsCoverEngines(t *testing.T) {
 	}
 	joined := strings.Join(ps, "\n")
 
-	// every payload must carry our callback host so any DB hit attributes back.
+	// every payload must carry the reachable hostname. UNC paths cannot contain an
+	// HTTP port, while Oracle HTTP payloads retain the full callback URL.
 	for _, p := range ps {
-		if !strings.Contains(p, host) {
+		if !strings.Contains(p, "oob.example.com") {
 			t.Errorf("payload missing callback host: %q", p)
 		}
 	}
-	// engine coverage: Oracle HTTP, MSSQL cmdshell, UNC/DNS exfil.
-	for _, want := range []string{"UTL_HTTP.REQUEST", "HTTPURITYPE", "xp_cmdshell", "xp_dirtree", "LOAD_FILE"} {
+	// Engine coverage stays DB-native and proof-only: no OS command execution.
+	for _, want := range []string{"UTL_HTTP.REQUEST", "HTTPURITYPE", "xp_dirtree", "LOAD_FILE"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("OOB SQLi set must cover %s", want)
 		}
+	}
+	if strings.Contains(joined, "xp_cmdshell") || strings.Contains(joined, "TO PROGRAM") {
+		t.Fatal("SQLi proof payloads must not escalate into OS command execution")
 	}
 	// breakout coverage: string-quote close, numeric, stacked.
 	if !strings.Contains(joined, "'||") || !strings.Contains(joined, "';") {

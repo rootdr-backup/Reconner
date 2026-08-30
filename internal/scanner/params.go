@@ -19,6 +19,7 @@ import (
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
 	"github.com/recon-platform/pkg/logger"
+	xhtml "golang.org/x/net/html"
 )
 
 type ParamScanner struct {
@@ -337,7 +338,6 @@ var (
 	formRE    = regexp.MustCompile(`(?is)<form\b[^>]*>.*?</form>`)
 	actionRE  = regexp.MustCompile(`(?i)action\s*=\s*["']([^"']*)["']`)
 	methodRE  = regexp.MustCompile(`(?i)method\s*=\s*["']([^"']*)["']`)
-	fieldRE   = regexp.MustCompile(`(?i)<(?:input|textarea|select)\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>`)
 	enctypeRE = regexp.MustCompile(`(?i)enctype\s*=\s*["']([^"']*)["']`)
 )
 
@@ -399,15 +399,11 @@ func (s *ParamScanner) discoverForms(ctx context.Context, targetID, domain strin
 				action = resolveURL(page, a[1])
 			}
 			contentType := "application/x-www-form-urlencoded"
-			if e := enctypeRE.FindStringSubmatch(form); len(e) > 1 && strings.Contains(strings.ToLower(e[1]), "json") {
-				contentType = "application/json"
+			if e := enctypeRE.FindStringSubmatch(form); len(e) > 1 && strings.TrimSpace(e[1]) != "" {
+				contentType = strings.ToLower(strings.TrimSpace(e[1]))
 			}
-			for _, f := range fieldRE.FindAllStringSubmatch(form, -1) {
-				name := strings.TrimSpace(f[1])
-				if name == "" {
-					continue
-				}
-				if s.storeFormParameter(targetID, action, name, method, contentType) {
+			for _, f := range parseFormFields(form) {
+				if s.storeFormParameterValue(targetID, action, f.name, f.value, method, contentType) {
 					stored++
 				}
 			}
@@ -417,14 +413,107 @@ func (s *ParamScanner) discoverForms(ctx context.Context, targetID, domain strin
 }
 
 func (s *ParamScanner) storeFormParameter(targetID, action, name, method, contentType string) bool {
+	return s.storeFormParameterValue(targetID, action, name, "", method, contentType)
+}
+
+func (s *ParamScanner) storeFormParameterValue(targetID, action, name, value, method, contentType string) bool {
+	location := "body"
+	if strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
+		location = "multipart"
+	} else if strings.Contains(strings.ToLower(contentType), "xml") {
+		location = "xml"
+	} else if strings.Contains(strings.ToLower(contentType), "json") {
+		location = "json"
+	}
 	id := uuid.New().String()
 	_, err := s.db.Exec(`
-		INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type)
-		VALUES (?, ?, ?, ?, '', 'form', ?, ?)
-		ON CONFLICT(target_id, url, parameter) DO UPDATE SET
-			method = excluded.method, content_type = excluded.content_type
-	`, id, targetID, action, name, method, contentType)
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,?,'form',?,?,?)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET
+			method = excluded.method, content_type = excluded.content_type,
+			value = CASE WHEN excluded.value<>'' THEN excluded.value ELSE parameters.value END
+	`, id, targetID, action, name, value, method, contentType, location)
 	return err == nil
+}
+
+type discoveredFormField struct{ name, value string }
+
+// parseFormFields preserves the form's real default values (especially hidden
+// CSRF/tenant/action fields). Active injection requests replay these siblings;
+// storing every field as an empty string caused validation to reject the request
+// before the mutated parameter reached its SQL sink.
+func parseFormFields(raw string) []discoveredFormField {
+	doc, err := xhtml.Parse(strings.NewReader(raw))
+	if err != nil {
+		return nil
+	}
+	attr := func(n *xhtml.Node, key string) string {
+		for _, a := range n.Attr {
+			if strings.EqualFold(a.Key, key) {
+				return html.UnescapeString(a.Val)
+			}
+		}
+		return ""
+	}
+	hasAttr := func(n *xhtml.Node, key string) bool {
+		for _, a := range n.Attr {
+			if strings.EqualFold(a.Key, key) {
+				return true
+			}
+		}
+		return false
+	}
+	var out []discoveredFormField
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.ElementNode {
+			tag := strings.ToLower(n.Data)
+			if tag == "input" || tag == "textarea" || tag == "select" {
+				name := strings.TrimSpace(attr(n, "name"))
+				if name != "" && !hasAttr(n, "disabled") {
+					value := attr(n, "value")
+					switch tag {
+					case "textarea":
+						if n.FirstChild != nil {
+							value = html.UnescapeString(n.FirstChild.Data)
+						}
+					case "select":
+						var first, selected string
+						var options func(*xhtml.Node)
+						options = func(o *xhtml.Node) {
+							if o.Type == xhtml.ElementNode && strings.EqualFold(o.Data, "option") {
+								v := attr(o, "value")
+								if v == "" && o.FirstChild != nil {
+									v = strings.TrimSpace(o.FirstChild.Data)
+								}
+								if first == "" {
+									first = v
+								}
+								if hasAttr(o, "selected") {
+									selected = v
+								}
+							}
+							for c := o.FirstChild; c != nil; c = c.NextSibling {
+								options(c)
+							}
+						}
+						options(n)
+						if selected != "" {
+							value = selected
+						} else {
+							value = first
+						}
+					}
+					out = append(out, discoveredFormField{name: name, value: value})
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return out
 }
 
 // ── robots.txt + sitemap.xml harvesting (pure Go) ──────────────────────────
@@ -603,10 +692,13 @@ func resolveURL(base, ref string) string {
 }
 
 type paramEntry struct {
-	URL    string
-	Param  string
-	Value  string
-	Source string
+	URL         string
+	Param       string
+	Value       string
+	Source      string
+	Method      string
+	ContentType string
+	Location    string
 }
 
 func (s *ParamScanner) extractParameters(urlMap map[string]bool) []paramEntry {
@@ -703,12 +795,21 @@ func isJunkParam(name string) bool {
 }
 
 func (s *ParamScanner) storeParameter(targetID string, p paramEntry) error {
+	if strings.TrimSpace(p.Method) == "" {
+		p.Method = "GET"
+	}
+	if strings.TrimSpace(p.Location) == "" {
+		p.Location = "query"
+	}
 	id := uuid.New().String()
 	_, err := s.db.Exec(`
-		INSERT INTO parameters (id, target_id, url, parameter, value, source)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, url, parameter) DO NOTHING
-	`, id, targetID, p.URL, p.Param, p.Value, p.Source)
+		INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+		VALUES (?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO UPDATE SET
+			method=CASE WHEN excluded.method<>'' THEN excluded.method ELSE parameters.method END,
+			content_type=CASE WHEN excluded.content_type<>'' THEN excluded.content_type ELSE parameters.content_type END,
+			location=CASE WHEN excluded.location<>'' THEN excluded.location ELSE parameters.location END
+	`, id, targetID, p.URL, p.Param, p.Value, p.Source, p.Method, p.ContentType, p.Location)
 	return err
 }
 
