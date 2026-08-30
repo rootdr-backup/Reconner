@@ -99,7 +99,6 @@ const (
 	ModuleNetworkInitialAccess = "network_initial_access"
 )
 
-
 var AllModules = []string{
 	ModuleSubdomainEnum,
 	ModuleHTTPProbe,
@@ -1082,7 +1081,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			VALUES (?, ?, ?, 'seed', CURRENT_TIMESTAMP)
 			ON CONFLICT(target_id, subdomain) DO NOTHING`, uuid.New().String(), targetID, host)
 	}
-		// Per-asset scan: confine every DB-reading module to the override host(s).
+	// Per-asset scan: confine every DB-reading module to the override host(s).
 	if scopeOverride != "" {
 		scopeHosts := webHosts
 		if len(scopeHosts) == 0 && webPrimary != "" {
@@ -1097,7 +1096,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// Honor the per-scan speed tokens (slow/normal/fast); strip any legacy
 	// network/ingram pseudo-modules a stale client might still send.
 	speed := scanner.SpeedNormal
-	subBrute := true       // slow permutation/brute phase of subdomain enum (default on)
+	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
 	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
 	for _, m := range sentModules {
 		switch m {
@@ -1191,9 +1190,16 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// (when Limits.ParallelModules is on). Groups respect data dependencies:
 	//
 	//   group 1 — depend only on http_services, independent of each other
-	//   group 2 — active injection; all read the `parameters` table, which
+	//   group 2 — lighter active checks; all read the `parameters` table, which
 	//             group-1's param_discovery + the sequential param_reflection
 	//             have already populated by the time group 2 starts.
+	//
+	// The three request-heavy engines (native XSS/browser, legacy vuln/Dalfox and
+	// SQLi) deliberately remain sequential per target. Running them together made
+	// their independent worker pools hammer the same host, trigger the adaptive WAF
+	// backoff, serialize thousands of Chromium navigations, and ultimately run
+	// slower with more transport misses. Different targets still progress in
+	// parallel through the scheduler; this only removes self-contention on one app.
 	//
 	// Modules NOT in the map run sequentially in their listed position, so the
 	// ordering barriers (param_discovery → param_reflection → injection → verify)
@@ -1204,10 +1210,6 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		ModuleParamDiscovery:  1,
 		ModuleDirDiscovery:    1,
 		ModuleBackupDiscovery: 1,
-		ModuleDAST:            2,
-		ModuleXSS:             2,
-		ModuleVulnScan:        2,
-		ModuleSQLi:            2,
 		ModuleNoSQLi:          2,
 		ModuleSSRF:            2,
 		ModuleLFI:             2,
@@ -1586,6 +1588,12 @@ func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 	if base < 1 {
 		base = 1
 	}
+	// A persisted config from older releases commonly says "7" even on a tiny
+	// 1–2 core / 3GB appliance. Admitting all seven before load average catches up
+	// lets each scan spawn its own module/browser/tool pools and makes every target
+	// slower. Apply a proactive capacity ceiling first; this changes admission,
+	// not detector coverage, and queued scans start automatically as slots free.
+	base = resourceTargetCeiling(runtime.NumCPU(), s.cfg.Limits.MaxMemoryMB, base)
 
 	// Memory pressure (only when a limit is configured).
 	memPressure := 0 // 0 none, 1 moderate, 2 severe
@@ -1643,6 +1651,40 @@ func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 		s.throttleLog.Store(false)
 	}
 	return eff
+}
+
+// resourceTargetCeiling estimates how many full web pipelines the box can make
+// forward progress on simultaneously. One slot per two CPUs and roughly 1GiB of
+// the configured memory budget is intentionally conservative because Chromium,
+// nuclei/dalfox and Go workers coexist inside a scan. At least one always runs.
+func resourceTargetCeiling(cpu, memoryBudgetMB, configured int) int {
+	if configured < 1 {
+		configured = 1
+	}
+	if cpu < 1 {
+		cpu = 1
+	}
+	cpuSlots := cpu / 2
+	if cpuSlots < 1 {
+		cpuSlots = 1
+	}
+	ceiling := configured
+	if cpuSlots < ceiling {
+		ceiling = cpuSlots
+	}
+	if memoryBudgetMB > 0 {
+		memSlots := memoryBudgetMB / 1024
+		if memSlots < 1 {
+			memSlots = 1
+		}
+		if memSlots < ceiling {
+			ceiling = memSlots
+		}
+	}
+	if ceiling < 1 {
+		return 1
+	}
+	return ceiling
 }
 
 func (s *Scheduler) checkMemoryPressure(taskID string, logFn scanner.LogFunc) {

@@ -43,9 +43,11 @@ func (s *VulnScanner) Run(ctx context.Context, targetID, domain string, logFn Lo
 	if err := s.RunXSS(ctx, targetID, domain, logFn); err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := s.RunStoredBlindXSS(ctx, targetID, domain, logFn); err != nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
+	// Reconner's XSS scope is reflected + DOM. The legacy combined module used to
+	// plant stored/blind-XSS payloads as well, duplicating OAST work and adding a
+	// large write/read pass the product does not expose or report as a supported
+	// objective. Keep that engine available to explicit callers, but do not run it
+	// implicitly in the general vulnerability pipeline.
 	if err := s.RunCORSCheck(ctx, targetID, logFn); err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -334,15 +336,25 @@ func isExecutableXSSContext(body, payload string) bool {
 func (s *VulnScanner) RunXSS(ctx context.Context, targetID, domain string, logFn LogFunc) error {
 	haveDalfox := s.exec.IsToolAvailable("dalfox")
 
-	// dalfox runs its OWN reflection/context/execution analysis and verifies
-	// every hit — so feed it ALL params, not just the ones our pre-filter flagged
-	// as reflected (that under-used dalfox and missed XSS in params reflected only
-	// in contexts our simple checker ignores). The dumb built-in fallback still
-	// needs the is_reflected hint to stay low-FP.
+	// Native XSS has already actively tested the complete insertion-point surface
+	// (including DOM/browser escalation) before this legacy module runs. Dalfox is
+	// therefore a second-opinion/verifier for signal-bearing points, not a second
+	// full spray of every inert parameter. Keep every reflected point plus native
+	// XSS/DOM candidates; this preserves bypass diversity where a sink exists while
+	// avoiding an external process per parameter that showed no XSS signal at all.
 	query := `SELECT DISTINCT url, parameter FROM parameters WHERE target_id = ? AND is_reflected = 1 LIMIT ?`
 	if haveDalfox {
-		logFn("info", "xss_scan", "Starting XSS scan with dalfox (all parameters, self-verified)...")
-		query = `SELECT DISTINCT url, parameter FROM parameters WHERE target_id = ? LIMIT ?`
+		logFn("info", "xss_scan", "Starting signal-driven Dalfox second-opinion pass...")
+		query = `SELECT DISTINCT p.url, p.parameter FROM parameters p
+			WHERE p.target_id = ? AND (
+				COALESCE(p.is_reflected,0)=1 OR EXISTS (
+					SELECT 1 FROM candidates c
+					WHERE c.target_id=p.target_id AND c.url=p.url
+					  AND COALESCE(c.parameter,'')=p.parameter
+					  AND c.type IN ('xss','dom_xss')
+					  AND c.status IN ('DETECTED','TRIAGED','VERIFYING','INCONCLUSIVE')
+				)
+			) LIMIT ?`
 	} else {
 		logFn("info", "xss_scan", "Starting XSS scan on reflected parameters (built-in probe)...")
 	}

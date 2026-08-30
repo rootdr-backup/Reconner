@@ -86,6 +86,16 @@ func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 	if err != nil {
 		return 0, false
 	}
+	host := hostOfURL(ip.URL)
+	release, acquired := hostRequestAcquire(rctx, host)
+	if !acquired {
+		return 0, false
+	}
+	defer release()
+	// Respect the same adaptive WAF/overload pacing as deterministic probes. The
+	// wait is deliberately before the trace/timing window, so it cannot fabricate
+	// a time-based SQLi signal.
+	hostThrottleWait(rctx, host)
 	var wrote time.Time
 	var ttfb time.Duration
 	trace := &httptrace.ClientTrace{
@@ -95,10 +105,12 @@ func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := sqliTimingClient.Do(req)
 	if err != nil {
+		hostThrottleObserve(host, 0, true)
 		return 0, false
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
 	resp.Body.Close()
+	hostThrottleObserve(host, resp.StatusCode, false)
 	if ttfb <= 0 {
 		return 0, false
 	}
@@ -128,9 +140,9 @@ func sampleTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 // LINEARLY with the injected sleep — proven server-side SLEEP, not noise.
 func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string, bool) {
 	baseValue := sqliBaseValue(ip)
-	// Warm the connection so no TLS/TCP handshake is counted in the first sample.
-	_, _ = serverTTFB(ctx, ip, baseValue, auth, 8*time.Second)
-
+	// The trace begins only after the request is written, so TCP/TLS setup is not
+	// part of TTFB. quickProbe has also already warmed the shared transport in the
+	// normal pipeline; a dedicated warm-up request was pure duplicate work.
 	base, _, baseMax, ok := sampleTTFB(ctx, ip, baseValue, auth, 3, 8*time.Second)
 	if !ok {
 		return "", "", false

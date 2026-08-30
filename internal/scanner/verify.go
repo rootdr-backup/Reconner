@@ -108,17 +108,25 @@ func (s *VerifyScanner) verifySQLiWithSQLmap(ctx context.Context, targetID strin
 // parameters. Only an EXECUTABLE reflection becomes a finding; a safely-encoded
 // reflection is explicitly REJECTED (recorded as a candidate, not a finding).
 func (s *VerifyScanner) verifyReflectedXSS(ctx context.Context, targetID string, logFn LogFunc) {
-	// When a real browser is available we ALSO test parameters the server did not
-	// reflect in raw HTML (is_reflected=0): on a client-rendered / SPA app the
-	// reflection appears only after JavaScript runs, so server-side reflection is
-	// the wrong signal. Reflected params are tried first (ORDER BY is_reflected
-	// DESC); the browser confirms actual execution for the rest. Without a browser
-	// we stay on the server-reflected set only (nothing else is provable offline).
-	query := `SELECT DISTINCT url, parameter FROM parameters WHERE target_id=? AND is_reflected=1 LIMIT 60`
+	// Native XSS/DOM has already tested the complete surface. This final verifier
+	// should resolve only reflected points that remain non-terminal; re-running a
+	// full Chromium ladder over CONFIRMED/REJECTED params (and 120 raw-negative
+	// params) duplicated the most expensive part of the scan. DOM-only discovery is
+	// owned by the signal-driven browser pass in DAST/VerifyDOMXSSOnPages.
+	limit := 60
 	if getXSSBrowser() != nil {
-		query = `SELECT DISTINCT url, parameter FROM parameters WHERE target_id=? ORDER BY is_reflected DESC LIMIT 120`
+		limit = 120
 	}
-	rows, err := s.db.QueryContext(ctx, query, targetID)
+	query := `SELECT DISTINCT p.url, p.parameter FROM parameters p
+		WHERE p.target_id=? AND COALESCE(p.is_reflected,0)=1
+		  AND NOT EXISTS (
+			SELECT 1 FROM candidates c
+			WHERE c.target_id=p.target_id AND c.type='xss'
+			  AND c.url=p.url AND COALESCE(c.parameter,'')=p.parameter
+			  AND c.status IN ('CONFIRMED','REJECTED','DUPLICATE')
+		  )
+		LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, targetID, limit)
 	if err != nil {
 		return
 	}

