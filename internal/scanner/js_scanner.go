@@ -100,6 +100,7 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 		DELETE FROM vuln_findings
 		WHERE target_id = ? AND type = 'dom_xss'
 		  AND COALESCE(status,'') = 'candidate' AND COALESCE(triage,'') = ''`, targetID)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM js_findings WHERE target_id=? AND type='dom_param'`, targetID)
 
 	var targetDomain string
 	_ = s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id = ?`, targetID).Scan(&targetDomain)
@@ -111,7 +112,7 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 	if err != nil {
 		return fmt.Errorf("query http services: %w", err)
 	}
-		var serviceURLs []string
+	var serviceURLs []string
 	for rows.Next() {
 		var u string
 		if err := rows.Scan(&u); err == nil {
@@ -505,6 +506,7 @@ func (s *JSScanner) analyzeJSFile(ctx context.Context, targetID, jsURL string) e
 	if existingID != "" {
 		jsFileID = existingID
 	}
+	s.storeDOMParamHints(ctx, targetID, jsFileID, string(content))
 
 	findings := s.extractFindings(string(content), jsURL)
 
@@ -520,6 +522,7 @@ func (s *JSScanner) analyzeJSFile(ctx context.Context, targetID, jsURL string) e
 	if recovered := recoverSourceMapSources(ctx, client, jsURL, string(content)); recovered != "" {
 		findings = append(findings, s.extractFindings(recovered, jsURL+" (source-map)")...)
 		s.storeDOMXSSFindings(ctx, targetID, jsURL+" (source-map)", recovered, true)
+		s.storeDOMParamHints(ctx, targetID, jsFileID, recovered)
 	}
 
 	for _, f := range findings {
@@ -542,12 +545,12 @@ func (s *JSScanner) analyzeJSFile(ctx context.Context, targetID, jsURL string) e
 // version-based) in vuln_findings so it shows in the Candidates view.
 func (s *JSScanner) storeLibraryCVE(targetID, jsURL string, lib jsLibHit) {
 	evidence := lib.Name + " " + lib.Version + " — " + lib.Note
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?, ?, 'vulnerable_js_library', ?, ?, ?, ?, ?, 75, 'candidate')
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, severity = excluded.severity`,
-		uuid.New().String(), targetID, lib.Severity, jsURL, lib.Name, lib.Version, evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "vulnerable_js_library", Subtype: lib.Name, Severity: lib.Severity,
+		URL: jsURL, Method: "STATIC", Parameter: lib.Name, Location: "javascript",
+		Payload: lib.Version, Evidence: evidence, Source: "js-analysis", DetectionMethod: "library-version",
+		Confidence: 75, Verdict: CandDetected,
+	})
 }
 
 func isSecretType(t string) bool {

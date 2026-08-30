@@ -627,13 +627,13 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 // ready PoC (a downloadable production backup is a real, high-impact issue).
 // Package-level (not a DirScanner method) — shared with scanBackupCandidates.
 func storeExposedBackup(db *database.DB, targetID, url, fileType string, size int) {
-	_, _ = db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'exposed_backup', 'high', ?, '', '', ?, 95, 380)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, confidence = 95, priority = 380
-	`, uuid.New().String(), targetID, url,
-		fmt.Sprintf("Confirmed %s backup/dump downloadable (%d bytes) — verified by file signature, not just status/size.", fileType, size))
+	evidence := fmt.Sprintf("Confirmed %s backup/dump downloadable (%d bytes) — verified by file signature, not just status/size.", fileType, size)
+	_, _ = RecordDetectorObservation(context.Background(), db, DetectorObservation{
+		TargetID: targetID, Type: "exposed_backup", Subtype: fileType, Severity: "high",
+		URL: url, Method: "GET", Location: "response", Evidence: evidence,
+		Source: "directory", DetectionMethod: "magic-bytes", Confidence: 95,
+		Priority: 380, Verdict: VerifyVerified,
+	})
 }
 
 func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID string, logFn LogFunc) error {

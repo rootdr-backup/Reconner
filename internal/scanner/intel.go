@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -311,13 +310,12 @@ func (s *IntelScanner) postJSON(ctx context.Context, u, payload string, auth map
 }
 
 func (s *IntelScanner) store(targetID, vulnType, severity, rawURL, evidence string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence)
-		VALUES (?, ?, ?, ?, ?, '', '', ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence
-	`, id, targetID, vulnType, severity, rawURL, evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
+		Location: "response", Evidence: evidence, Source: "intel",
+		DetectionMethod: "intelligence-correlation", Confidence: ConfEvidence,
+		Verdict: VerifyVerified,
+	})
 }
 
 // hostBase reduces a URL to scheme://host[:port].

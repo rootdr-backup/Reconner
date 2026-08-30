@@ -164,14 +164,17 @@ func projectFinding(ctx context.Context, db *database.DB, candidateID, targetID,
 		}
 	}
 
-	// Otherwise adopt an unlinked finding matching the candidate's identity.
-	if changeStatus {
+	// Otherwise adopt an unlinked legacy finding only for a POSITIVE outcome.
+	// A rejected/inconclusive observation must never demote an unrelated proven
+	// finding that happens to share type+URL+parameter (e.g. reflected-XSS rejected
+	// while a DOM/browser observation at the same point is confirmed).
+	if changeStatus && (state == CandConfirmed || state == CandVerified) {
 		_, _ = db.ExecContext(ctx, `
 			UPDATE vuln_findings SET lifecycle=?, status=?, candidate_id=?
 			WHERE target_id=? AND type=? AND url=? AND COALESCE(parameter,'')=?
 			  AND (candidate_id='' OR candidate_id IS NULL)`,
 			state, newStatus, candidateID, targetID, typ, url, param)
-	} else {
+	} else if !changeStatus {
 		_, _ = db.ExecContext(ctx, `
 			UPDATE vuln_findings SET lifecycle=?, candidate_id=?
 			WHERE target_id=? AND type=? AND url=? AND COALESCE(parameter,'')=?

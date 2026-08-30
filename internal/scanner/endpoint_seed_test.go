@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,11 @@ func TestInjectPathSegment(t *testing.T) {
 	// out-of-range index → unchanged
 	if u := injectPathSegment("https://x.com/a?b=1", 9, "X"); u != "https://x.com/a?b=1" {
 		t.Errorf("out-of-range should be unchanged, got %q", u)
+	}
+	meta := injectPathSegment("https://x.com/a/seed", 1, `<img src=x onerror=alert(1)>`)
+	parsed, err := url.Parse(meta)
+	if err != nil || parsed.Path != `/a/<img src=x onerror=alert(1)>` || strings.Contains(meta, "%2520") {
+		t.Fatalf("path payload was not encoded exactly once: url=%q path=%q err=%v", meta, parsed.Path, err)
 	}
 }
 

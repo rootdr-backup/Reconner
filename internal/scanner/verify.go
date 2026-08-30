@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/secret"
@@ -87,16 +86,10 @@ func (s *VerifyScanner) verifySQLiWithSQLmap(ctx context.Context, targetID strin
 			return // sqlmap missing → stop (all would be the same)
 		}
 		r := verifier.Verify(ctx, vc)
+		_, _ = RecordCandidateResult(ctx, s.db, vc, r, FindingMeta{Actor: "sqlmap"})
 		switch r.Verdict {
 		case VerifyVerified:
-			SetCandidateStatus(ctx, s.db, c.id, CandConfirmed, "sqlmap", r.Evidence, r.Confidence)
-			_, _ = s.db.Exec(`UPDATE vuln_findings SET confidence=?, status='finding', evidence=evidence||' | '||? WHERE target_id=? AND type='sqli' AND url=? AND parameter=?`,
-				r.Confidence, "sqlmap: "+r.Evidence, targetID, c.url, c.param)
 			logFn("warn", "verify", fmt.Sprintf("SQLi CONFIRMED by sqlmap: %s param=%s", c.url, c.param))
-		case VerifyRejected:
-			SetCandidateStatus(ctx, s.db, c.id, CandRejected, "sqlmap", r.Reason, 0)
-		default:
-			SetCandidateStatus(ctx, s.db, c.id, CandInconclusive, "sqlmap", r.Reason, c.conf)
 		}
 	}
 }
@@ -155,23 +148,13 @@ func (s *VerifyScanner) verifyReflectedXSS(ctx context.Context, targetID string,
 		c := VulnerabilityCandidate{TargetID: targetID, Type: "xss", Subtype: "reflected",
 			URL: p.url, Method: "GET", Parameter: p.param, Location: "query",
 			DetectionSource: "internal", DetectionMethod: "reflection", Severity: "high"}
-		cid := StoreCandidate(ctx, s.db, c)
 		r := verifier.Verify(ctx, c)
-		switch r.Verdict {
-		case VerifyVerified:
-			SetCandidateStatus(ctx, s.db, cid, CandConfirmed, "xss-context", r.Evidence, r.Confidence)
-			id := uuid.New().String()
-			_, _ = s.db.Exec(`
-				INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-				VALUES (?,?, 'xss','high',?,?,?,?,?, 'finding')
-				ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-					evidence=excluded.evidence, confidence=excluded.confidence, status='finding'`,
-				id, targetID, p.url, p.param, contextPayloadFor(r.Evidence), r.Evidence, r.Confidence)
+		if r.Verdict == VerifyVerified {
+			c.Payload = contextPayloadFor(r.Evidence)
+		}
+		_, _ = RecordCandidateResult(ctx, s.db, c, r, FindingMeta{Actor: "xss-context"})
+		if r.Verdict == VerifyVerified {
 			confirmed++
-		case VerifyRejected:
-			SetCandidateStatus(ctx, s.db, cid, CandRejected, "xss-context", r.Reason, 0)
-		default:
-			SetCandidateStatus(ctx, s.db, cid, CandInconclusive, "xss-context", r.Reason, 40)
 		}
 	}
 	if confirmed > 0 {
@@ -264,18 +247,19 @@ func (s *VerifyScanner) verifyNucleiCandidates(ctx context.Context, targetID str
 			continue
 		}
 
+		vc.ID = c.id
+		vc.Severity = c.sev
+		if _, err := RecordCandidateResult(ctx, s.db, vc, r, FindingMeta{Actor: "nuclei"}); err != nil {
+			continue
+		}
 		switch r.Verdict {
 		case VerifyVerified:
-			SetCandidateStatus(ctx, s.db, c.id, CandConfirmed, "nuclei+"+r.Method, r.Evidence, r.Confidence)
 			s.markNucleiVerification(targetID, c.url, "verified", r.Confidence)
-			s.promoteNucleiFinding(ctx, targetID, c, r)
 			verified++
 		case VerifyRejected:
-			SetCandidateStatus(ctx, s.db, c.id, CandRejected, "nuclei+"+r.Method, r.Reason, 0)
 			s.markNucleiVerification(targetID, c.url, "rejected", 0)
 			rejected++
 		default:
-			SetCandidateStatus(ctx, s.db, c.id, CandInconclusive, "nuclei+"+r.Method, r.Reason, c.conf)
 			s.markNucleiVerification(targetID, c.url, "inconclusive", c.conf)
 		}
 	}
@@ -339,31 +323,17 @@ func (s *VerifyScanner) markNucleiVerification(targetID, matchedURL, verificatio
 		verification, confidence, targetID, matchedURL)
 }
 
-// promoteNucleiFinding writes a VERIFIED nuclei hit into the main vuln_findings so
-// it flows into the same report/priority pipeline as the native detectors, with
-// nuclei-proven evidence.
-func (s *VerifyScanner) promoteNucleiFinding(ctx context.Context, targetID string, c struct {
-	id, typ, url, method, param, loc, sev string
-	conf                                  int
-}, r VerifyResult) {
-	sev := c.sev
-	if sev == "" {
-		sev = "high"
-	}
-	id := uuid.New().String()
-	_, _ = s.db.ExecContext(ctx, `
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?,?,?,?,?,?,?,?,?, 'finding')
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence=excluded.evidence, confidence=excluded.confidence, status='finding'`,
-		id, targetID, c.typ, sev, c.url, c.param, "", "nuclei+verified: "+r.Evidence, r.Confidence)
-}
-
 // contextPayloadFor pulls the example payload out of the verifier evidence line
 // so the finding carries an exact executable payload.
 func contextPayloadFor(evidence string) string {
-	if i := strings.Index(evidence, "Executable payload example: "); i >= 0 {
-		return evidence[i+len("Executable payload example: "):]
+	for _, prefix := range []string{"Executable payload: ", "Executable payload example: "} {
+		if i := strings.Index(evidence, prefix); i >= 0 {
+			payload := evidence[i+len(prefix):]
+			if end := strings.Index(payload, " | "); end >= 0 {
+				payload = payload[:end]
+			}
+			return strings.TrimSpace(payload)
+		}
 	}
 	return `<svg onload=alert(document.domain)>`
 }

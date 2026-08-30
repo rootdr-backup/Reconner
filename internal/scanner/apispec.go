@@ -296,8 +296,8 @@ func schemaProps(v interface{}) []string {
 
 // small defensive accessors over decoded JSON.
 func asMap(v interface{}) map[string]interface{} { m, _ := v.(map[string]interface{}); return m }
-func asSlice(v interface{}) []interface{}         { s, _ := v.([]interface{}); return s }
-func asStr(v interface{}) string                  { s, _ := v.(string); return s }
+func asSlice(v interface{}) []interface{}        { s, _ := v.([]interface{}); return s }
+func asStr(v interface{}) string                 { s, _ := v.(string); return s }
 
 func dedupeStrings(in []string) []string {
 	if len(in) < 2 {

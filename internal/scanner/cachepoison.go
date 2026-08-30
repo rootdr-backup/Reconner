@@ -182,17 +182,16 @@ func (s *CachePoisonScanner) store(targetID, sev, url, param, evidence string, c
 	// Derive status from confidence: a proven cache hit (90) is a finding; a bare
 	// unkeyed-header reflection (55) is only a candidate. Without this, the column
 	// default ('finding') silently promoted every reflection to a confirmed finding.
-	status := StatusCandidate
+	verdict := CandDetected
 	if confidence >= ConfEvidence {
-		status = StatusFinding
+		verdict = VerifyVerified
 	}
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority, status)
-		VALUES (?, ?, 'cache_poisoning', ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority, status = excluded.status
-	`, uuid.New().String(), targetID, sev, url, param, param+": <canary>", evidence, confidence, priority, status)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "cache_poisoning", Severity: sev, URL: url, Method: "GET",
+		Parameter: param, Location: "header", Payload: param + ": <canary>", Evidence: evidence,
+		Source: "cache-poison", DetectionMethod: "cache-replay", Confidence: confidence,
+		Priority: priority, Verdict: verdict,
+	})
 }
 
 func (s *CachePoisonScanner) broadcastFinding(targetID, url, param string) {

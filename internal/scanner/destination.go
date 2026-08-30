@@ -46,13 +46,13 @@ func isMetadataIP(ip net.IP) bool {
 var extraBlockedCIDRs = func() []*net.IPNet {
 	var out []*net.IPNet
 	for _, c := range []string{
-		"100.64.0.0/10",  // RFC 6598 CGNAT
-		"192.0.0.0/24",   // RFC 6890 IETF protocol assignments
-		"192.0.2.0/24",   // RFC 5737 TEST-NET-1
-		"198.18.0.0/15",  // RFC 2544 benchmarking
+		"100.64.0.0/10",   // RFC 6598 CGNAT
+		"192.0.0.0/24",    // RFC 6890 IETF protocol assignments
+		"192.0.2.0/24",    // RFC 5737 TEST-NET-1
+		"198.18.0.0/15",   // RFC 2544 benchmarking
 		"198.51.100.0/24", // RFC 5737 TEST-NET-2
-		"203.0.113.0/24", // RFC 5737 TEST-NET-3
-		"100::/64",       // RFC 6666 IPv6 discard-only
+		"203.0.113.0/24",  // RFC 5737 TEST-NET-3
+		"100::/64",        // RFC 6666 IPv6 discard-only
 	} {
 		if _, n, err := net.ParseCIDR(c); err == nil {
 			out = append(out, n)

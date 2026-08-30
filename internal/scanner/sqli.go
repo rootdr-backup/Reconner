@@ -685,29 +685,15 @@ func (s *SQLiScanner) store(targetID, vulnType, severity, rawURL, param, kind, e
 	case "boolean_based":
 		conf = 85
 	}
-	status := StatusFinding
+	verdict := VerifyVerified
 	if conf < ConfEvidence {
-		status = StatusCandidate
+		verdict = CandDetected
 	}
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity,
-			payload = excluded.payload,
-			evidence = excluded.evidence,
-			confidence = excluded.confidence,
-			status = excluded.status
-	`, id, targetID, vulnType, severity, rawURL, param, kind, evidence, conf, status)
-
-	// Also register a unified candidate so the VerificationOrchestrator (e.g. the
-	// sqlmap adapter, when enabled) can attempt to PROVE it. Non-destructive: the
-	// candidate row is metadata; the sqlmap run is opt-in via cfg.EnableSQLmap.
-	StoreCandidate(context.Background(), s.db, VulnerabilityCandidate{
-		TargetID: targetID, Type: "sqli", Subtype: kind, URL: rawURL, Parameter: param,
-		Location: "query", Payload: kind, DetectionSource: "internal", DetectionMethod: kind,
-		Severity: severity, Confidence: conf, Status: CandDetected, Evidence: evidence,
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Subtype: kind, Severity: severity,
+		URL: rawURL, Method: "GET", Parameter: param, Location: "query", Payload: kind,
+		Evidence: evidence, Source: "sqli-native", DetectionMethod: kind,
+		Confidence: conf, Verdict: verdict,
 	})
 }
 
@@ -772,6 +758,12 @@ func queryEscapeMinimal(v string) string {
 			b.WriteString("%2B")
 		case c == '&':
 			b.WriteString("%26")
+		case c == ';':
+			// A raw semicolon is rejected by net/url.ParseQuery (and by a
+			// growing number of frameworks) as an invalid query separator. Encode
+			// it structurally; the application still receives the original ';'
+			// after normal URL decoding, which is essential for JS/SQL probes.
+			b.WriteString("%3B")
 		case c == '#':
 			b.WriteString("%23")
 		case c < 0x20 || c > 0x7E:

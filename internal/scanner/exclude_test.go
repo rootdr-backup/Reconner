@@ -23,11 +23,11 @@ func TestExclusions(t *testing.T) {
 	}
 
 	kept := []string{
-		"example.com",             // apex not excluded by a subdomain rule
-		"www.example.com",         // unrelated host
-		"staging.example.org",     // different registrable
-		"10.0.1.7",                // outside the /24
-		"notstaging.example.com",  // must not match the *.staging suffix loosely
+		"example.com",            // apex not excluded by a subdomain rule
+		"www.example.com",        // unrelated host
+		"staging.example.org",    // different registrable
+		"10.0.1.7",               // outside the /24
+		"notstaging.example.com", // must not match the *.staging suffix loosely
 	}
 	for _, h := range kept {
 		if e.Excludes(h) {

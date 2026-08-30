@@ -48,7 +48,9 @@ type IdentityGraph struct {
 func newIdentityGraph(label string) *IdentityGraph {
 	return &IdentityGraph{IdentityLabel: label, byKey: map[string]*RequestNode{}}
 }
-func (g *IdentityGraph) key(method, normURL string) string { return strings.ToUpper(method) + "|" + normURL }
+func (g *IdentityGraph) key(method, normURL string) string {
+	return strings.ToUpper(method) + "|" + normURL
+}
 func (g *IdentityGraph) seen(method, normURL string) bool {
 	_, ok := g.byKey[g.key(method, normURL)]
 	return ok

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -216,18 +215,16 @@ func (s *CORSScanner) reconfirmNull(ctx context.Context, target string) bool {
 // store writes a CORS finding. Credentialed reflections are confirmed findings
 // (browser-exploitable); the no-credentials medium case is a candidate.
 func (s *CORSScanner) store(targetID, target, severity, evidence string, credentialed bool) {
-	status := StatusFinding
+	verdict := VerifyVerified
 	conf := 90
 	if !credentialed {
-		status = StatusCandidate
+		verdict = CandDetected
 		conf = 65
 	}
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status)
-		VALUES (?, ?, 'cors_misconfig', ?, ?, 'Origin', ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity=excluded.severity, payload=excluded.payload, evidence=excluded.evidence,
-			confidence=excluded.confidence, status=excluded.status`,
-		uuid.New().String(), targetID, severity, target,
-		"Origin: reflected attacker value", evidence, conf, status)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "cors_misconfig", Severity: severity, URL: target,
+		Method: "GET", Parameter: "Origin", Location: "header", Payload: "Origin: reflected attacker value",
+		Evidence: evidence, Source: "cors", DetectionMethod: "origin-replay",
+		Confidence: conf, Verdict: verdict,
+	})
 }

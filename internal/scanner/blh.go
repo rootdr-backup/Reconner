@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -201,13 +200,13 @@ func (s *BLHScanner) store(targetID, host string, r blhRef, sev string) {
 	if r.kind == "script" {
 		title += " — a registered domain could serve malicious JS in the site's origin (stored-XSS-grade)."
 	}
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status, provenance)
-		VALUES (?, ?, 'broken_link_hijack', ?, ?, ?, ?, ?, 90, 'finding', ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence=excluded.evidence, severity=excluded.severity, confidence=90, status='finding'`,
-		uuid.New().String(), targetID, sev, r.page, host, r.value, title,
-		fmt.Sprintf("page=%s\n%s=%s\nhost=%s → NXDOMAIN (registerable)", r.page, r.kind, r.value, host))
+	provenance := fmt.Sprintf("page=%s\n%s=%s\nhost=%s → NXDOMAIN (registerable)", r.page, r.kind, r.value, host)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "broken_link_hijack", Subtype: r.kind, Severity: sev,
+		URL: r.page, Method: "DNS", Parameter: host, Location: r.kind, Payload: r.value,
+		Evidence: title, Source: "broken-link", DetectionMethod: "nxdomain-proof",
+		Confidence: 90, Provenance: provenance, Verdict: VerifyVerified,
+	})
 }
 
 // hostIsNXDOMAIN reports whether a host definitively does not exist (the domain

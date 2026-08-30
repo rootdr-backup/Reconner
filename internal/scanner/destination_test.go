@@ -25,10 +25,10 @@ func TestIsDisallowedDestIP(t *testing.T) {
 		"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254",
 		"0.0.0.0", "100.64.0.1" /* CGNAT is private per Go */, "::1",
 		"fc00::1", "fd00::1", "fe80::1", "ff02::1", // ULA, link-local, multicast
-		"fd00:ec2::254",         // IPv6 metadata
-		"::ffff:127.0.0.1",      // IPv4-mapped loopback
+		"fd00:ec2::254",          // IPv6 metadata
+		"::ffff:127.0.0.1",       // IPv4-mapped loopback
 		"::ffff:169.254.169.254", // IPv4-mapped metadata
-		"::ffff:10.0.0.1",       // IPv4-mapped private
+		"::ffff:10.0.0.1",        // IPv4-mapped private
 	}
 	for _, s := range disallowed {
 		ip := net.ParseIP(s)

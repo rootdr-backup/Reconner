@@ -4,7 +4,7 @@ import "testing"
 
 func TestHostRootOf(t *testing.T) {
 	cases := map[string]string{
-		"https://x.com/a/b?c=1": "https://x.com/",
+		"https://x.com/a/b?c=1":  "https://x.com/",
 		"http://y.com:8080/deep": "http://y.com:8080/",
 		"https://z.com":          "https://z.com/",
 	}

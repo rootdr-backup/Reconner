@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/secret"
@@ -461,20 +460,18 @@ func (s *JWTScanner) store(targetID, typ, sev, url, param, evidence string, conf
 	if weight == 0 {
 		weight = 1
 	}
-	status := StatusCandidate
+	verdict := CandDetected
 	if confidence >= ConfEvidence {
-		status = StatusFinding
+		verdict = VerifyVerified
 	}
-	newID := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority, status)
-		VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence,
-			confidence = excluded.confidence, priority = excluded.priority, status = excluded.status
-	`, newID, targetID, typ, sev, url, param, evidence, confidence, confidence*weight, status)
-	if s.broadcast != nil && status == StatusFinding {
+	ids, _ := RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: typ, Severity: sev, URL: url, Method: "GET",
+		Parameter: param, Location: "token", Evidence: evidence, Source: "jwt",
+		DetectionMethod: param, Confidence: confidence, Priority: confidence * weight,
+		Verdict: verdict,
+	})
+	if s.broadcast != nil && verdict == VerifyVerified {
 		s.broadcast("new_vuln_finding", map[string]any{"target_id": targetID, "type": typ, "url": url})
 	}
-	return newID
+	return ids.FindingID
 }

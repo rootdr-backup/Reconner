@@ -113,6 +113,7 @@ func urlInEndpointScope(ctx context.Context, rawURL string) bool {
 	}
 	return false
 }
+
 // ── Per-asset host scope ─────────────────────────────────────────────────────
 // When the operator scans a single asset (scope_override), the pipeline is
 // confined to that asset's host(s). Unset ⇒ full target (no confinement).
@@ -171,7 +172,7 @@ func urlHostInScope(ctx context.Context, rawURL string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-		return hostInScope(ctx, u.Host)
+	return hostInScope(ctx, u.Host)
 }
 
 // filterURLsByHostScope drops URLs whose host is outside the per-asset scope.

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/recon-platform/internal/scanner"
 )
 
 // blindXSSCollector is the JS served at /bx/<token>.js. When a victim's browser
@@ -81,14 +81,15 @@ func (h *Handler) recordBlindHit(r *http.Request, token, pageURL, cookies, refer
 		SET hit_count = hit_count + 1, last_hit = CURRENT_TIMESTAMP, evidence = ?
 		WHERE token = ?`, evidence, token)
 
-	// Raise the finding once (idempotent via the vuln_findings unique key).
-	id := uuid.New().String()
-	_, _ = h.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, priority)
-		VALUES (?, ?, 'blind_xss', 'critical', ?, ?, ?, ?, 100, 500)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			evidence = excluded.evidence, confidence = 100, priority = 500
-	`, id, targetID, injURL, param, "blind-xss beacon token="+token, evidence)
+	// A callback is runtime proof. Route it through the same audited lifecycle as
+	// every other detector; repeated hits are idempotent by candidate fingerprint.
+	_, _ = scanner.RecordDetectorObservation(r.Context(), h.db, scanner.DetectorObservation{
+		TargetID: targetID, Type: "blind_xss", Subtype: "callback", Severity: "critical",
+		URL: injURL, Method: "CALLBACK", Parameter: param, Location: sink,
+		Payload: "blind-xss beacon token=" + token, Evidence: evidence,
+		Source: "blind-xss-callback", DetectionMethod: via,
+		Confidence: 100, Priority: 500, Verdict: scanner.VerifyVerified,
+	})
 
 	// Broadcast + Telegram alert through the scheduler's scoring path (first hit
 	// only, to avoid alert spam on repeated victim loads).

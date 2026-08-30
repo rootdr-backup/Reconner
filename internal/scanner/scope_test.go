@@ -86,13 +86,13 @@ func TestHostNormalizationInScope(t *testing.T) {
 
 func TestRegistrableDomain(t *testing.T) {
 	cases := map[string]string{
-		"api.example.com":     "example.com",
-		"example.co.uk":       "example.co.uk",
-		"a.b.example.co.uk":   "example.co.uk",
-		"foo.github.io":       "foo.github.io",
-		"a.foo.github.io":     "foo.github.io",
-		"127.0.0.1":           "", // IP has no registrable domain
-		"co.uk":               "", // bare public suffix
+		"api.example.com":   "example.com",
+		"example.co.uk":     "example.co.uk",
+		"a.b.example.co.uk": "example.co.uk",
+		"foo.github.io":     "foo.github.io",
+		"a.foo.github.io":   "foo.github.io",
+		"127.0.0.1":         "", // IP has no registrable domain
+		"co.uk":             "", // bare public suffix
 	}
 	for host, want := range cases {
 		if got := registrableDomain(host); got != want {

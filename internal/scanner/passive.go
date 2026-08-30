@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -325,13 +324,11 @@ func hostRootOf(rawURL string) string {
 }
 
 func (s *PassiveScanner) store(targetID, vulnType, severity, rawURL, evidence string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence)
-		VALUES (?, ?, ?, ?, ?, '', '', ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity, evidence = excluded.evidence
-	`, id, targetID, vulnType, severity, rawURL, evidence)
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "PASSIVE",
+		Location: "response", Evidence: evidence, Source: "passive",
+		DetectionMethod: "passive-signature", Confidence: ConfEvidence, Verdict: VerifyVerified,
+	})
 	// high-severity passive findings (exposed secrets) are worth a push
 	if s.broadcast != nil && (severity == "high" || severity == "critical") {
 		s.broadcast("new_vuln_finding", map[string]any{

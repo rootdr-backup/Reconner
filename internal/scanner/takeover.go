@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -340,15 +339,14 @@ func (s *TakeoverScanner) subzyConfirms(ctx context.Context, host string) (bool,
 }
 
 func (s *TakeoverScanner) storeVulnClassified(targetID, vulnType, severity, rawURL, param, payload, evidence string, confidence int, status, provenance string) {
-	id := uuid.New().String()
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status, provenance)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET
-			severity = excluded.severity,
-			evidence = excluded.evidence,
-			confidence = excluded.confidence,
-			status = excluded.status,
-			provenance = excluded.provenance
-	`, id, targetID, vulnType, severity, rawURL, param, payload, evidence, confidence, status, provenance)
+	verdict := CandDetected
+	if status == StatusFinding {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "DNS",
+		Parameter: param, Location: "dns", Payload: payload, Evidence: evidence,
+		Source: "takeover", DetectionMethod: "provider-fingerprint", Confidence: confidence,
+		Provenance: provenance, Verdict: verdict,
+	})
 }

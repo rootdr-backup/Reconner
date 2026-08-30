@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -144,12 +143,12 @@ func (s *CSRFScanner) checkPage(ctx context.Context, targetID, page string, logF
 
 func (s *CSRFScanner) store(targetID, page, action string) {
 	evidence := "POST form has no anti-CSRF token field and the page's session cookie is not SameSite-protected — likely CSRF. Confirm manually (server may validate a header token). Action: " + action
-	_, _ = s.db.Exec(`
-		INSERT INTO vuln_findings (id, target_id, type, severity, url, parameter, payload, evidence, confidence, status, provenance)
-		VALUES (?, ?, 'csrf', 'medium', ?, '', ?, ?, 72, 'candidate', ?)
-		ON CONFLICT(target_id, type, url, parameter) DO UPDATE SET evidence=excluded.evidence`,
-		uuid.New().String(), targetID, page, action, evidence,
-		"form_action="+action+"\nno_csrf_token=true\nsamesite_protected=false")
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: "csrf", Severity: "medium", URL: page, Method: "POST",
+		Location: "form", Payload: action, Evidence: evidence, Source: "csrf",
+		DetectionMethod: "form-heuristic", Confidence: 72, Verdict: CandDetected,
+		Provenance: "form_action=" + action + "\nno_csrf_token=true\nsamesite_protected=false",
+	})
 }
 
 // formHasCSRFToken reports whether a form contains a hidden input whose name

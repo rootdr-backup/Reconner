@@ -53,3 +53,34 @@ func TestPostBodyEscapesFieldBoundaries(t *testing.T) {
 		t.Fatalf("value & not escaped as expected: %q", body)
 	}
 }
+
+func TestQueryProbeEscapesRawSemicolonWithoutChangingDecodedValue(t *testing.T) {
+	ip := insertionPoint{URL: "http://x.com/s?q=old", Param: "q", Method: "GET"}
+	req, err := buildInjectedRequest(context.Background(), ip, `a;b`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(req.URL.RawQuery, ";") || !strings.Contains(strings.ToLower(req.URL.RawQuery), "%3b") {
+		t.Fatalf("raw semicolon can invalidate ParseQuery: %q", req.URL.RawQuery)
+	}
+	if got := req.URL.Query().Get("q"); got != "a;b" {
+		t.Fatalf("application receives %q, want decoded semicolon", got)
+	}
+}
+
+func TestXSSSurfaceDoesNotDropTrackingOrCMSParameters(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	_, _ = db.Exec(`INSERT INTO http_services (id,target_id,url,status_code,content_type,cms)
+		VALUES ('svc',?,'https://shop.test/',200,'text/html','wordpress')`, tid)
+	_, _ = db.Exec(`INSERT INTO parameters (id,target_id,url,parameter,method,content_type,location)
+		VALUES ('p1',?,'https://shop.test/?utm_campaign=x','utm_campaign','GET','','query'),
+		       ('p2',?,'https://shop.test/?search=x','search','GET','','query')`, tid, tid)
+	if got := loadInsertionPoints(context.Background(), db, tid, 20); len(got) != 0 {
+		t.Fatalf("shared noise-filtered loader unexpectedly kept CMS surface: %+v", got)
+	}
+	got := loadXSSInsertionPoints(context.Background(), db, tid, 20)
+	if len(got) != 2 {
+		t.Fatalf("XSS loader dropped renderable CMS/tracking parameters: %+v", got)
+	}
+}
