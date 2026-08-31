@@ -11,7 +11,13 @@ BINARY      ?= reconner
 PKG         := ./cmd/reconner
 GO          ?= go
 NPM         ?= npm
-LDFLAGS     := -s -w
+VERSION     ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo dev)
+VCS_REF     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS     := -s -w \
+	-X github.com/recon-platform/internal/version.Current=$(VERSION) \
+	-X github.com/recon-platform/internal/version.Commit=$(VCS_REF) \
+	-X github.com/recon-platform/internal/version.BuildDate=$(BUILD_DATE)
 CGO_ENABLED ?= 1
 
 .PHONY: all build backend frontend run test tidy clean
@@ -27,7 +33,7 @@ backend:
 
 ## Build the React/TypeScript dashboard into frontend/dist (embedded/served by the app).
 frontend:
-	cd frontend && $(NPM) install && $(NPM) run build
+	cd frontend && $(NPM) ci && $(NPM) run build
 
 ## Run the server (dashboard on http://localhost:8080 by default).
 run: build
@@ -51,10 +57,6 @@ clean:
 # Chromium). See README.Docker.md. Requires Docker with the compose plugin.
 COMPOSE    ?= docker compose
 IMAGE      ?= ghcr.io/rootdr-backup/reconner
-VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-VCS_REF    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-
 .PHONY: docker-build docker-up docker-down docker-logs docker-password docker-shell docker-ps docker-update docker-destroy docker-buildx
 
 ## Build the container image locally.

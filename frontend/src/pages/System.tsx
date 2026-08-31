@@ -6,10 +6,12 @@ import { ws } from '../lib/websocket'
 import { useUIStore } from '../store/ui'
 import { useAuthStore } from '../store/auth'
 import { UsersAdmin } from '../components/system/UsersAdmin'
+import { useUpdateCenter } from '../components/layout/UpdateCenter'
 
 interface SystemLogLine { level: string; module: string; message: string; time: string }
 
 export default function System() {
+  const [activeTab, setActiveTab] = useState<'overview' | 'integrations' | 'toolchain' | 'team'>('overview')
   const [tools, setTools] = useState<Record<string,boolean>>({})
   const [catalog, setCatalog] = useState<ToolCatalogEntry[]>([])
   const [installing, setInstalling] = useState<Record<string, boolean>>({})
@@ -22,6 +24,7 @@ export default function System() {
   const [savingKeys, setSavingKeys] = useState(false)
   const { addToast } = useUIStore()
   const isAdmin = useAuthStore(s => s.user?.role === 'admin')
+  const { info: updateInfo, checking: checkingUpdate, refresh: refreshUpdate, showDetails: showUpdateDetails } = useUpdateCenter()
   const templateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const load = async () => {
     try {
@@ -70,7 +73,11 @@ export default function System() {
       addToast('error', 'Failed to save API keys')
     } finally { setSavingKeys(false) }
   }
-  useEffect(() => { load(); const i = setInterval(load, 10000); return () => clearInterval(i) }, [])
+  useEffect(() => {
+    load()
+    const i = setInterval(() => system.stats().then(s => setStats(s || {})).catch(() => {}), 30000)
+    return () => clearInterval(i)
+  }, [])
 
   // nuclei -update-templates + the official/community repo sync (see
   // nuclei.go's syncExtraTemplates) runs in the background on the server;
@@ -109,130 +116,168 @@ export default function System() {
     templateTimeoutRef.current = setTimeout(() => setUpdatingTemplates(false), 18 * 60 * 1000)
   }
 
-  if (loading) return <div className="flex items-center justify-center h-64"><Spinner/></div>
+  if (loading) return <div className="flex items-center justify-center h-64"><Spinner className="w-10 h-10"/></div>
+
+  const tabs: { id: 'overview' | 'integrations' | 'toolchain' | 'team'; label: string; hidden?: boolean }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'integrations', label: 'Integrations' },
+    { id: 'toolchain', label: 'Toolchain' },
+    { id: 'team', label: 'Team', hidden: !isAdmin },
+  ]
+  const formatDate = (value?: string) => value && value !== 'unknown'
+    ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    : 'Unknown'
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">System</h1>
+    <div className="space-y-5">
+      <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-accent">Platform control</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">System &amp; updates</h1>
+          <p className="mt-1 text-xs text-text-muted">Release health, integrations, scanner tools and team access.</p>
+        </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="secondary" loading={updatingTemplates} onClick={handleUpdateTemplates}>
-            ↻ Update Nuclei Templates
-          </Button>
+          {activeTab === 'toolchain' && (
+            <Button size="sm" variant="secondary" loading={updatingTemplates} onClick={handleUpdateTemplates}>↻ Update templates</Button>
+          )}
           <Button size="sm" variant="ghost" onClick={load}>↻ Refresh</Button>
         </div>
-      </div>
-      {templateLog.length > 0 && (
-        <div className="card p-3">
-          <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">Template Sync</p>
-          <div className="space-y-1 max-h-40 overflow-y-auto font-mono text-xs">
-            {templateLog.map((l, i) => (
-              <p key={i} className={l.level === 'error' ? 'text-severity-critical' : l.level === 'warn' ? 'text-severity-medium' : 'text-text-secondary'}>{l.message}</p>
-            ))}
-          </div>
-        </div>
-      )}
-      {isAdmin && <UsersAdmin />}
+      </header>
 
-      {Object.keys(stats).length > 0 && (
-        <div>
-          <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">Stats</p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {Object.entries(stats).map(([k,v]) => (
-              <div key={k} className="card p-3"><p className="text-xs text-text-muted mb-1">{k.replace(/_/g,' ')}</p>
-                <p className="text-lg font-semibold">{typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(1)) : v}</p></div>
-            ))}
-          </div>
+      <div className="flex gap-1 overflow-x-auto no-scrollbar border-b border-border" role="tablist">
+        {tabs.filter(t => !t.hidden).map(t => (
+          <button key={t.id} type="button" role="tab" aria-selected={activeTab === t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={cn('relative shrink-0 px-4 py-2.5 text-xs font-medium transition-colors',
+              activeTab === t.id ? 'text-text-primary' : 'text-text-muted hover:text-text-secondary')}>
+            {t.label}
+            {activeTab === t.id && <span className="absolute left-3 right-3 bottom-0 h-0.5 rounded-full bg-accent" />}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'overview' && (
+        <div className="space-y-6 animate-fade-in">
+          <section className="card overflow-hidden">
+            <div className="grid lg:grid-cols-[1.35fr_.65fr]">
+              <div className="p-5 sm:p-6 bg-gradient-to-br from-accent/[.10] via-transparent to-transparent">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={cn('w-2.5 h-2.5 rounded-full', updateInfo?.update_available ? 'bg-accent animate-pulse' : updateInfo?.error ? 'bg-severity-medium' : 'bg-severity-low')} />
+                  <span className="font-semibold text-text-primary">
+                    {!updateInfo ? 'Loading release status…' : !updateInfo.enabled ? 'Automatic checks disabled' : updateInfo.update_available ? `Reconner v${updateInfo.latest} is ready` : 'Reconner is up to date'}
+                  </span>
+                </div>
+                <h2 className="mt-4 text-3xl sm:text-4xl font-semibold tracking-tight">v{updateInfo?.current || '—'}</h2>
+                <p className="mt-2 text-sm text-text-secondary max-w-xl">
+                  Reconner checks the latest stable GitHub release every six hours using a cached conditional request. It never interrupts scans or updates itself automatically.
+                </p>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {updateInfo?.update_available && <Button variant="primary" onClick={showUpdateDetails}>Review update</Button>}
+                  <Button variant="secondary" loading={checkingUpdate} onClick={refreshUpdate}>Check now</Button>
+                  {updateInfo?.url && <a href={updateInfo.url} target="_blank" rel="noreferrer" className="btn-ghost">GitHub release ↗</a>}
+                </div>
+              </div>
+              <dl className="grid grid-cols-2 lg:grid-cols-1 border-t lg:border-t-0 lg:border-l border-border bg-black/[.10]">
+                {[
+                  ['Channel', updateInfo?.channel || 'stable'],
+                  ['Commit', updateInfo?.current_commit && updateInfo.current_commit !== 'unknown' ? updateInfo.current_commit.slice(0, 12) : 'unknown'],
+                  ['Built', formatDate(updateInfo?.build_date)],
+                  ['Next check', formatDate(updateInfo?.next_check_at)],
+                ].map(([label, value]) => (
+                  <div key={label} className="p-4 border-b border-r lg:border-r-0 border-border last:border-b-0">
+                    <dt className="text-[10px] uppercase tracking-wider text-text-muted">{label}</dt>
+                    <dd className="mt-1 text-xs font-mono text-text-secondary break-all">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+            {updateInfo?.error && <div className="px-5 py-2.5 text-[11px] text-severity-medium border-t border-severity-medium/20 bg-severity-medium/[.05]">GitHub check: {updateInfo.error}{updateInfo.stale ? ' · showing the last successful result' : ''}</div>}
+          </section>
+
+          {Object.keys(stats).length > 0 && (
+            <section>
+              <p className="section-title">Runtime health</p>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {Object.entries(stats).map(([k,v]) => (
+                  <div key={k} className="card p-4">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted">{k.replace(/_/g,' ')}</p>
+                    <p className="mt-2 text-xl font-semibold tabular-nums">{typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(1)) : v}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
-      {apiKeys.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-medium text-text-muted uppercase tracking-wider">
-              Passive-Intel API Keys <span className="normal-case text-text-muted/70">— optional, stored in config.json, never shown back in full</span>
-            </p>
-            <Button size="sm" variant="secondary" loading={savingKeys} onClick={saveKeys}>Save keys</Button>
+
+      {activeTab === 'integrations' && (
+        <section className="animate-fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-sm font-semibold">Passive intelligence providers</h2>
+              <p className="text-xs text-text-muted mt-1">Optional credentials are persisted server-side and are never returned in full.</p>
+            </div>
+            <Button size="sm" variant="primary" loading={savingKeys} onClick={saveKeys}>Save changes</Button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {apiKeys.map(k => (
-              <div key={k.name} className="card p-3">
-                <div className="flex items-center justify-between mb-1">
+              <div key={k.name} className="card p-4">
+                <div className="flex items-center justify-between gap-3 mb-2">
                   <span className="text-sm font-medium">{k.label}</span>
-                  {k.set
-                    ? <span className="text-[10px] text-severity-low">✓ set {k.masked && `(${k.masked})`}</span>
-                    : <span className="text-[10px] text-text-muted">not set</span>}
+                  <span className={cn('text-[10px]', k.set ? 'text-severity-low' : 'text-text-muted')}>{k.set ? `● connected ${k.masked ? `(${k.masked})` : ''}` : '○ not configured'}</span>
                 </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  placeholder={k.set ? 'enter a new value to replace' : k.hint}
-                  value={drafts[k.name] ?? ''}
-                  onChange={e => setDrafts(d => ({ ...d, [k.name]: e.target.value }))}
-                  className="w-full bg-surface-alt border border-border rounded px-2 py-1 text-sm font-mono" />
-                <p className="text-[10px] text-text-muted mt-1">format: <span className="font-mono">{k.hint}</span>{k.set && ' · leave blank to keep, clear + save to remove'}</p>
+                <input type="password" autoComplete="off" placeholder={k.set ? 'Enter a new value to replace' : k.hint}
+                  value={drafts[k.name] ?? ''} onChange={e => setDrafts(d => ({ ...d, [k.name]: e.target.value }))}
+                  className="input font-mono" />
+                <p className="text-[10px] text-text-muted mt-2">Expected format: <span className="font-mono">{k.hint}</span></p>
               </div>
             ))}
           </div>
-        </div>
+        </section>
       )}
-      <div>
-        <div className="flex items-center gap-2 mb-3 flex-wrap">
-          <p className="text-xs font-medium text-text-muted uppercase tracking-wider">
-            Tools — {(catalog.length ? catalog.filter(t => t.installed).length : Object.values(tools).filter(Boolean).length)}/
-            {(catalog.length || Object.keys(tools).length)} installed
-          </p>
-          <span className="text-[11px] text-text-muted">
-            Missing a tool? Install it here (Go/pip — no root), or copy the command to run manually. Everything degrades gracefully without it.
-          </span>
-        </div>
-        {catalog.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-            {catalog.map(t => (
-              <div key={t.name} className="card p-3 flex items-center gap-3">
-                <span className={cn('w-2 h-2 rounded-full shrink-0', t.installed ? 'bg-severity-low' : 'bg-severity-critical')} />
-                <div className="flex-1 min-w-0">
-                  <span className="text-sm font-mono">{t.name}</span>
-                  {!t.installed && (
-                    <span className="block text-[10px] text-text-muted truncate" title={t.command || t.doc}>
-                      {t.method === 'apt' ? 'needs root: ' : t.method === 'manual' ? 'manual: ' : ''}{t.command || t.doc}
-                      {t.notes ? ` — ${t.notes}` : ''}
-                    </span>
+
+      {activeTab === 'toolchain' && (
+        <section className="space-y-5 animate-fade-in">
+          {templateLog.length > 0 && (
+            <div className="card p-4">
+              <p className="section-title">Template sync</p>
+              <div className="space-y-1 max-h-44 overflow-y-auto font-mono text-xs">
+                {templateLog.map((l, i) => <p key={i} className={l.level === 'error' ? 'text-severity-critical' : l.level === 'warn' ? 'text-severity-medium' : 'text-text-secondary'}>{l.message}</p>)}
+              </div>
+            </div>
+          )}
+          <div>
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold">Scanner toolchain</h2>
+                <p className="text-xs text-text-muted mt-1">{(catalog.length ? catalog.filter(t => t.installed).length : Object.values(tools).filter(Boolean).length)}/{catalog.length || Object.keys(tools).length} tools available</p>
+              </div>
+              <p className="text-[11px] text-text-muted">The official Docker image bundles and verifies the complete toolchain.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+              {(catalog.length ? catalog : Object.entries(tools).map(([name, installed]) => ({ name, installed, method: '', command: '', doc: '', notes: '', one_click: false }))).map(t => (
+                <div key={t.name} className="card p-3 flex items-center gap-3">
+                  <span className={cn('w-2 h-2 rounded-full shrink-0', t.installed ? 'bg-severity-low' : 'bg-severity-critical')} />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm font-mono">{t.name}</span>
+                    {!t.installed && <span className="block text-[10px] text-text-muted truncate" title={t.command || t.doc}>{t.notes || t.command || 'Unavailable'}</span>}
+                  </div>
+                  {t.installed ? <span className="text-xs text-severity-low">✓</span> : t.one_click ? (
+                    <Button size="sm" variant="secondary" disabled={!!installing[t.name]} onClick={() => installTool(t.name)}>{installing[t.name] ? <Spinner /> : 'Install'}</Button>
+                  ) : (
+                    <div className="flex gap-1">
+                      {t.command && <button onClick={() => { navigator.clipboard?.writeText(t.command); addToast('success', 'Command copied') }} className="btn-ghost !px-2 !py-1 text-xs">Copy</button>}
+                      {t.doc && <a href={t.doc} target="_blank" rel="noreferrer" className="btn-ghost !px-2 !py-1 text-xs">Docs</a>}
+                    </div>
                   )}
                 </div>
-                {t.installed ? (
-                  <span className="text-xs text-severity-low shrink-0">✓</span>
-                ) : t.one_click ? (
-                  <Button size="sm" variant="secondary" disabled={!!installing[t.name]}
-                    onClick={() => installTool(t.name)} className="shrink-0">
-                    {installing[t.name] ? <Spinner /> : 'Install'}
-                  </Button>
-                ) : (
-                  <div className="flex items-center gap-1 shrink-0">
-                    {t.command && (
-                      <button title="Copy install command"
-                        onClick={() => { navigator.clipboard?.writeText(t.command); addToast('success', 'Command copied') }}
-                        className="text-xs px-2 py-1 rounded border border-border text-text-muted hover:text-text-secondary">Copy</button>
-                    )}
-                    {t.doc && (
-                      <a href={t.doc} target="_blank" rel="noopener noreferrer"
-                        className="text-xs px-2 py-1 rounded border border-border text-text-muted hover:text-accent">Docs</a>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-            {Object.entries(tools).map(([name, ok]) => (
-              <div key={name} className="card p-3 flex items-center gap-3">
-                <span className={cn('w-2 h-2 rounded-full shrink-0', ok ? 'bg-severity-low' : 'bg-severity-critical')}/>
-                <span className="text-sm font-mono flex-1">{name}</span>
-                <span className={cn('text-xs', ok ? 'text-severity-low' : 'text-severity-critical')}>{ok ? '✓' : '✗'}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+        </section>
+      )}
+
+      {activeTab === 'team' && isAdmin && <div className="animate-fade-in"><UsersAdmin /></div>}
     </div>
   )
 }

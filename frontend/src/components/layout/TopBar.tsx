@@ -5,6 +5,7 @@ import { useUIStore } from '../../store/ui'
 import { notifications as notifApi, targets as targetsApi, type Notification } from '../../lib/api'
 import type { Target } from '../../types'
 import { cn, timeAgo, useDebouncedValue } from '../../lib/utils'
+import { useUpdateCenter } from './UpdateCenter'
 
 const sevDot: Record<string, string> = {
   critical: 'bg-severity-critical',
@@ -18,7 +19,7 @@ const sevDot: Record<string, string> = {
 // target name via a tiny in-memory cache so breadcrumbs read like
 // "Targets › example.com" instead of a raw UUID.
 const SEGMENT_LABEL: Record<string, string> = {
-  targets: 'Targets', findings: 'Findings', tasks: 'Tasks', system: 'System',
+  targets: 'Targets', findings: 'Findings', tasks: 'Scan activity', system: 'System & updates',
 }
 
 function useBreadcrumbs(): { label: string; to: string }[] {
@@ -98,7 +99,8 @@ function GlobalSearch() {
 
 export const TopBar = () => {
   const [connected, setConnected] = useState(false)
-  const { toasts, removeToast } = useUIStore()
+  const { toasts, removeToast, setMobileNavOpen } = useUIStore()
+  const { info: updateInfo, visible: updateVisible, showDetails: showUpdateDetails } = useUpdateCenter()
   const navigate = useNavigate()
   const crumbs = useBreadcrumbs()
 
@@ -144,8 +146,13 @@ export const TopBar = () => {
 
   return (
     <>
-      <header className="h-16 flex items-center justify-between gap-4 px-6 border-b border-border bg-surface-1/70 backdrop-blur-xl shrink-0">
+      <header className="h-16 flex items-center justify-between gap-3 px-3 sm:px-5 lg:px-6 border-b border-border bg-surface-1/80 backdrop-blur-xl shrink-0">
         {/* Breadcrumbs */}
+        <div className="flex items-center gap-2 min-w-0">
+          <button type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"
+            className="grid place-items-center w-9 h-9 rounded-lg border border-border text-text-secondary hover:text-text-primary hover:bg-white/[.05] md:hidden shrink-0">
+            <span className="space-y-1" aria-hidden>{[0,1,2].map(i => <span key={i} className="block w-4 h-px bg-current" />)}</span>
+          </button>
         <nav className="flex items-center gap-1.5 text-sm min-w-0" aria-label="Breadcrumb">
           {crumbs.map((c, i) => (
             <span key={c.to} className="flex items-center gap-1.5 min-w-0">
@@ -156,6 +163,7 @@ export const TopBar = () => {
             </span>
           ))}
         </nav>
+        </div>
 
         <div className="flex items-center gap-3 shrink-0">
           <GlobalSearch />
@@ -167,15 +175,15 @@ export const TopBar = () => {
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0" />
               </svg>
-              {unread > 0 && (
+              {(unread + (updateVisible ? 1 : 0)) > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-severity-critical text-white text-[10px] font-bold grid place-items-center">
-                  {unread > 99 ? '99+' : unread}
+                  {(unread + (updateVisible ? 1 : 0)) > 99 ? '99+' : unread + (updateVisible ? 1 : 0)}
                 </span>
               )}
             </button>
 
             {open && (
-              <div className="absolute right-0 mt-2 w-80 max-h-[70vh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-50">
+              <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-80 max-h-[70dvh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-50">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
                   <span className="text-sm font-semibold">Notifications</span>
                   {unread > 0 && (
@@ -183,7 +191,18 @@ export const TopBar = () => {
                   )}
                 </div>
                 <div className="overflow-y-auto">
-                  {items.length === 0 ? (
+                  {updateVisible && updateInfo && (
+                    <button onClick={() => { setOpen(false); showUpdateDetails() }}
+                      className="w-full text-left px-4 py-3 border-b border-accent/20 bg-accent/[.06] hover:bg-accent/[.10] transition-colors flex gap-2.5">
+                      <span className="mt-1.5 w-2 h-2 rounded-full shrink-0 bg-accent animate-pulse" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-xs font-semibold text-text-primary">Reconner v{updateInfo.latest} is available</span>
+                        <span className="block text-[11px] text-text-secondary">Review changes and safe update commands.</span>
+                        <span className="block text-[10px] text-accent mt-1">Open release center →</span>
+                      </span>
+                    </button>
+                  )}
+                  {items.length === 0 && !updateVisible ? (
                     <p className="text-xs text-text-muted text-center py-8">No notifications yet.</p>
                   ) : items.map(n => (
                     <button key={n.id} onClick={() => openNotif(n)}
@@ -202,12 +221,12 @@ export const TopBar = () => {
             )}
           </div>
 
-          <div className={cn('flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border',
+          <div className={cn('flex items-center gap-2 text-xs font-medium px-2 sm:px-3 py-1.5 rounded-full border',
             connected
               ? 'text-severity-low border-severity-low/25 bg-severity-low/10'
               : 'text-text-muted border-white/10 bg-white/5')}>
             <span className={connected ? 'dot-online' : 'dot-offline'}/>
-            {connected ? 'Live' : 'Offline'}
+            <span className="hidden sm:inline">{connected ? 'Live' : 'Offline'}</span>
           </div>
         </div>
       </header>

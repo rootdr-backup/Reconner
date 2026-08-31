@@ -203,19 +203,27 @@ export const system = {
     req<ToolInstallResult>('/tools/install', { method: 'POST', body: JSON.stringify({ tool }) }),
   stats: () => req<Record<string, number>>('/system/stats'),
   updateTemplates: () => req<{ message: string }>('/system/update-templates', { method: 'POST' }),
-  updateCheck: () => req<UpdateInfo>('/system/update-check'),
+  updateCheck: (refresh = false) => req<UpdateInfo>(`/system/update-check${refresh ? '?refresh=1' : ''}`),
   getSettings: () => req<{ api_keys: ApiKeyState[] }>('/system/settings'),
   updateSettings: (patch: Record<string, string>) =>
     req<{ api_keys: ApiKeyState[] }>('/system/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
 }
 
 export interface UpdateInfo {
+  enabled: boolean
   current: string
+  current_commit: string
+  build_date: string
   latest: string
+  release_name: string
   update_available: boolean
   notes: string
   url: string
+  published_at: string
   checked_at: string
+  next_check_at: string
+  channel: string
+  stale: boolean
   error?: string
 }
 

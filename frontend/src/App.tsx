@@ -15,7 +15,15 @@ import { Spinner } from './components/ui'
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { user, initialized } = useAuthStore()
   const location = useLocation()
-  if (!initialized) return <div className="min-h-screen flex items-center justify-center bg-surface"><Spinner className="w-6 h-6"/></div>
+  if (!initialized) return (
+    <div className="min-h-[100dvh] flex flex-col items-center justify-center gap-4 bg-surface">
+      <Spinner className="w-14 h-14"/>
+      <div className="text-center">
+        <p className="text-sm font-semibold tracking-wide text-text-primary">Reconner</p>
+        <p className="mt-1 text-[10px] uppercase tracking-[.2em] text-text-muted">Establishing secure session</p>
+      </div>
+    </div>
+  )
   if (!user) return <Navigate to="/login" state={{ from: location }} replace/>
   return <>{children}</>
 }

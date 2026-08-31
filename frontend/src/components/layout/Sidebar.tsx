@@ -3,6 +3,8 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { cn } from '../../lib/utils'
 import { useAuthStore } from '../../store/auth'
 import { dashboard } from '../../lib/api'
+import { useUIStore } from '../../store/ui'
+import { useUpdateCenter } from './UpdateCenter'
 
 // Donation options. Iranian users have a local gateway; everyone else can send
 // crypto to these addresses. Nothing here is collected by the app — they're
@@ -45,6 +47,8 @@ export const Sidebar = () => {
   const [copied, setCopied] = useState<string | null>(null)
   const [targetsN, setTargetsN] = useState(0)
   const [runningN, setRunningN] = useState(0)
+  const { mobileNavOpen, setMobileNavOpen } = useUIStore()
+  const { info, visible: updateAvailable, showDetails } = useUpdateCenter()
 
   // Light poll for the nav badges (target count + live running-scan count).
   useEffect(() => {
@@ -58,13 +62,13 @@ export const Sidebar = () => {
   }, [])
 
   const groups: NavGroup[] = [
-    { label: 'Overview', items: [{ to: '/', label: 'Dashboard', Icon: Icons.dashboard }] },
-    { label: 'Scanning', items: [
+    { label: 'Command center', items: [{ to: '/', label: 'Overview', Icon: Icons.dashboard }] },
+    { label: 'Operations', items: [
       { to: '/targets', label: 'Targets', Icon: Icons.targets, badge: targetsN > 0 ? { text: String(targetsN) } : null },
       { to: '/findings', label: 'Findings', Icon: Icons.findings },
-      { to: '/tasks', label: 'Scans', Icon: Icons.tasks, badge: runningN > 0 ? { text: String(runningN), live: true } : null },
+      { to: '/tasks', label: 'Scan activity', Icon: Icons.tasks, badge: runningN > 0 ? { text: String(runningN), live: true } : null },
     ] },
-    { label: 'System', items: [{ to: '/system', label: 'Settings', Icon: Icons.system }] },
+    { label: 'Platform', items: [{ to: '/system', label: 'System & updates', Icon: Icons.system }] },
   ]
 
   const copyAddress = async (chain: string, address: string) => {
@@ -77,8 +81,11 @@ export const Sidebar = () => {
     setTimeout(() => setCopied((c) => (c === chain ? null : c)), 1500)
   }
   return (
-    <aside className="relative z-10 flex flex-col w-60 shrink-0 h-screen sticky top-0
-      border-r border-border bg-surface-1/95 backdrop-blur-xl">
+    <>
+      {mobileNavOpen && <button type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"
+        className="fixed inset-0 z-30 bg-black/65 backdrop-blur-sm md:hidden" />}
+      <aside className={cn('fixed md:relative z-40 md:z-10 flex flex-col w-[17rem] md:w-60 shrink-0 h-[100dvh] top-0 left-0 border-r border-border bg-surface-1/98 backdrop-blur-xl transition-transform duration-200',
+        mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0')}>
       <div className="flex items-center gap-3 px-5 h-16 border-b border-border">
         <div className="grid place-items-center w-9 h-9 rounded-xl shrink-0 glow-accent"
           style={{ backgroundImage: 'var(--grad-accent)' }}>
@@ -90,8 +97,10 @@ export const Sidebar = () => {
         </div>
         <div className="leading-tight">
           <div className="text-[15px] font-bold tracking-tight text-gradient">Reconner</div>
-          <div className="text-[10px] text-text-muted tracking-wider uppercase">Watchtower</div>
+          <div className="text-[10px] text-text-muted tracking-[.16em] uppercase">Attack surface intelligence</div>
         </div>
+        <button type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"
+          className="ml-auto grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] md:hidden">✕</button>
       </div>
 
       <nav className="flex-1 px-3 py-4 space-y-4 overflow-y-auto no-scrollbar">
@@ -100,7 +109,7 @@ export const Sidebar = () => {
             <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted/80">{group.label}</p>
             <div className="space-y-0.5">
               {group.items.map(({ to, label, Icon, badge }) => (
-                <NavLink key={to} to={to} end={to === '/'}
+                <NavLink key={to} to={to} end={to === '/'} onClick={() => setMobileNavOpen(false)}
                   className={({ isActive }) => cn('nav-item group',
                     isActive ? 'text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-white/[.04]'
                   )}>
@@ -127,6 +136,21 @@ export const Sidebar = () => {
           </div>
         ))}
       </nav>
+
+      {info && (
+        <div className="px-3 pb-2">
+          <button type="button" onClick={updateAvailable ? showDetails : undefined}
+            className={cn('w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-colors',
+              updateAvailable ? 'border-accent/30 bg-accent/[.07] hover:bg-accent/[.11]' : 'border-white/[.06] bg-white/[.02]')}>
+            <span className={cn('w-2 h-2 rounded-full shrink-0', updateAvailable ? 'bg-accent animate-pulse' : info.error ? 'bg-severity-medium' : 'bg-severity-low')} />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[10px] uppercase tracking-wider text-text-muted">{updateAvailable ? 'Update ready' : 'Stable channel'}</span>
+              <span className="block text-xs font-mono text-text-secondary truncate">v{updateAvailable ? `${info.current} → ${info.latest}` : info.current}</span>
+            </span>
+            {updateAvailable && <span className="text-accent text-xs">›</span>}
+          </button>
+        </div>
+      )}
 
       {/* Support / donate — a single quiet row that expands to the Iranian
           gateway plus click-to-copy crypto addresses for everyone else. */}
@@ -191,6 +215,7 @@ export const Sidebar = () => {
           </button>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }

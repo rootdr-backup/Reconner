@@ -17,12 +17,13 @@ import (
 )
 
 type Handler struct {
-	db     *database.DB
-	hub    *websocket.Hub
-	sched  *scheduler.Scheduler
-	cfg    *config.Config
-	logger *logger.Logger
-	auth   *auth.Auth
+	db      *database.DB
+	hub     *websocket.Hub
+	sched   *scheduler.Scheduler
+	cfg     *config.Config
+	logger  *logger.Logger
+	auth    *auth.Auth
+	updates *releaseChecker
 }
 
 func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) http.Handler {
@@ -32,12 +33,13 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 	}
 
 	h := &Handler{
-		db:     db,
-		hub:    hub,
-		sched:  sched,
-		cfg:    cfg,
-		logger: log,
-		auth:   authService,
+		db:      db,
+		hub:     hub,
+		sched:   sched,
+		cfg:     cfg,
+		logger:  log,
+		auth:    authService,
+		updates: newReleaseChecker(),
 	}
 
 	r := mux.NewRouter()

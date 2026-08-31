@@ -156,7 +156,7 @@ export default function Dashboard() {
     } catch { /**/ } finally { setLoading(false) }
   }
   useEffect(() => { load(); const i = setInterval(load, 30000); return () => clearInterval(i) }, [])
-  if (loading) return <div className="flex items-center justify-center h-64"><Spinner/></div>
+  if (loading) return <div className="flex items-center justify-center h-64"><Spinner className="w-10 h-10"/></div>
   if (!stats) return null
 
   const sev = charts?.severity_breakdown || []
@@ -168,16 +168,17 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold">Dashboard</h1>
-          <p className="text-xs text-text-muted">{stats.targets} target(s) · {totalVulns} finding(s) · {critHigh} critical/high</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-accent">Command center</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Attack surface overview</h1>
+          <p className="mt-1 text-xs text-text-muted">{stats.targets} target(s) · {totalVulns} finding(s) · {critHigh} critical/high</p>
         </div>
         {/* Quick actions */}
-        <div className="flex items-center gap-2">
-          <button onClick={() => nav('/targets')} className="btn-primary text-xs">+ New Target</button>
-          <button onClick={() => nav('/findings')} className="btn-secondary text-xs">View Findings</button>
-          <button onClick={() => nav('/tasks')} className="btn-secondary text-xs">Scans</button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => nav('/targets')} className="btn-primary text-xs">+ New target</button>
+          <button onClick={() => nav('/findings')} className="btn-secondary text-xs">Review findings</button>
+          <button onClick={() => nav('/tasks')} className="btn-secondary text-xs">Scan activity</button>
           <button onClick={load} className="btn-ghost text-xs" title="Refresh">↻</button>
         </div>
       </div>

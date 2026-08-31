@@ -17,11 +17,12 @@ import (
 // that the web UI uses — no duplicated report code, no running server.
 func NewHandler(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) *Handler {
 	return &Handler{
-		db:     db,
-		hub:    hub,
-		sched:  sched,
-		cfg:    cfg,
-		logger: log,
+		db:      db,
+		hub:     hub,
+		sched:   sched,
+		cfg:     cfg,
+		logger:  log,
+		updates: newReleaseChecker(),
 	}
 }
 

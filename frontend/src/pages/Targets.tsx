@@ -179,7 +179,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">
             {filterKind === 'web' ? 'Web Targets' : filterKind === 'network' ? 'Network Targets' : 'Targets'}
@@ -188,7 +188,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             {kindTargets.length} target{kindTargets.length === 1 ? '' : 's'} · domains &amp; subdomains — web application scanning
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           {kindTargets.length > 0 && (
             <Button size="sm" variant="ghost" onClick={() => { setSelectMode(m => !m); setSelected(new Set()) }}>
               {selectMode ? 'Done' : 'Select'}
@@ -201,7 +201,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       </div>
 
       <div className="flex items-center gap-3 flex-wrap">
-        <Input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} className="max-w-xs" />
+        <Input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} className="sm:max-w-xs" />
         <label className="flex items-center gap-1.5 text-xs text-text-muted">
           Sort
           <select value={sortBy} onChange={e => setSortBy(e.target.value)}
