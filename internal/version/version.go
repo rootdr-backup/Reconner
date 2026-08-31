@@ -1,7 +1,13 @@
-// Package version holds Reconner's build version. Bump Current on every release
-// and tag the GitHub repo with the matching "v<Current>" tag so the in-app
-// update checker (see api.handleUpdateCheck) can tell clients an update is out.
+// Package version exposes Reconner's immutable build identity. The defaults are
+// intentionally useful for local `go run` builds; release and Docker builds set
+// all three values with -ldflags (see Makefile and Dockerfile).
 package version
 
-// Current is the running Reconner version (semver, no leading "v").
-const Current = "1.0.0"
+var (
+	// Current is a semantic version without a leading "v".
+	Current = "dev"
+	// Commit is the source revision used for this binary.
+	Commit = "unknown"
+	// BuildDate is an RFC3339 UTC timestamp when available.
+	BuildDate = "unknown"
+)

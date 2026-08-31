@@ -31,10 +31,10 @@ export default {
         },
         // The single committed accent — teal-500.
         accent: {
-          DEFAULT: '#8b5cf6',
-          hover: '#a78bfa',
-          muted: 'rgba(139,92,246,0.12)',
-          glow: 'rgba(139,92,246,0.35)',
+          DEFAULT: '#22d3ee',
+          hover: '#67e8f9',
+          muted: 'rgba(34,211,238,0.12)',
+          glow: 'rgba(34,211,238,0.35)',
         },
         text: {
           primary: '#e8edf4',
@@ -53,9 +53,9 @@ export default {
         },
         // Chart/series palette — accent-led, distinct hues for graphs.
         series: {
-          1: '#8b5cf6',
-          2: '#6366f1',
-          3: '#a78bfa',
+          1: '#22d3ee',
+          2: '#14b8a6',
+          3: '#67e8f9',
           4: '#f97316',
           5: '#f472b6',
           6: '#eab308',

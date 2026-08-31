@@ -35,6 +35,7 @@ import (
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/scheduler"
+	"github.com/recon-platform/internal/version"
 	"github.com/recon-platform/internal/websocket"
 	"github.com/recon-platform/pkg/logger"
 )
@@ -80,6 +81,8 @@ func main() {
 		for _, m := range scheduler.AllModules {
 			fmt.Println("  " + m)
 		}
+	case "version", "--version", "-v":
+		fmt.Printf("Reconner v%s\ncommit: %s\nbuilt:  %s\n", version.Current, version.Commit, version.BuildDate)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -101,6 +104,7 @@ USAGE:
   reconner serve                    run the web watchtower (dashboard + live UI at http://host:8080)
   reconner suspend-scans            park all active scans so the next 'serve' auto-resumes them (used by deploy.sh)
   reconner modules                  list every scan module
+  reconner version                  print version, commit and build date
 
 EXAMPLES:
   reconner scan example.com

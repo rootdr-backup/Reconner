@@ -545,7 +545,7 @@ export default function TargetDetail() {
         </div>
       )}
 
-      <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
         {[
           { label: 'Subdomains', value: target.subdomain_count },
           { label: 'Alive', value: target.alive_host_count, color: 'text-severity-low' },
@@ -569,7 +569,7 @@ export default function TargetDetail() {
           </p>
           <span className="text-[10px] text-text-muted">{assets.length}</span>
         </div>
-        <div className="flex gap-2 mb-3">
+        <div className="flex flex-col sm:flex-row gap-2 mb-3">
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}
             placeholder="add asset — domain, IP, CIDR, range, or a mix (space/comma separated)"
@@ -581,7 +581,7 @@ export default function TargetDetail() {
         ) : (
           <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
             {assets.map(a => (
-              <div key={a.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05]">
+              <div key={a.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05] flex-wrap sm:flex-nowrap">
                 <span className={cn('text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0',
                   a.kind === 'network' ? 'bg-series-3/15 text-series-3' : a.kind === 'mixed' ? 'bg-severity-low/15 text-severity-low' : 'bg-accent-muted text-accent-hover')}>{a.kind}</span>
                 <div className="min-w-0 flex-1">

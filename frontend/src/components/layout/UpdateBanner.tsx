@@ -1,84 +1,23 @@
-import { useEffect, useState } from 'react'
-import { system, type UpdateInfo } from '../../lib/api'
+import { useUpdateCenter } from './UpdateCenter'
 
-// A quiet, professional "new version available" banner. It polls the backend
-// (which itself caches the GitHub lookup) once on load and then hourly, and only
-// appears when a newer release is published. Dismissal is remembered per version,
-// so it comes back when a newer version ships but not for the one you dismissed.
 export const UpdateBanner = () => {
-  const [info, setInfo] = useState<UpdateInfo | null>(null)
-  const [open, setOpen] = useState(false)
-  const [dismissed, setDismissed] = useState('')
-
-  useEffect(() => {
-    let alive = true
-    const check = async () => {
-      try {
-        const u = await system.updateCheck()
-        if (alive) setInfo(u)
-      } catch { /* ignore */ }
-    }
-    check()
-    const t = setInterval(check, 60 * 60 * 1000) // hourly
-    return () => { alive = false; clearInterval(t) }
-  }, [])
-
-  useEffect(() => {
-    if (info?.update_available) {
-      setDismissed(sessionStorage.getItem('reconner_update_dismissed') || '')
-    }
-  }, [info])
-
-  if (!info?.update_available || dismissed === info.latest) return null
-
-  const dismiss = () => {
-    sessionStorage.setItem('reconner_update_dismissed', info.latest)
-    setDismissed(info.latest)
-  }
+  const { info, visible, dismiss, showDetails } = useUpdateCenter()
+  if (!visible || !info) return null
 
   return (
-    <>
-      <div className="flex items-center gap-3 px-4 py-2 text-xs border-b border-accent/25 bg-accent/[.08] text-text-secondary">
-        <span className="w-2 h-2 rounded-full bg-accent animate-pulse shrink-0" />
-        <span className="min-w-0">
-          <span className="font-semibold text-accent">Update available</span>
-          {' '}— Reconner <span className="font-mono">v{info.latest}</span> is out
-          {' '}(you're on <span className="font-mono">v{info.current}</span>).
-        </span>
-        <div className="ml-auto flex items-center gap-2 shrink-0">
-          <button onClick={() => setOpen(true)} className="btn-secondary text-[11px] py-1">What's new</button>
-          {info.url && (
-            <a href={info.url} target="_blank" rel="noreferrer" className="btn-primary text-[11px] py-1">View release</a>
-          )}
-          <button onClick={dismiss} title="Dismiss until the next version"
-            className="text-text-muted hover:text-text-primary px-1">✕</button>
-        </div>
+    <div className="relative flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-2 px-4 sm:px-6 py-2.5 border-b border-accent/25 bg-accent/[.08] text-xs">
+      <span className="relative flex h-2.5 w-2.5 shrink-0">
+        <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-50 animate-ping" />
+        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+      </span>
+      <p className="min-w-0 flex-1 text-text-secondary">
+        <span className="font-semibold text-text-primary">Reconner v{info.latest} is ready.</span>
+        <span className="hidden sm:inline"> New detections, fixes and performance improvements are available.</span>
+      </p>
+      <div className="flex items-center gap-1.5 ml-5 sm:ml-0">
+        <button onClick={showDetails} className="btn-primary !py-1 !px-2.5 text-[11px]">Review update</button>
+        <button onClick={dismiss} className="grid place-items-center w-7 h-7 rounded-md text-text-muted hover:text-text-primary hover:bg-white/[.06]" title="Hide until the next release" aria-label="Dismiss update">✕</button>
       </div>
-
-      {open && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setOpen(false)} />
-          <div className="relative bg-surface-2 border border-border rounded-xl shadow-2xl w-full max-w-lg">
-            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border">
-              <h2 className="text-base font-semibold truncate">Reconner v{info.latest} — release notes</h2>
-              <button onClick={() => setOpen(false)} className="text-text-muted hover:text-text-primary shrink-0">✕</button>
-            </div>
-            <div className="p-5 space-y-4">
-              <pre className="text-xs text-text-secondary whitespace-pre-wrap break-words max-h-72 overflow-auto bg-bg-secondary/50 p-3 rounded border border-border">
-{info.notes || 'No release notes provided.'}
-              </pre>
-              <div>
-                <p className="text-xs font-semibold text-text-primary mb-1">How to update</p>
-                <pre className="text-[11px] font-mono text-accent whitespace-pre-wrap bg-bg-secondary/50 p-3 rounded border border-border">git pull &amp;&amp; make &amp;&amp; ./reconner serve</pre>
-              </div>
-              <div className="flex justify-end gap-2 pt-2 border-t border-border">
-                {info.url && <a href={info.url} target="_blank" rel="noreferrer" className="btn-secondary text-sm">Open on GitHub</a>}
-                <button onClick={() => setOpen(false)} className="btn-primary text-sm">Close</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    </div>
   )
 }

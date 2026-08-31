@@ -114,7 +114,7 @@ func TestRealReconPipeline(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.EnableDAST = true // production default; gates the DAST/XSS objective
 	log := logger.New("error")
-	exec := tools.NewExecutor(cfg, log)
+	exec := tools.NewToolFreeExecutor(cfg, log)
 	nolog := func(_, _, _ string) {}
 	ctx := context.Background()
 
@@ -268,7 +268,7 @@ func TestRealReconPipelineCORS(t *testing.T) {
 	withLoopbackAllowed(t)
 	cfg := &config.Config{}
 	log := logger.New("error")
-	exec := tools.NewExecutor(cfg, log)
+	exec := tools.NewToolFreeExecutor(cfg, log)
 	nolog := func(_, _, _ string) {}
 	ctx := context.Background()
 

@@ -63,10 +63,10 @@ export default function Tasks() {
   }
 
   return (
-    <div className="flex gap-4" style={{height:'calc(100vh - 9rem)'}}>
-      <div className="flex flex-col w-72 shrink-0">
+    <div className="flex flex-col lg:flex-row gap-4 min-h-0 lg:h-[calc(100dvh-9rem)]">
+      <div className="flex flex-col w-full lg:w-80 lg:shrink-0 max-h-[46dvh] lg:max-h-none">
         <div className="flex items-center justify-between mb-3">
-          <h1 className="text-xl font-semibold">Tasks</h1>
+          <div><h1 className="text-xl font-semibold">Scan activity</h1><p className="text-[11px] text-text-muted mt-0.5">Live progress, failures and resumable work</p></div>
           <Button size="sm" variant="ghost" onClick={() => load(statusFilter)}>↻</Button>
         </div>
         <div className="flex gap-2 mb-3">
@@ -116,7 +116,7 @@ export default function Tasks() {
             ))}
         </div>
       </div>
-      <div className="flex-1 card overflow-hidden" style={{padding:0}}>
+      <div className="flex-1 card overflow-hidden min-h-[26rem] lg:min-h-0" style={{padding:0}}>
         {selected ? (
           <div className="flex flex-col h-full">
             <div className="px-4 py-3 border-b border-border flex items-center gap-3">

@@ -1,0 +1,16 @@
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="reconner-mark" x1="8" y1="7" x2="56" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2dd4bf"/>
+      <stop offset=".55" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="#0a0c10"/>
+  <circle cx="32" cy="32" r="23" stroke="url(#reconner-mark)" stroke-width="3"/>
+  <circle cx="32" cy="32" r="13" stroke="url(#reconner-mark)" stroke-width="1.5" opacity=".55"/>
+  <path d="M32 9v9M32 46v9M9 32h9M46 32h9" stroke="url(#reconner-mark)" stroke-width="2" stroke-linecap="round"/>
+  <path d="M32 32 50 20" stroke="url(#reconner-mark)" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="43" cy="25" r="3" fill="#2dd4bf"/>
+  <circle cx="32" cy="32" r="3.5" fill="url(#reconner-mark)"/>
+</svg>

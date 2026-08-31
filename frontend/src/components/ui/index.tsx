@@ -32,10 +32,11 @@ export const Badge = ({ children, variant='neutral', className }: { children: Re
 }
 
 export const Spinner = ({ className }: { className?: string }) => (
-  <svg className={cn('animate-spin text-accent', className || 'w-5 h-5')} viewBox="0 0 24 24" fill="none">
-    <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3"/>
-    <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z"/>
-  </svg>
+  <span className={cn('reconner-loader', className || 'w-6 h-6')} role="status" aria-label="Loading">
+    <span className="reconner-loader-ring" />
+    <span className="reconner-loader-sweep" />
+    <span className="reconner-loader-core" />
+  </span>
 )
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> { label?: string; error?: string }
@@ -52,11 +53,11 @@ export const Modal = ({ open, onClose, title, children, width='md' }: { open: bo
   const w = { sm:'max-w-sm', md:'max-w-md', lg:'max-w-2xl', xl:'max-w-4xl' }
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
-      <div className={cn('relative bg-surface-2 border border-border rounded-xl shadow-2xl w-full', w[width])}>
-        {title && <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border"><h2 className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors shrink-0">✕</button></div>}
-        <div className="p-5">{children}</div>
+      <div className={cn('relative flex flex-col max-h-[92dvh] bg-surface-2 border border-border rounded-t-2xl sm:rounded-xl shadow-2xl w-full', w[width])}>
+        {title && <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-4 border-b border-border shrink-0"><h2 className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button onClick={onClose} className="grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] transition-colors shrink-0">✕</button></div>}
+        <div className="p-4 sm:p-5 overflow-y-auto overscroll-contain">{children}</div>
       </div>
     </div>
   )

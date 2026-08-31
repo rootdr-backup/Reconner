@@ -51,13 +51,16 @@
 ARG GO_VERSION=1.26-bookworm
 ARG NODE_VERSION=20-bookworm
 ARG DEBIAN_VERSION=bookworm-slim
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
 
 # ── stage 1: frontend ────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION} AS frontend
 WORKDIR /app/frontend
-# Install deps first (better layer caching); fall back to install if no lockfile.
+# Install the exact audited dependency graph from the lockfile.
 COPY frontend/package*.json ./
-RUN npm ci || npm install
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
@@ -262,6 +265,9 @@ RUN /opt/venv/bin/python3 -c "import sys; print(sys.version)" \
 
 # ── stage 6: backend (Reconner Go binary, CGO + embedded SQLite) ────────────
 FROM golang:${GO_VERSION} AS backend
+ARG VERSION
+ARG VCS_REF
+ARG BUILD_DATE
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -272,7 +278,13 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 ENV CGO_ENABLED=1 GOFLAGS=-buildvcs=false GOTOOLCHAIN=auto
-RUN go build -ldflags="-s -w" -o /out/reconner ./cmd/reconner \
+RUN APP_VERSION="${VERSION}"; \
+    if [ "${APP_VERSION}" = "dev" ]; then APP_VERSION="$(tr -d '[:space:]' < VERSION)"; fi; \
+    go build -ldflags="-s -w \
+      -X github.com/recon-platform/internal/version.Current=${APP_VERSION} \
+      -X github.com/recon-platform/internal/version.Commit=${VCS_REF} \
+      -X github.com/recon-platform/internal/version.BuildDate=${BUILD_DATE}" \
+      -o /out/reconner ./cmd/reconner \
  && test -x /out/reconner
 
 # ── stage 7: runtime ─────────────────────────────────────────────────────────

@@ -51,13 +51,31 @@ type Executor struct {
 	semaphore   chan struct{}
 	mu          sync.Mutex
 	activeProcs map[string]*exec.Cmd
+	toolFree    bool
+}
+
+// NewToolFreeExecutor is the deterministic counterpart used by tests and
+// embedders that explicitly want Reconner's native fallbacks. It prevents a
+// developer's locally installed httpx/katana/etc. from silently changing an
+// otherwise tool-free test into a slow external integration test.
+func NewToolFreeExecutor(cfg *config.Config, log *logger.Logger) *Executor {
+	e := NewExecutor(cfg, log)
+	e.toolFree = true
+	return e
 }
 
 func NewExecutor(cfg *config.Config, log *logger.Logger) *Executor {
+	maxExecutions := cfg.Limits.MaxToolExecutions
+	if maxExecutions <= 0 {
+		// A zero-capacity channel blocks forever on the first external command.
+		// DefaultConfig normally supplies this value, but tests, embedders and
+		// partially migrated configs can legitimately construct a sparse Config.
+		maxExecutions = 1
+	}
 	return &Executor{
 		cfg:         cfg,
 		logger:      log,
-		semaphore:   make(chan struct{}, cfg.Limits.MaxToolExecutions),
+		semaphore:   make(chan struct{}, maxExecutions),
 		activeProcs: make(map[string]*exec.Cmd),
 	}
 }
@@ -72,6 +90,9 @@ type ExecResult struct {
 type LineCallback func(line string)
 
 func (e *Executor) RunWithCallback(ctx context.Context, taskID string, callback LineCallback, name string, args ...string) error {
+	if e.toolFree {
+		return fmt.Errorf("external tool %s disabled", name)
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -148,6 +169,9 @@ func (e *Executor) safeCallback(tool string, cb LineCallback, line string) {
 }
 
 func (e *Executor) Run(ctx context.Context, name string, args ...string) (*ExecResult, error) {
+	if e.toolFree {
+		return nil, fmt.Errorf("external tool %s disabled", name)
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -195,6 +219,9 @@ func (e *Executor) KillTask(taskID string) {
 }
 
 func (e *Executor) IsToolAvailable(name string) bool {
+	if e.toolFree {
+		return false
+	}
 	path := e.findTool(name)
 	if path == name {
 		_, err := exec.LookPath(name)
@@ -214,7 +241,7 @@ func (e *Executor) findTool(name string) string {
 	// ProjectDiscovery tools live) BEFORE ~/.local/bin — a python package named
 	// like a recon tool (e.g. the "httpx" HTTP library CLI) installs into
 	// ~/.local/bin and would otherwise shadow the real tool and break probing.
-		for _, dir := range []string{
+	for _, dir := range []string{
 		filepath.Join(os.Getenv("HOME"), "go", "bin"),
 		"/usr/local/bin",
 		"/opt/venv/bin",
@@ -235,7 +262,7 @@ func (e *Executor) findTool(name string) string {
 
 func (e *Executor) extendedPath() string {
 	existing := os.Getenv("PATH")
-		extra := []string{
+	extra := []string{
 		e.cfg.ToolsDir,
 		filepath.Join(os.Getenv("HOME"), "go", "bin"),
 		"/opt/venv/bin",
