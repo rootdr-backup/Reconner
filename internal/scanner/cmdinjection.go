@@ -124,7 +124,7 @@ func (s *CmdiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 					if !strings.Contains(body2, cmdiEchoMarker) || strings.Contains(body2, "$((1000+337))") {
 						continue
 					}
-					s.store(targetID, "command_injection", "critical", ip.URL, ip.Param, pl,
+					s.store(targetID, "command_injection", "critical", ip, pl,
 						"OS command executed: shell-computed marker "+cmdiEchoMarker+" (from $((1000+337))) returned in response — reflection-proof ["+ip.Method+"]")
 					found.Add(1)
 					logFn("warn", "cmdi", fmt.Sprintf("RCE (echo) CONFIRMED: %s param=%s [%s]", ip.URL, ip.Param, ip.Method))
@@ -160,14 +160,18 @@ func (s *CmdiScanner) plantBlindRCE(ctx context.Context, targetID string, logFn 
 	if !ok {
 		return
 	}
-	points := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())
+	limit := cmdiMaxParams
+	if s.cfg != nil && s.cfg.URLLimit() > 0 && s.cfg.URLLimit() < limit {
+		limit = s.cfg.URLLimit()
+	}
+	points := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassCMDi, limit, 48)
 	if len(points) == 0 {
 		return
 	}
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "rce",
 		nil, // shell-metacharacter payloads are injected on every param, as before
-		func(cb string) []string { return rceOOBPayloads(cb) })
+		func(_ insertionPoint, cb string) []string { return rceOOBPayloads(cb) })
 	if n > 0 {
 		logFn("info", "cmdi", fmt.Sprintf("Planted %d blind-RCE OOB probe(s); execution reported via callback.", n))
 	}
@@ -176,32 +180,17 @@ func (s *CmdiScanner) plantBlindRCE(ctx context.Context, targetID string, logFn 
 // selectCandidates prioritises shell-prone params (incl. POST form fields) but
 // includes a bounded slice of others too (command injection can hide anywhere).
 func (s *CmdiScanner) selectCandidates(ctx context.Context, targetID string) []insertionPoint {
-	all := loadInsertionPoints(ctx, s.db, targetID, 5000)
-	var prone, other []insertionPoint
-	for _, ip := range all {
-		if cmdiProneParams[strings.ToLower(ip.Param)] {
-			prone = append(prone, ip)
-		} else {
-			other = append(other, ip)
-		}
+	limit := cmdiMaxParams
+	if s.cfg != nil && s.cfg.URLLimit() > 0 && s.cfg.URLLimit() < limit {
+		limit = s.cfg.URLLimit()
 	}
-	out := prone
-	for _, o := range other {
-		if len(out) >= cmdiMaxParams {
-			break
-		}
-		out = append(out, o)
-	}
-	if len(out) > cmdiMaxParams {
-		out = out[:cmdiMaxParams]
-	}
-	return out
+	return loadRoutedInsertionPoints(ctx, s.db, targetID, ClassCMDi, limit, 48)
 }
 
-func (s *CmdiScanner) store(targetID, vulnType, severity, rawURL, param, payload, evidence string) {
+func (s *CmdiScanner) store(targetID, vulnType, severity string, ip insertionPoint, payload, evidence string) {
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: vulnType, Subtype: "in-band", Severity: severity,
-		URL: rawURL, Method: "GET", Parameter: param, Location: "query", Payload: payload,
+		URL: ip.URL, Method: ip.Method, Parameter: ip.Param, Location: insertionLocation(ip), Payload: payload,
 		Evidence: evidence, Source: "cmdi-native", DetectionMethod: "computed-marker-replay",
 		Confidence: 99, Verdict: VerifyVerified,
 	})

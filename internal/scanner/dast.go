@@ -234,7 +234,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 			// to Chromium (which activates javascript: links) instead of silently
 			// leaving every scheme-only sink inconclusive.
 			if a.Context == CtxURL && a.URLScheme {
-				execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth)
+				execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth, baseline)
 				if executed {
 					s.confirmXSS(ctx, targetID, ip, a.Context, execPayload, proof, conf)
 					out.xssConfirmed++
@@ -270,7 +270,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					// filter, so the REPORTED PoC actually pops (the dominant "finds
 					// XSS but no popup" gap): browser real-execution proof first, then
 					// a browserless bypass-ladder rotation.
-					execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth)
+					execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth, baseline)
 					if executed {
 						s.confirmXSS(ctx, targetID, ip, a.Context, execPayload, proof, conf)
 						out.xssConfirmed++
@@ -551,7 +551,7 @@ func exploitExample(ctxName, injected string) string {
 //     + handler survive RAW as live markup (95).
 //  3. Fallback: injection was proven but every tested vector was filtered — report
 //     the canonical payload at lower confidence so a human can craft a bypass (90).
-func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, auth map[string]string) (payload, proof string, confidence int, executed bool) {
+func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, auth map[string]string, baseline string) (payload, proof string, confidence int, executed bool) {
 	// 1) browserless rotation over the executing/bypass ladder: the first alert
 	//    payload whose element + handler survive RAW as live markup in an HTML
 	//    response. Raw survival in an HTML sink means a browser navigating it WILL
@@ -563,7 +563,8 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 		}
 		r := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
 		if browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff) &&
-			cspAllowsInlineScript(r.CSP) && execPayloadSurvived(r.Body, p) {
+			cspAllowsInlineScript(r.CSP) && execPayloadSurvived(r.Body, p) &&
+			!execPayloadSurvived(baseline, p) {
 			ladder = p.Payload
 			break
 		}

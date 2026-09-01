@@ -80,4 +80,29 @@ func TestExecPayloadSurvived(t *testing.T) {
 	if execPayloadSurvived(`<meta content="<svg onload=alert(document.domain)>">`, p) {
 		t.Error("payload trapped in a quoted attribute must NOT count as a live tag")
 	}
+	// Real regression: og:url reflects only the percent-encoded request URL while
+	// the page independently contains many legitimate SVG icons. A global
+	// strings.Contains("onload") + any-<svg> check joined those unrelated facts and
+	// reported a working XSS even though no injected element existed.
+	ogURL := `<meta name="url" property="og:url" content="https://example.test/?user=%22%3E%3Csvg+onload%3Dalert%28document.domain%29%3E">` +
+		`<svg class="logo"><path d="M0 0"></path></svg><svg class="icon"></svg>`
+	if execPayloadSurvived(ogURL, p) {
+		t.Error("percent-encoded og:url reflection plus unrelated live SVGs must NOT count as XSS")
+	}
+	// Even a legitimate SVG event elsewhere must not match unless its exact
+	// executable value is the injected one on the same subtree.
+	if execPayloadSurvived(ogURL+`<svg onload="initLogo()"></svg>`, p) {
+		t.Error("handler name on an unrelated SVG must not satisfy payload proof")
+	}
+}
+
+func TestEveryTagPayloadUsesCorrelatedExecutionSignal(t *testing.T) {
+	for _, p := range htmlTextExecLadder() {
+		if p.Elem == "" {
+			continue
+		}
+		if !execPayloadSurvived("<!doctype html><html><body>"+p.Payload+"</body></html>", p) {
+			t.Errorf("live payload was not recognized: elem=%s payload=%q", p.Elem, p.Payload)
+		}
+	}
 }

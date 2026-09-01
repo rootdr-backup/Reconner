@@ -720,7 +720,7 @@ func (s *JSScanner) storeDOMXSSFindings(ctx context.Context, targetID, jsURL, co
 	// to keep the lead list first-party and actionable. Source-map-recovered content
 	// is keyed by the ORIGINAL bundle URL, so this check still applies correctly.
 	if host := hostOfJSURL(jsURL); host != "" {
-		if scope := s.targetScope(ctx, targetID); scope != "" && !sameRegistrable(host, scope) {
+		if scope := s.targetScope(ctx, targetID); scope != "" && !isTargetDomainHost(host, scope) {
 			return 0
 		}
 	}
@@ -744,6 +744,13 @@ func (s *JSScanner) storeDOMXSSFindings(ctx context.Context, targetID, jsURL, co
 		conf := h.Confidence
 		if conf == 0 {
 			conf = 45
+		}
+		// Static taint is routing intelligence for the browser verifier, not a
+		// user-facing vulnerability. Keep it below the projection cutoff even when
+		// the source/sink pair is strong; only runtime execution earns a green,
+		// confirmed finding (99 below in VerifyDOMXSSOnPages).
+		if conf >= ConfHiddenCutoff {
+			conf = ConfHiddenCutoff - 5
 		}
 		if _, err := RecordDetectorObservation(ctx, s.db, DetectorObservation{
 			TargetID: targetID, Type: "dom_xss", Subtype: "static-flow", Severity: "medium",
@@ -955,9 +962,11 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		return
 	}
 	auth := loadAuthHeaders(ctx, db, targetID)
-	var nameLead, messageLead int
+	var nameLead, messageLead, queryLead int
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='dom_xss' AND evidence LIKE '%window.name%'`, targetID).Scan(&nameLead)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='dom_xss' AND evidence LIKE '%postMessage%'`, targetID).Scan(&messageLead)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='dom_xss'
+		AND (evidence LIKE '%location.search%' OR evidence LIKE '%document.URL%' OR evidence LIKE '%location.href%')`, targetID).Scan(&queryLead)
 	staticLeadHosts := map[string]bool{}
 	if rows, err := db.QueryContext(ctx, `SELECT DISTINCT url FROM candidates WHERE target_id=? AND type='dom_xss' AND subtype='static-flow'`, targetID); err == nil {
 		for rows.Next() {
@@ -990,6 +999,13 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		tests := []struct{ mode, param string }{{"hash", hashParam}}
 		for _, p := range page.Params {
 			tests = append(tests, struct{ mode, param string }{"query", p})
+		}
+		// A direct location.search/document.URL flow may consume the raw query
+		// without naming a URLSearchParams key in source. Give static-lead hosts one
+		// controlled fallback key so that class can reach execution proof instead of
+		// being silently limited to fragment tests.
+		if queryLead > 0 && len(page.Params) == 0 && staticLeadHosts[hostOfURL(page.URL)] {
+			tests = append(tests, struct{ mode, param string }{"query", "rcx"})
 		}
 		for _, location := range page.PathLocations {
 			tests = append(tests, struct{ mode, param string }{"path", location})

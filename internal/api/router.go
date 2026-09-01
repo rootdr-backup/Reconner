@@ -65,6 +65,11 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 	api.Use(h.corsMiddleware)
 	api.Use(h.targetScopeMiddleware) // per-user isolation on every /targets/{id} route
 
+	// Public, dependency-free liveness probe used by Docker/Compose. Keep this
+	// deliberately cheap: a busy SQLite writer or a long-running scan must not
+	// make an otherwise responsive process look dead to the orchestrator.
+	api.HandleFunc("/health", h.handleHealth).Methods("GET")
+
 	// Auth endpoints
 	api.HandleFunc("/auth/login", h.handleLogin).Methods("POST")
 	api.HandleFunc("/auth/logout", h.handleLogout).Methods("POST")
@@ -328,6 +333,11 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, msg string) {
 
 func (h *Handler) writeSuccess(w http.ResponseWriter, data any) {
 	h.writeJSON(w, http.StatusOK, map[string]any{"data": data, "success": true})
+}
+
+func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) serveSPA(dir string) http.HandlerFunc {

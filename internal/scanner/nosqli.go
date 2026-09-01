@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,14 +50,18 @@ var nosqliClient = newPooledClient(12*time.Second, false)
 // MongoDB / NoSQL driver error signatures (specific enough to avoid FPs).
 var nosqlErrorSignatures = []string{
 	"mongoerror", "mongoservererror", "mongonetworkerror", "e11000 duplicate key",
-	"$where", "$regex", "bsonobj", "com.mongodb", "mongoose", "casterror",
-	"failed to parse", "unterminated object", "pymongo", "unexpected token o in json",
+	"bsonobj", "com.mongodb", "mongoose", "casterror", "pymongo",
+	"unknown top level operator", "unknown operator", "badvalue:", "bson field",
 }
 
 const nosqliMaxPoints = 150
 
 func (s *NoSQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
-	points := loadInsertionPoints(ctx, s.db, targetID, nosqliMaxPoints)
+	limit := nosqliMaxPoints
+	if s.cfg != nil && s.cfg.URLLimit() > 0 && s.cfg.URLLimit() < limit {
+		limit = s.cfg.URLLimit()
+	}
+	points := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassNoSQLi, limit, 64)
 	if len(points) == 0 {
 		logFn("info", "nosqli", "No insertion points for NoSQL injection")
 		return nil
@@ -88,7 +93,7 @@ func (s *NoSQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 }
 
 func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip insertionPoint, auth map[string]string, logFn LogFunc) bool {
-	isJSON := strings.ToUpper(ip.Method) == "POST" && strings.Contains(ip.ContentType, "json")
+	isJSON := insertionLocation(ip) == "json"
 
 	// Baseline with the original value.
 	baseStatus, baseBody := s.send(ctx, ip, valuePlain, "", auth, isJSON)
@@ -100,8 +105,12 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 	// 1) Error-based: a bare quote/brace surfaces a driver error.
 	_, errBody := s.send(ctx, ip, valueErr, "", auth, isJSON)
 	if sig := firstNewSignature(strings.ToLower(errBody), baseLower, nosqlErrorSignatures); sig != "" {
+		_, replay := s.send(ctx, ip, valueErr, "", auth, isJSON)
+		if !strings.Contains(strings.ToLower(replay), sig) || bodyLooksLikeWAFBlock(errBody) || bodyLooksLikeWAFBlock(replay) {
+			return false
+		}
 		s.store(targetID, "critical", ip, fmt.Sprintf("NoSQL error triggered by injected metacharacter — response leaked %q (not in baseline)", sig), 95)
-		s.report(targetID, ip, logFn, "error")
+		s.report(targetID, ip, logFn, "error", 95)
 		return true
 	}
 
@@ -123,13 +132,13 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 	if tl, fl, ok := s.booleanOpDiff(ctx, ip, auth, isJSON, vol, "rcnnope", "$ne", "rcnnope", "$eq"); ok {
 		s.store(targetID, "high", ip,
 			fmt.Sprintf("NoSQL boolean injection: [$ne] response (%dB) differs materially from [$eq] (%dB), reproduced with a stable direction across two request pairs — the operator was interpreted by the database.", tl, fl), 80)
-		s.report(targetID, ip, logFn, "boolean")
+		s.report(targetID, ip, logFn, "boolean", 80)
 		return true
 	}
 	if tl, fl, ok := s.booleanOpDiff(ctx, ip, auth, isJSON, vol, ".*", "$regex", "^rcnZZnomatch$", "$regex"); ok {
 		s.store(targetID, "high", ip,
 			fmt.Sprintf("NoSQL boolean injection ($regex): a match-all [$regex '.*'] response (%dB) differs materially from a match-none [$regex '^…$'] (%dB), reproduced with a stable direction — the regex operator was interpreted by the database (Rocket.Chat CVE-2021-22911 class).", tl, fl), 80)
-		s.report(targetID, ip, logFn, "boolean-regex")
+		s.report(targetID, ip, logFn, "boolean-regex", 80)
 		return true
 	}
 	return false
@@ -142,6 +151,10 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 // independent request pairs (killing dynamic-content jitter). Returns the TRUE and
 // FALSE body lengths (for evidence) and whether the operator was interpreted.
 func (s *NoSQLiScanner) booleanOpDiff(ctx context.Context, ip insertionPoint, auth map[string]string, isJSON bool, vol volProfile, trueVal, trueOp, falseVal, falseOp string) (tLen, fLen int, ok bool) {
+	loc := insertionLocation(ip)
+	if loc != "query" && loc != "body" && loc != "json" {
+		return 0, 0, false // structured $operators cannot be represented here
+	}
 	trueStatus, trueBody := s.send(ctx, ip, trueVal, trueOp, auth, isJSON)
 	falseStatus, falseBody := s.send(ctx, ip, falseVal, falseOp, auth, isJSON)
 	if trueStatus == 0 || falseStatus == 0 {
@@ -154,12 +167,15 @@ func (s *NoSQLiScanner) booleanOpDiff(ctx context.Context, ip insertionPoint, au
 	dTF := abs(len(trueBody) - len(falseBody))
 	gap := dTF * 100 / max1(len(trueBody), len(falseBody)) // percent difference
 	if dTF > threshold && gap >= 15 &&
-		matchAny(strings.ToLower(trueBody), idorErrorSignatures) == "" {
-		_, trueBody2 := s.send(ctx, ip, trueVal, trueOp, auth, isJSON)
-		_, falseBody2 := s.send(ctx, ip, falseVal, falseOp, auth, isJSON)
+		matchAny(strings.ToLower(trueBody), idorErrorSignatures) == "" &&
+		(trueStatus != falseStatus || !bodiesSameObject(trueBody, falseBody)) {
+		trueStatus2, trueBody2 := s.send(ctx, ip, trueVal, trueOp, auth, isJSON)
+		falseStatus2, falseBody2 := s.send(ctx, ip, falseVal, falseOp, auth, isJSON)
 		dTF2 := abs(len(trueBody2) - len(falseBody2))
 		sameDirection := (len(trueBody) >= len(falseBody)) == (len(trueBody2) >= len(falseBody2))
-		if dTF2 > threshold && sameDirection &&
+		if dTF2 > threshold && sameDirection && trueStatus2 == trueStatus && falseStatus2 == falseStatus &&
+			bodiesSameObject(trueBody, trueBody2) && bodiesSameObject(falseBody, falseBody2) &&
+			!bodyLooksLikeWAFBlock(trueBody2) && !bodyLooksLikeWAFBlock(falseBody2) &&
 			matchAny(strings.ToLower(trueBody2), idorErrorSignatures) == "" {
 			return len(trueBody), len(falseBody), true
 		}
@@ -180,16 +196,31 @@ func (s *NoSQLiScanner) send(ctx context.Context, ip insertionPoint, value, op s
 
 	var req *http.Request
 	var err error
-	if isJSON {
-		var payload string
-		if op != "" {
-			payload = fmt.Sprintf(`{%q:{%q:%q}}`, ip.Param, op, value)
-		} else {
-			payload = fmt.Sprintf(`{%q:%q}`, ip.Param, value)
-		}
-		req, err = http.NewRequestWithContext(reqCtx, "POST", stripQuery(ip.URL), strings.NewReader(payload))
+	if op == "" {
+		// Error/plain probes work in every insertion location and must retain the
+		// target's auth, query contract, JSON/form siblings and real method.
+		req, err = buildInjectedRequest(reqCtx, ip, value, auth)
+	} else if isJSON {
+		payload := buildNoSQLJSONBody(ip, value, op)
+		req, err = http.NewRequestWithContext(reqCtx, strings.ToUpper(ip.Method), ip.URL, strings.NewReader(payload))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
+		}
+	} else if insertionLocation(ip) == "body" {
+		values := url.Values{}
+		for k, v := range ip.Siblings {
+			if k != ip.Param {
+				values.Set(k, v)
+			}
+		}
+		body := values.Encode()
+		if body != "" {
+			body += "&"
+		}
+		body += url.QueryEscape(ip.Param) + "[" + op + "]=" + url.QueryEscape(value)
+		req, err = http.NewRequestWithContext(reqCtx, strings.ToUpper(ip.Method), ip.URL, strings.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
 	} else {
 		// Query string. Operator form uses the raw key param[$op].
@@ -198,19 +229,7 @@ func (s *NoSQLiScanner) send(ctx context.Context, ip insertionPoint, value, op s
 			key = ip.Param + "[" + op + "]"
 		}
 		u := setRawQueryParam(ip.URL, key, value)
-		method := "GET"
-		if strings.ToUpper(ip.Method) == "POST" {
-			method = "POST"
-		}
-		if method == "POST" {
-			body := key + "=" + url.QueryEscape(value)
-			req, err = http.NewRequestWithContext(reqCtx, "POST", stripQuery(ip.URL), strings.NewReader(body))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			}
-		} else {
-			req, err = http.NewRequestWithContext(reqCtx, "GET", u, nil)
-		}
+		req, err = http.NewRequestWithContext(reqCtx, strings.ToUpper(ip.Method), u, nil)
 	}
 	if err != nil {
 		return 0, ""
@@ -226,6 +245,40 @@ func (s *NoSQLiScanner) send(ctx context.Context, ip insertionPoint, value, op s
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
 	return resp.StatusCode, string(body)
+}
+
+func buildNoSQLJSONBody(ip insertionPoint, value, op string) string {
+	fields := make(map[string]string, len(ip.Siblings))
+	for k, v := range ip.Siblings {
+		if k != ip.Param {
+			fields[k] = v
+		}
+	}
+	var root map[string]any
+	_ = json.Unmarshal([]byte(buildJSONFieldsTyped(fields, ip.SiblingTypes, "")), &root)
+	if root == nil {
+		root = map[string]any{}
+	}
+	parts := strings.Split(ip.Param, ".")
+	cur := root
+	for i, raw := range parts {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		if i == len(parts)-1 {
+			cur[part] = map[string]any{op: value}
+			break
+		}
+		next, ok := cur[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[part] = next
+		}
+		cur = next
+	}
+	body, _ := json.Marshal(root)
+	return string(body)
 }
 
 // setRawQueryParam replaces/sets key=value in the URL's raw query WITHOUT
@@ -262,9 +315,13 @@ func (s *NoSQLiScanner) store(targetID, sev string, ip insertionPoint, evidence 
 	})
 }
 
-func (s *NoSQLiScanner) report(targetID string, ip insertionPoint, logFn LogFunc, kind string) {
-	logFn("warn", "nosqli", fmt.Sprintf("NoSQL injection (%s): %s param=%s [%s]", kind, ip.URL, ip.Param, ip.Method))
-	if s.broadcast != nil {
+func (s *NoSQLiScanner) report(targetID string, ip insertionPoint, logFn LogFunc, kind string, confidence int) {
+	level, label := "info", "candidate"
+	if confidence >= ConfEvidence {
+		level, label = "warn", "confirmed"
+	}
+	logFn(level, "nosqli", fmt.Sprintf("NoSQL injection %s (%s): %s param=%s [%s]", label, kind, ip.URL, ip.Param, ip.Method))
+	if s.broadcast != nil && confidence >= ConfEvidence {
 		s.broadcast("new_vuln_finding", map[string]any{
 			"target_id": targetID, "type": "nosql_injection", "url": ip.URL, "parameter": ip.Param,
 		})

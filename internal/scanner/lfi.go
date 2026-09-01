@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -96,6 +94,7 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	if len(candidates) == 0 {
 		return nil
 	}
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -107,25 +106,50 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(rawURL, param string) {
+		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// A page may legitimately contain a passwd/win.ini-looking sample in
+			// documentation. Require the signature to be absent from an unrelated
+			// control value before treating a traversal response as evidence.
+			control := newXSSToken("rcnlfibase")
+			baseBody, baseStatus, _ := sendInjectedFull(ctx, lfiHTTPClient, ip, control, auth)
+			if looksLikeBlockPage(baseStatus, baseBody) {
+				return
+			}
 			for _, pl := range lfiPayloads {
-				body := s.fetch(ctx, injectParam(rawURL, param, pl))
+				body, status, _ := sendInjectedFull(ctx, lfiHTTPClient, ip, pl, auth)
 				if body == "" {
 					continue
 				}
-				if kind := confirmLFI(pl, body); kind != "" {
-					s.store(targetID, "lfi", "critical", rawURL, param, pl,
-						fmt.Sprintf("Local file read confirmed (%s)", kind))
-					found.Add(1)
-					logFn("warn", "lfi", fmt.Sprintf("LFI CONFIRMED (%s): %s param=%s", kind, rawURL, param))
-					s.notify(targetID, rawURL, param)
-					return
+				if looksLikeBlockPage(status, body) {
+					continue
 				}
+				kind := confirmLFI(pl, body)
+				if kind == "" || confirmLFI(pl, baseBody) != "" {
+					continue
+				}
+
+				// Reproduce the positive and then repeat the negative control. This
+				// rejects transient upstream pages and rotating debug/documentation
+				// content without weakening any real file-read signature.
+				body2, status2, _ := sendInjectedFull(ctx, lfiHTTPClient, ip, pl, auth)
+				control2, controlStatus, _ := sendInjectedFull(ctx, lfiHTTPClient, ip, newXSSToken("rcnlfictl"), auth)
+				if looksLikeBlockPage(status2, body2) || looksLikeBlockPage(controlStatus, control2) ||
+					confirmLFI(pl, body2) != kind || confirmLFI(pl, control2) != "" {
+					continue
+				}
+				ev := fmt.Sprintf("Local file read confirmed twice (%s); signature absent from two control responses [HTTP %d/%d, %s %s]",
+					kind, status, status2, strings.ToUpper(ip.Method), insertionLocation(ip))
+				s.store(targetID, ip, pl, kind, ev)
+				found.Add(1)
+				logFn("warn", "lfi", fmt.Sprintf("LFI CONFIRMED (%s): %s param=%s [%s/%s]",
+					kind, ip.URL, ip.Param, ip.Method, insertionLocation(ip)))
+				s.notify(targetID, ip.URL, ip.Param)
+				return
 			}
-		}(c.url, c.param)
+		}(c)
 	}
 	wg.Wait()
 
@@ -168,65 +192,21 @@ func confirmLFI(payload, body string) string {
 	return ""
 }
 
-type lfiCandidate struct{ url, param string }
-
-func (s *LFIScanner) selectCandidates(ctx context.Context, targetID string) []lfiCandidate {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT url, parameter, COALESCE(value,'') FROM parameters WHERE target_id = ?`, targetID)
-	if err != nil {
-		return nil
+func (s *LFIScanner) selectCandidates(ctx context.Context, targetID string) []insertionPoint {
+	limit := lfiMaxParams
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
 	}
-	defer rows.Close()
-	seen := make(map[string]bool)
-	var out []lfiCandidate
-	for rows.Next() {
-		var u, param, val string
-		if err := rows.Scan(&u, &param, &val); err != nil {
-			continue
-		}
-		// Route via the unified param classifier: name tokens (file, path,
-		// filepath, download…) + value heuristic (a value that looks like a path).
-		if !paramProneTo(ClassLFI, param, val) {
-			continue
-		}
-		parsed, err := url.Parse(u)
-		if err != nil {
-			continue
-		}
-		key := parsed.Host + parsed.Path + "?" + param
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, lfiCandidate{u, param})
-		if len(out) >= lfiMaxParams {
-			break
-		}
-	}
-	return out
+	// A small unfamiliar-name fallback catches custom parameters while the main
+	// budget stays focused on file/path names and path-looking example values.
+	return loadRoutedInsertionPoints(ctx, s.db, targetID, ClassLFI, limit, 32)
 }
 
-func (s *LFIScanner) fetch(ctx context.Context, u string) string {
-	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, "GET", u, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
-	resp, err := lfiHTTPClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
-	resp.Body.Close()
-	return string(body)
-}
-
-func (s *LFIScanner) store(targetID, vulnType, severity, rawURL, param, payload, evidence string) {
+func (s *LFIScanner) store(targetID string, ip insertionPoint, payload, subtype, evidence string) {
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
-		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
-		Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
-		Source: "lfi-native", DetectionMethod: "file-signature-replay", Confidence: 96,
+		TargetID: targetID, Type: "lfi", Subtype: subtype, Severity: "critical", URL: ip.URL, Method: ip.Method,
+		Parameter: ip.Param, Location: insertionLocation(ip), Payload: payload, Evidence: evidence,
+		Source: "lfi-native", DetectionMethod: "differential-file-signature-replay", Confidence: 99,
 		Verdict: VerifyVerified,
 	})
 }

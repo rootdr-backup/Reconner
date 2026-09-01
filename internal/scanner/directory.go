@@ -639,49 +639,16 @@ func storeExposedBackup(db *database.DB, targetID, url, fileType string, size in
 func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "open_redirect", "Scanning for open redirects...")
 
-	// Broad SQL prefilter (reduces rows) → refined by the unified param classifier,
-	// which is TOKEN-aware: it keeps goto/returnUrl/redirect_uri but drops the
-	// substring false positives the old LIKE '%to%'/'%out%' pulled in ("token",
-	// "photo", "layout", "about"). Value heuristic (a value that is a URL) is also
-	// honoured, so a redirect param with a non-obvious name still qualifies.
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT url, parameter, COALESCE(value,'') FROM parameters
-		WHERE target_id = ?
-		AND (parameter LIKE '%url%' OR parameter LIKE '%redirect%' OR parameter LIKE '%next%'
-			OR parameter LIKE '%return%' OR parameter LIKE '%goto%' OR parameter LIKE '%dest%'
-			OR parameter LIKE '%target%' OR parameter LIKE '%link%' OR parameter LIKE '%redir%'
-			OR parameter LIKE '%location%' OR parameter LIKE '%back%' OR parameter LIKE '%forward%'
-			OR parameter LIKE '%continue%' OR parameter LIKE '%to%' OR parameter LIKE '%out%'
-			OR parameter LIKE '%goto%' OR parameter LIKE '%go%')
-		LIMIT ?
-	`, targetID, s.cfg.URLLimit())
-	if err != nil {
-		return err
+	limit := 150
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
 	}
-
-	type urlParam struct {
-		URL   string
-		Param string
-	}
-	// Skip stock WordPress/Joomla/Drupal hosts — open-redirect fuzzing on a patched
-	// CMS core is noise (its redirect params are framework-guarded), so don't test
-	// them, consistent with every other active module's CMS gate.
-	cmsSkip := loadCMSSkipHosts(s.db, targetID)
-	var items []urlParam
-	for rows.Next() {
-		var up urlParam
-		var val string
-		if err := rows.Scan(&up.URL, &up.Param, &val); err == nil {
-			if hostSkippedByCMS(up.URL, cmsSkip) {
-				continue
-			}
-			if !paramProneTo(ClassRedirect, up.Param, val) {
-				continue
-			}
-			items = append(items, up)
-		}
-	}
-	rows.Close()
+	// Route by tokenized name OR URL-shaped value, keep unfamiliar fallbacks, and
+	// preserve the real method/body/auth/sibling request contract. The historical
+	// SQL LIKE prefilter silently dropped opaque URL-valued names and every POST or
+	// JSON redirect sink before the verifier saw them.
+	items := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassRedirect, limit, 32)
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	logFn("info", "open_redirect", fmt.Sprintf("Testing %d potential redirect parameters...", len(items)))
 
@@ -695,11 +662,11 @@ func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID stri
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(u, param string) {
+		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if res, ok := checkOpenRedirectURL(u, param); ok {
+			if res, ok := checkOpenRedirectPoint(ctx, ip, auth); ok {
 				id := uuid.New().String()
 				verified := 0
 				status := StatusCandidate
@@ -717,9 +684,9 @@ func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID stri
 						verified = excluded.verified,
 						status = excluded.status,
 						provenance = excluded.provenance
-				`, id, targetID, u, desc, param, verified, status, res.chain)
+				`, id, targetID, ip.URL, desc, ip.Param, verified, status, res.chain)
 			}
-		}(item.URL, item.Param)
+		}(item)
 	}
 	wg.Wait()
 	logFn("info", "open_redirect", fmt.Sprintf("Open redirect scan done. Found %d verified redirects.", found.Load()))

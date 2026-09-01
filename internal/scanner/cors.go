@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -67,6 +68,7 @@ func (s *CORSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		return nil
 	}
 	logFn("info", "cors", fmt.Sprintf("Testing %d endpoint(s) for CORS misconfig...", len(urls)))
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
@@ -81,11 +83,11 @@ func (s *CORSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if sev, ev, cred, ok := s.check(ctx, u); ok {
-				s.store(targetID, u, sev, ev, cred)
+			if sev, ev, cred, proven, ok := s.checkWithAuth(ctx, u, auth); ok {
+				s.store(targetID, u, sev, ev, cred, proven)
 				found.Add(1)
 				logFn("warn", "cors", fmt.Sprintf("CORS misconfig (%s): %s", sev, u))
-				if s.broadcast != nil {
+				if s.broadcast != nil && proven {
 					s.broadcast("new_vuln_finding", map[string]any{"target_id": targetID, "type": "cors_misconfig", "url": u, "parameter": "Origin"})
 				}
 			}
@@ -100,7 +102,7 @@ func (s *CORSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 func (s *CORSScanner) loadURLs(ctx context.Context, targetID string) []string {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url FROM http_services
-		WHERE target_id = ? AND COALESCE(source,'probe') = 'probe'
+		WHERE target_id = ? AND status_code BETWEEN 200 AND 405
 		ORDER BY url LIMIT ?`, targetID, corsMaxHosts)
 	if err != nil {
 		return nil
@@ -122,104 +124,164 @@ func (s *CORSScanner) loadURLs(ctx context.Context, targetID string) []string {
 // confirmed misconfiguration (checked most-severe first). Every positive is
 // re-probed once to drop transient/proxy flukes before it is reported.
 func (s *CORSScanner) check(ctx context.Context, target string) (severity, evidence string, credentialed, ok bool) {
+	severity, evidence, credentialed, _, ok = s.checkWithAuth(ctx, target, nil)
+	return
+}
+
+func (s *CORSScanner) checkWithAuth(ctx context.Context, target string, auth map[string]string) (severity, evidence string, credentialed, proven, ok bool) {
 	host := ""
 	if p, err := url.Parse(target); err == nil {
 		host = p.Hostname()
 	}
 	if host == "" {
-		return "", "", false, false
+		return "", "", false, false, false
 	}
 
 	const evil = "https://recon-cors-probe.example"
 	suffixEvil := "https://" + host + ".recon-cors-probe.example"
 
 	// 1) Reflected arbitrary origin (+ credentials → critical).
-	if acao, acac := s.probe(ctx, target, evil); acao == evil {
-		if strings.EqualFold(acac, "true") {
-			if s.reconfirm(ctx, target, evil, true) {
-				return "critical", fmt.Sprintf(
-						"Endpoint reflects an arbitrary Origin (%s) in Access-Control-Allow-Origin AND returns Access-Control-Allow-Credentials: true. Any attacker-controlled site can read this endpoint's authenticated responses (session-scoped data theft).", evil),
-					true, true
+	if first := s.probeWithAuth(ctx, target, evil, auth); first.acao == evil {
+		if strings.EqualFold(first.acac, "true") {
+			if s.reconfirmWithAuth(ctx, target, evil, true, auth) {
+				proof := s.sensitiveCredentialedProof(ctx, target, evil, auth, first)
+				sev := "high"
+				detail := "Credentialed arbitrary-Origin reflection is reproducible, but this endpoint's cookie-authenticated sensitive response was not independently proven; retained as a candidate."
+				if proof {
+					sev = "critical"
+					detail = "Cookie-authenticated response differs from the unauthenticated response and is readable from the reflected attacker Origin; cross-origin data theft is proven."
+				}
+				return sev, fmt.Sprintf(
+						"Endpoint reflects arbitrary Origin %s and returns Access-Control-Allow-Credentials: true. %s", evil, detail),
+					true, proof, true
 			}
-		} else if s.reconfirm(ctx, target, evil, false) {
+		} else if s.reconfirmWithAuth(ctx, target, evil, false, auth) {
 			// Reflected without credentials → medium candidate.
 			return "medium", fmt.Sprintf(
 					"Endpoint reflects an arbitrary Origin (%s) in Access-Control-Allow-Origin (no credentials). Cross-origin sites can read its responses; impact depends on whether it serves sensitive data without cookies.", evil),
-				false, true
+				false, false, true
 		}
 	}
 
 	// 2) null origin + credentials → high.
-	if acao, acac := s.probe(ctx, target, "null"); acao == "null" && strings.EqualFold(acac, "true") {
-		if s.reconfirmNull(ctx, target) {
-			return "high", "Endpoint allows Origin: null with Access-Control-Allow-Credentials: true. Exploitable from a sandboxed iframe (documents loaded via data:/srcdoc send Origin: null), letting an attacker page read authenticated responses.", true, true
+	if first := s.probeWithAuth(ctx, target, "null", auth); first.acao == "null" && strings.EqualFold(first.acac, "true") {
+		if s.reconfirmWithAuth(ctx, target, "null", true, auth) {
+			proof := s.sensitiveCredentialedProof(ctx, target, "null", auth, first)
+			sev := "medium"
+			if proof {
+				sev = "high"
+			}
+			return sev, "Endpoint reproducibly allows Origin: null with credentials. A cookie-authenticated data differential is required for a confirmed sandboxed-iframe data leak.", true, proof, true
 		}
 	}
 
 	// 3) Trusted-suffix reflection (server matches the allowed origin as a
 	// substring/prefix, so victimhost.attacker.com passes) → high if creds.
-	if acao, acac := s.probe(ctx, target, suffixEvil); acao == suffixEvil {
-		cred := strings.EqualFold(acac, "true")
+	if first := s.probeWithAuth(ctx, target, suffixEvil, auth); first.acao == suffixEvil {
+		cred := strings.EqualFold(first.acac, "true")
 		sev := "medium"
-		if cred {
+		proof := cred && s.sensitiveCredentialedProof(ctx, target, suffixEvil, auth, first)
+		if proof {
 			sev = "high"
 		}
-		if s.reconfirm(ctx, target, suffixEvil, cred) {
+		if s.reconfirmWithAuth(ctx, target, suffixEvil, cred, auth) {
 			return sev, fmt.Sprintf(
 					"Endpoint reflects an attacker-controlled Origin that merely CONTAINS the target host (%s), indicating a weak substring/suffix origin check. An attacker registers that domain to bypass the allow-list%s.",
 					suffixEvil, map[bool]string{true: " and read credentialed responses", false: ""}[cred]),
-				cred, true
+				cred, proof, true
 		}
 	}
 
-	return "", "", false, false
+	return "", "", false, false, false
+}
+
+type corsProbeResult struct {
+	status     int
+	acao, acac string
+	body       string
 }
 
 // probe sends one GET with the given Origin and returns the endpoint's
 // Access-Control-Allow-Origin and Access-Control-Allow-Credentials response
 // headers (empty when absent).
 func (s *CORSScanner) probe(ctx context.Context, target, origin string) (acao, acac string) {
+	r := s.probeWithAuth(ctx, target, origin, nil)
+	return r.acao, r.acac
+}
+
+func (s *CORSScanner) probeWithAuth(ctx context.Context, target, origin string, auth map[string]string) corsProbeResult {
 	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, "GET", target, nil)
 	if err != nil {
-		return "", ""
+		return corsProbeResult{}
 	}
 	req.Header.Set("Origin", origin)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Reconner-CORS)")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
 	resp, err := corsClient.Do(req)
 	if err != nil {
-		return "", ""
+		return corsProbeResult{}
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
-	return strings.TrimSpace(resp.Header.Get("Access-Control-Allow-Origin")),
-		strings.TrimSpace(resp.Header.Get("Access-Control-Allow-Credentials"))
+	return corsProbeResult{status: resp.StatusCode, body: string(body),
+		acao: strings.TrimSpace(resp.Header.Get("Access-Control-Allow-Origin")),
+		acac: strings.TrimSpace(resp.Header.Get("Access-Control-Allow-Credentials"))}
 }
 
 func (s *CORSScanner) reconfirm(ctx context.Context, target, origin string, wantCred bool) bool {
-	acao, acac := s.probe(ctx, target, origin)
-	if acao != origin {
+	return s.reconfirmWithAuth(ctx, target, origin, wantCred, nil)
+}
+
+func (s *CORSScanner) reconfirmWithAuth(ctx context.Context, target, origin string, wantCred bool, auth map[string]string) bool {
+	r := s.probeWithAuth(ctx, target, origin, auth)
+	if r.acao != origin {
 		return false
 	}
 	if wantCred {
-		return strings.EqualFold(acac, "true")
+		return strings.EqualFold(r.acac, "true")
 	}
 	return true
 }
 
 func (s *CORSScanner) reconfirmNull(ctx context.Context, target string) bool {
-	acao, acac := s.probe(ctx, target, "null")
-	return acao == "null" && strings.EqualFold(acac, "true")
+	return s.reconfirmWithAuth(ctx, target, "null", true, nil)
+}
+
+func hasCookieAuth(auth map[string]string) bool {
+	for k, v := range auth {
+		if strings.EqualFold(strings.TrimSpace(k), "cookie") && strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *CORSScanner) sensitiveCredentialedProof(ctx context.Context, target, origin string, auth map[string]string, authed corsProbeResult) bool {
+	if !hasCookieAuth(auth) || authed.status < 200 || authed.status >= 400 || len(strings.TrimSpace(authed.body)) < 8 {
+		return false
+	}
+	unauth := s.probeWithAuth(ctx, target, origin, nil)
+	if unauth.status == http.StatusUnauthorized || unauth.status == http.StatusForbidden {
+		return true
+	}
+	return unauth.status != authed.status || !bodiesSameObject(authed.body, unauth.body)
 }
 
 // store writes a CORS finding. Credentialed reflections are confirmed findings
 // (browser-exploitable); the no-credentials medium case is a candidate.
-func (s *CORSScanner) store(targetID, target, severity, evidence string, credentialed bool) {
-	verdict := VerifyVerified
-	conf := 90
-	if !credentialed {
-		verdict = CandDetected
-		conf = 65
+func (s *CORSScanner) store(targetID, target, severity, evidence string, credentialed, proven bool) {
+	verdict := CandDetected
+	conf := 75
+	if credentialed {
+		conf = ConfCandidateHi
+	}
+	if proven {
+		verdict = VerifyVerified
+		conf = ConfMultiTool
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: "cors_misconfig", Severity: severity, URL: target,

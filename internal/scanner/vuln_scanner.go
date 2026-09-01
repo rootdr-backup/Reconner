@@ -48,9 +48,9 @@ func (s *VulnScanner) Run(ctx context.Context, targetID, domain string, logFn Lo
 	// large write/read pass the product does not expose or report as a supported
 	// objective. Keep that engine available to explicit callers, but do not run it
 	// implicitly in the general vulnerability pipeline.
-	if err := s.RunCORSCheck(ctx, targetID, logFn); err != nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
+	// CORS is owned by CORSScanner. The legacy structural pass promoted reflected
+	// policy headers without proving any authenticated data was readable and also
+	// duplicated every request in full scans.
 	if err := s.Run403Bypass(ctx, targetID, logFn); err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -95,13 +95,6 @@ func (s *VulnScanner) RunPrototypePollution(ctx context.Context, targetID string
 	rows.Close()
 	urls = filterURLsByHostScope(ctx, urls)
 
-	const marker = "rcnpp1337"
-	payloads := []string{
-		"__proto__[" + marker + "]=" + marker,
-		"__proto__.%s=%s",
-		"constructor[prototype][" + marker + "]=" + marker,
-	}
-
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
 	var found atomic.Int64
@@ -115,6 +108,12 @@ func (s *VulnScanner) RunPrototypePollution(ctx context.Context, targetID string
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			marker := randomCanary()
+			payloads := []string{
+				"__proto__[" + marker + "]=" + marker,
+				"__proto__.%s=%s",
+				"constructor[prototype][" + marker + "]=" + marker,
+			}
 
 			for _, pl := range payloads {
 				sep := "?"
@@ -144,15 +143,10 @@ func (s *VulnScanner) RunPrototypePollution(ctx context.Context, targetID string
 				ct := strings.ToLower(resp.Header.Get("Content-Type"))
 				if strings.Contains(b, "\""+marker+"\":\""+marker+"\"") ||
 					(strings.Contains(ct, "json") && strings.Count(b, marker) >= 2) {
-					s.storeVuln(targetID, "prototype_pollution", "medium", u, "__proto__", testURL,
-						"prototype pollution marker reflected in response")
+					s.storeVulnConf(targetID, "prototype_pollution", "medium", u, "__proto__", testURL,
+						"Prototype-shaped input was reflected in JSON. Reflection alone does not prove Object.prototype mutation; retained for browser/manual verification.", ConfCandidateLo)
 					found.Add(1)
-					logFn("warn", "proto_pollution", "Prototype pollution: "+u)
-					if s.broadcast != nil {
-						s.broadcast("new_vuln_finding", map[string]any{
-							"target_id": targetID, "type": "prototype_pollution", "url": u,
-						})
-					}
+					logFn("info", "proto_pollution", "Prototype pollution candidate: "+u)
 					return
 				}
 			}
@@ -188,6 +182,11 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 	}
 	rows.Close()
 	urls = filterURLsByHostScope(ctx, urls)
+	auth := loadAuthHeaders(ctx, s.db, targetID)
+	if len(auth) == 0 {
+		logFn("info", "cache_deception", "Skipped: no authenticated identity is configured, so private-content exposure cannot be proven")
+		return nil
+	}
 
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
@@ -210,10 +209,17 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 			nonce := fmt.Sprint(time.Now().UnixNano() % 9999)
 			testURL := base + "/rcndeception" + nonce + ".css"
 
-			aStatus, aBody, aHdr := cacheDeceptionFetch(ctx, testURL)
+			baseStatus, baseBody, _ := cacheDeceptionFetchWithAuth(ctx, u, auth)
+			unauthStatus, unauthBody, _ := cacheDeceptionFetchWithAuth(ctx, u, nil)
+			if baseStatus != 200 || (unauthStatus == 200 && bodiesSameObject(baseBody, unauthBody)) {
+				return // endpoint is not demonstrably private to this identity
+			}
+
+			// Seed the confusing static cache key with the authenticated response.
+			aStatus, aBody, aHdr := cacheDeceptionFetchWithAuth(ctx, testURL, auth)
 			ct := strings.ToLower(aHdr.Get("Content-Type"))
 			looksHTML := strings.Contains(ct, "html") || strings.Contains(aBody, "<html")
-			if aStatus != 200 || !looksHTML {
+			if aStatus != 200 || !looksHTML || !bodiesSameObject(baseBody, aBody) {
 				return
 			}
 
@@ -224,7 +230,7 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 			// catch-all routing, so drop it. This is what floods a report with dozens
 			// of identical "cache deception" hits across every subdomain.
 			ctrlURL := cacheDeceptionOrigin(u) + "/rcn" + nonce + "notreal" + nonce + "/x" + nonce + ".css"
-			cStatus, cBody, _ := cacheDeceptionFetch(ctx, ctrlURL)
+			cStatus, cBody, _ := cacheDeceptionFetchWithAuth(ctx, ctrlURL, auth)
 			if cStatus == 200 && bodiesSameObject(aBody, cBody) {
 				return // same content for a bogus path → SPA/catch-all, not deception
 			}
@@ -233,8 +239,8 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 			// a hint; real exposure needs the shared cache to STORE and REPLAY the
 			// page. Re-fetch the exact same .css URL and require a cache HIT signal
 			// (X-Cache/CF-Cache-Status: HIT, or a positive Age served from cache).
-			_, _, bHdr := cacheDeceptionFetch(ctx, testURL)
-			if !cacheServedFromCache(bHdr) {
+			bStatus, bBody, bHdr := cacheDeceptionFetchWithAuth(ctx, testURL, nil)
+			if bStatus != 200 || !cacheServedFromCache(bHdr) || !bodiesSameObject(aBody, bBody) {
 				return
 			}
 
@@ -257,6 +263,10 @@ func (s *VulnScanner) RunCacheDeception(ctx context.Context, targetID string, lo
 
 // cacheDeceptionFetch GETs a URL and returns status, capped body, and headers.
 func cacheDeceptionFetch(ctx context.Context, rawURL string) (int, string, http.Header) {
+	return cacheDeceptionFetchWithAuth(ctx, rawURL, nil)
+}
+
+func cacheDeceptionFetchWithAuth(ctx context.Context, rawURL string, auth map[string]string) (int, string, http.Header) {
 	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", rawURL, nil)
@@ -264,6 +274,9 @@ func cacheDeceptionFetch(ctx context.Context, rawURL string) (int, string, http.
 		return 0, "", http.Header{}
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
 	resp, err := vulnHTTPClient.Do(req)
 	if err != nil {
 		return 0, "", http.Header{}
@@ -916,11 +929,11 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if bypass, evidence := check403Bypass(ctx, u); bypass != "" {
-				s.storeVuln(targetID, "403_bypass", "medium", u, "", bypass, evidence)
+			if bypass, evidence, confidence, location := check403Bypass(ctx, u); bypass != "" {
+				s.storeVulnSurface(targetID, "403_bypass", "medium", u, "GET", "", location, bypass, evidence, "stable-access-replay", confidence)
 				found.Add(1)
 				logFn("warn", "403_bypass", fmt.Sprintf("403 bypass found: %s via %s", u, bypass))
-				if s.broadcast != nil {
+				if s.broadcast != nil && confidence >= ConfEvidence {
 					s.broadcast("new_vuln_finding", map[string]any{
 						"target_id": targetID,
 						"type":      "403_bypass",
@@ -935,15 +948,19 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 	return nil
 }
 
-func check403Bypass(ctx context.Context, rawURL string) (method, evidence string) {
+func check403Bypass(ctx context.Context, rawURL string) (method, evidence string, confidence int, location string) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", ""
+		return "", "", 0, ""
 	}
 
-	// Baseline: the real 403 body length so we can tell a genuine bypass from a
-	// server that returns the same forbidden/login page for every request.
-	baselineLen := fetchBodyLen(ctx, rawURL, nil)
+	// Two stable 403 controls are required. A single stale database status or a
+	// transient edge/WAF response cannot establish the access-control baseline.
+	bStatus1, baseline1 := fetch403Response(ctx, rawURL, nil)
+	bStatus2, baseline2 := fetch403Response(ctx, rawURL, nil)
+	if bStatus1 != http.StatusForbidden || bStatus2 != http.StatusForbidden || !bodiesSameObject(baseline1, baseline2) {
+		return "", "", 0, ""
+	}
 
 	type attempt struct {
 		label   string
@@ -957,14 +974,17 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		{label: "X-Original-URL", headers: map[string]string{"X-Original-URL": parsed.Path}},
 		{label: "X-Rewrite-URL", headers: map[string]string{"X-Rewrite-URL": parsed.Path}},
 		{label: "X-Custom-IP-Authorization", headers: map[string]string{"X-Custom-IP-Authorization": "127.0.0.1"}},
-		{label: "path_suffix /", path: rawURL + "/"},
-		{label: "path_suffix /.;", path: strings.TrimRight(rawURL, "/") + "/.;/"},
-		{label: "path_suffix %2f", path: strings.TrimRight(rawURL, "/") + "%2f"},
+		{label: "X-Originating-IP: 127.0.0.1", headers: map[string]string{"X-Originating-IP": "127.0.0.1"}},
+		{label: "X-Client-IP: 127.0.0.1", headers: map[string]string{"X-Client-IP": "127.0.0.1"}},
+		{label: "Forwarded: for=127.0.0.1", headers: map[string]string{"Forwarded": "for=127.0.0.1;host=" + parsed.Host}},
+		{label: "path_suffix /", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/")},
+		{label: "path_suffix /.;", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/.;/")},
+		{label: "path_suffix %2f", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"%2f")},
 	}
 
 	for _, att := range attempts {
 		if ctx.Err() != nil {
-			return "", ""
+			return "", "", 0, ""
 		}
 
 		targetURL := rawURL
@@ -972,33 +992,14 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 			targetURL = att.path
 		}
 
-		reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		req, err := http.NewRequestWithContext(reqCtx, "GET", targetURL, nil)
-		if err != nil {
-			cancel()
-			continue
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		for k, v := range att.headers {
-			req.Header.Set(k, v)
-		}
-
-		resp, err := vulnHTTPClient.Do(req)
-		if err != nil {
-			cancel()
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
-		resp.Body.Close()
-		cancel()
-
-		// Only a real 200 counts. 301/302 usually redirect to /login — that is
-		// normal behaviour, not a bypass.
-		if resp.StatusCode != 200 {
+		status1, body1 := fetch403Response(ctx, targetURL, att.headers)
+		status2, body2 := fetch403Response(ctx, targetURL, att.headers)
+		// Only two stable 200 responses count. 301/302 usually redirect to login.
+		if status1 != http.StatusOK || status2 != http.StatusOK || !bodiesSameObject(body1, body2) {
 			continue
 		}
 
-		lower := strings.ToLower(string(body))
+		lower := strings.ToLower(body1)
 		if strings.Contains(lower, "sign in") || strings.Contains(lower, "log in") ||
 			strings.Contains(lower, "login") || strings.Contains(lower, "unauthorized") ||
 			strings.Contains(lower, "access denied") || strings.Contains(lower, "forbidden") {
@@ -1006,13 +1007,53 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		}
 
 		// Body must differ meaningfully from the 403 baseline.
-		if baselineLen > 0 && abs(len(body)-baselineLen) < 64 {
+		if bodiesSameObject(baseline1, body1) || len(strings.TrimSpace(body1)) < 32 {
 			continue
 		}
-
-		return att.label, fmt.Sprintf("original=403 (len=%d), bypass=200 (len=%d) via %s", baselineLen, len(body), att.label)
+		conf := ConfMultiTool
+		loc := "header"
+		if att.path != "" {
+			// A normalized path can map to a separate public route. Preserve it as a
+			// strong candidate unless a later identity-aware verifier proves it is
+			// the same protected object.
+			conf = ConfCandidateHi
+			loc = "path"
+		}
+		return att.label, fmt.Sprintf("stable controls: 403/403; stable bypass replay: 200/200 via %s; protected and bypass bodies are materially different", att.label), conf, loc
 	}
-	return "", ""
+	return "", "", 0, ""
+}
+
+func mutate403Path(base *url.URL, escapedPath string) string {
+	u := *base
+	u.RawPath = escapedPath
+	if decoded, err := url.PathUnescape(escapedPath); err == nil {
+		u.Path = decoded
+	} else {
+		u.Path = escapedPath
+		u.RawPath = ""
+	}
+	return u.String()
+}
+
+func fetch403Response(ctx context.Context, rawURL string, headers map[string]string) (int, string) {
+	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", rawURL, nil)
+	if err != nil {
+		return 0, ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := vulnHTTPClient.Do(req)
+	if err != nil {
+		return 0, ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	resp.Body.Close()
+	return resp.StatusCode, string(body)
 }
 
 func fetchBodyLen(ctx context.Context, rawURL string, headers map[string]string) int {
@@ -1066,6 +1107,7 @@ func (s *VulnScanner) RunHostHeaderInjection(ctx context.Context, targetID strin
 	urls = filterURLsByHostScope(ctx, urls)
 
 	logFn("info", "host_header", fmt.Sprintf("Testing %d endpoints for host header injection...", len(urls)))
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -1081,11 +1123,11 @@ func (s *VulnScanner) RunHostHeaderInjection(ctx context.Context, targetID strin
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if evidence, sev := checkHostHeader(ctx, u); evidence != "" {
-				s.storeVuln(targetID, "host_header_injection", sev, u, "", "", evidence)
+			if evidence, sev, confidence := checkHostHeaderWithAuth(ctx, u, auth); evidence != "" {
+				s.storeVulnSurface(targetID, "host_header_injection", sev, u, "GET", "Host", "header", "two random host values", evidence, "dual-host-sink-replay", confidence)
 				found.Add(1)
 				logFn("warn", "host_header", fmt.Sprintf("Host header injection: %s", u))
-				if s.broadcast != nil {
+				if s.broadcast != nil && confidence >= ConfEvidence {
 					s.broadcast("new_vuln_finding", map[string]any{
 						"target_id": targetID,
 						"type":      "host_header_injection",
@@ -1106,17 +1148,23 @@ func (s *VulnScanner) RunHostHeaderInjection(ctx context.Context, targetID strin
 // poisoning). A Location/link carrying the injected host is exploitable; a bare
 // body echo is low signal.
 func checkHostHeader(ctx context.Context, rawURL string) (string, string) {
-	const fakeHost = "evil-recon-probe.com"
+	evidence, severity, _ := checkHostHeaderWithAuth(ctx, rawURL, nil)
+	return evidence, severity
+}
+
+func checkHostHeaderWithAuth(ctx context.Context, rawURL string, auth map[string]string) (string, string, int) {
+	probe1 := "rcnhh" + randomCanary()[len(reflectMarker):] + ".example"
+	probe2 := "rcnhh" + randomCanary()[len(reflectMarker):] + ".example"
 
 	// Each vector applied on its own request.
 	vectors := []struct {
 		name  string
-		apply func(*http.Request)
+		apply func(*http.Request, string)
 	}{
-		{"Host", func(r *http.Request) { r.Host = fakeHost }},
-		{"X-Forwarded-Host", func(r *http.Request) { r.Header.Set("X-Forwarded-Host", fakeHost) }},
-		{"X-Host", func(r *http.Request) { r.Header.Set("X-Host", fakeHost) }},
-		{"X-Forwarded-Server", func(r *http.Request) { r.Header.Set("X-Forwarded-Server", fakeHost) }},
+		{"Host", func(r *http.Request, h string) { r.Host = h }},
+		{"X-Forwarded-Host", func(r *http.Request, h string) { r.Header.Set("X-Forwarded-Host", h) }},
+		{"X-Host", func(r *http.Request, h string) { r.Header.Set("X-Host", h) }},
+		{"X-Forwarded-Server", func(r *http.Request, h string) { r.Header.Set("X-Forwarded-Server", h) }},
 	}
 
 	// Password-reset / auth context → a poisoned host is account takeover.
@@ -1131,49 +1179,60 @@ func checkHostHeader(ctx context.Context, rawURL string) (string, string) {
 
 	for _, vec := range vectors {
 		if ctx.Err() != nil {
-			return "", ""
+			return "", "", 0
 		}
-		reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		req, err := http.NewRequestWithContext(reqCtx, "GET", rawURL, nil)
-		if err != nil {
-			cancel()
+		kind1, detail1 := hostHeaderProbe(ctx, rawURL, auth, probe1, vec.apply)
+		if kind1 == "" {
 			continue
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		vec.apply(req)
-
-		resp, err := vulnHTTPClient.Do(req)
-		if err != nil {
-			cancel()
+		kind2, detail2 := hostHeaderProbe(ctx, rawURL, auth, probe2, vec.apply)
+		if kind2 != kind1 {
 			continue
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
-		resp.Body.Close()
-		cancel()
-
-		// Location redirect to the injected host — clearly exploitable.
-		if loc := resp.Header.Get("Location"); loc != "" && strings.Contains(loc, fakeHost) {
-			sev := "high"
-			if resetContext {
-				sev = "critical"
-			}
-			return fmt.Sprintf("%s header reflected into redirect Location: %s%s", vec.name, loc, resetNote(resetContext)), sev
+		sev := "medium"
+		conf := ConfCandidateHi
+		if kind1 == "location" {
+			sev = "high"
+			conf = ConfMultiTool
+		} else if resetContext {
+			sev = "high"
 		}
+		return fmt.Sprintf("%s controls an executable %s sink with two independent hosts (%s; %s)%s", vec.name, kind1, detail1, detail2, resetNote(resetContext)), sev, conf
+	}
+	return "", "", 0
+}
 
-		bodyStr := string(body)
-		for _, ctxPat := range []string{
-			`href="https://` + fakeHost, `href='https://` + fakeHost,
-			`src="https://` + fakeHost, `src='https://` + fakeHost,
-			`action="https://` + fakeHost, `href="//` + fakeHost, `src="//` + fakeHost,
-			`https://` + fakeHost + `/reset`, `https://` + fakeHost + `/`,
-		} {
-			if strings.Contains(bodyStr, ctxPat) {
-				sev := "medium"
-				if resetContext {
-					sev = "high"
-				}
-				return fmt.Sprintf("%s header reflected in a link/resource attribute (status %d)%s", vec.name, resp.StatusCode, resetNote(resetContext)), sev
-			}
+func hostHeaderProbe(ctx context.Context, rawURL string, auth map[string]string, probe string, apply func(*http.Request, string)) (kind, detail string) {
+	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", rawURL, nil)
+	if err != nil {
+		return "", ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
+	apply(req, probe)
+	resp, err := vulnHTTPClient.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+	resp.Body.Close()
+	if loc := strings.TrimSpace(resp.Header.Get("Location")); loc != "" {
+		if base, err := url.Parse(rawURL); err == nil && hostFromLocation(loc, base) == probe {
+			return "location", "Location=" + loc
+		}
+	}
+	bodyStr := string(body)
+	for _, ctxPat := range []string{
+		`href="https://` + probe, `href='https://` + probe,
+		`src="https://` + probe, `src='https://` + probe,
+		`action="https://` + probe, `href="//` + probe, `src="//` + probe,
+	} {
+		if strings.Contains(bodyStr, ctxPat) {
+			return "html-url", ctxPat
 		}
 	}
 	return "", ""
@@ -1191,26 +1250,12 @@ func resetNote(reset bool) string {
 func (s *VulnScanner) RunCRLF(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "crlf_scan", "Checking CRLF injection...")
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT url, parameter FROM parameters
-		WHERE target_id = ?
-		LIMIT ?
-	`, targetID, s.cfg.URLLimit())
-	if err != nil {
-		return err
+	limit := 150
+	if s.cfg != nil && s.cfg.URLLimit() > 0 && s.cfg.URLLimit() < limit {
+		limit = s.cfg.URLLimit()
 	}
-	type up struct{ URL, Param string }
-	var items []up
-	for rows.Next() {
-		var u up
-		if err := rows.Scan(&u.URL, &u.Param); err == nil {
-			if !urlHostInScope(ctx, u.URL) {
-				continue
-			}
-			items = append(items, u)
-		}
-	}
-	rows.Close()
+	items := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassCRLF, limit, 48)
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	logFn("info", "crlf_scan", fmt.Sprintf("Testing %d parameters for CRLF...", len(items)))
 
@@ -1218,74 +1263,77 @@ func (s *VulnScanner) RunCRLF(ctx context.Context, targetID string, logFn LogFun
 	var wg sync.WaitGroup
 	var found atomic.Int64
 
-	crlfPayloads := []string{
-		"%0d%0aX-Injected: crlf",
-		"%0aX-Injected: crlf",
-		"\r\nX-Injected: crlf",
-		"%E5%98%8A%E5%98%8DX-Injected: crlf", // unicode CRLF
-	}
-
 	for _, item := range items {
 		if ctx.Err() != nil {
 			break
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(rawURL, param string) {
+		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			parsed, err := url.Parse(rawURL)
-			if err != nil {
-				return
-			}
-
-			for _, payload := range crlfPayloads {
+			name1, value1 := newCRLFMarker()
+			for idx, payload := range crlfPayloads(name1, value1) {
 				if ctx.Err() != nil {
 					return
 				}
-
-				q := parsed.Query()
-				q.Set(param, payload)
-				testURL := *parsed
-				testURL.RawQuery = q.Encode()
-
-				reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-				req, err := http.NewRequestWithContext(reqCtx, "GET", testURL.String(), nil)
-				if err != nil {
-					cancel()
+				if !s.crlfHeaderObserved(ctx, ip, payload, auth, name1, value1) {
 					continue
 				}
-				req.Header.Set("User-Agent", "Mozilla/5.0")
-
-				resp, err := vulnHTTPClient.Do(req)
-				cancel()
-				if err != nil {
+				// Reconfirm with a completely different header name/value. A fixed
+				// response header or cache artifact cannot satisfy both probes.
+				name2, value2 := newCRLFMarker()
+				payload2 := crlfPayloads(name2, value2)[idx]
+				if !s.crlfHeaderObserved(ctx, ip, payload2, auth, name2, value2) {
 					continue
 				}
-				resp.Body.Close()
-
-				if resp.Header.Get("X-Injected") == "crlf" {
-					evidence := fmt.Sprintf("X-Injected header found in response (payload=%s)", payload)
-					s.storeVuln(targetID, "crlf", "medium", rawURL, param, payload, evidence)
-					found.Add(1)
-					logFn("warn", "crlf_scan", fmt.Sprintf("CRLF injection: %s param=%s", rawURL, param))
-					if s.broadcast != nil {
-						s.broadcast("new_vuln_finding", map[string]any{
-							"target_id": targetID,
-							"type":      "crlf",
-							"url":       rawURL,
-							"parameter": param,
-						})
-					}
-					return
+				evidence := fmt.Sprintf("Response-splitting reproduced with two independent injected headers (%s and %s); method=%s location=%s", name1, name2, ip.Method, insertionLocation(ip))
+				s.storeVulnPoint(targetID, "crlf", "high", ip, payload, evidence, "dual-random-header-replay", ConfPoC)
+				found.Add(1)
+				logFn("warn", "crlf_scan", fmt.Sprintf("CRLF injection: %s param=%s [%s %s]", ip.URL, ip.Param, ip.Method, insertionLocation(ip)))
+				if s.broadcast != nil {
+					s.broadcast("new_vuln_finding", map[string]any{
+						"target_id": targetID, "type": "crlf", "url": ip.URL, "parameter": ip.Param,
+					})
 				}
+				return
 			}
-		}(item.URL, item.Param)
+		}(item)
 	}
 	wg.Wait()
 	logFn("info", "crlf_scan", fmt.Sprintf("CRLF scan done. Found %d vulnerabilities.", found.Load()))
 	return nil
+}
+
+func newCRLFMarker() (name, value string) {
+	token := randomCanary()
+	return "X-Recon-" + token[len(token)-12:], token
+}
+
+func crlfPayloads(name, value string) []string {
+	header := name + ": " + value
+	return []string{
+		"%0d%0a" + header,
+		"%0a" + header,
+		"\r\n" + header,
+		"%E5%98%8A%E5%98%8D" + header, // Unicode CR/LF normalization
+	}
+}
+
+func (s *VulnScanner) crlfHeaderObserved(ctx context.Context, ip insertionPoint, payload string, auth map[string]string, name, value string) bool {
+	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := buildInjectedRequest(reqCtx, ip, payload, auth)
+	if err != nil {
+		return false
+	}
+	resp, err := vulnHTTPClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return strings.TrimSpace(resp.Header.Get(name)) == value
 }
 
 // ── Storage ──────────────────────────────────────────────────────────────────
@@ -1296,6 +1344,23 @@ func (s *VulnScanner) storeVuln(targetID, vulnType, severity, rawURL, param, pay
 		Method: "GET", Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
 		Source: "vuln-scanner", DetectionMethod: "active-differential",
 		Confidence: ConfEvidence, Verdict: VerifyVerified,
+	})
+}
+
+func (s *VulnScanner) storeVulnPoint(targetID, vulnType, severity string, ip insertionPoint, payload, evidence, method string, confidence int) {
+	s.storeVulnSurface(targetID, vulnType, severity, ip.URL, ip.Method, ip.Param, insertionLocation(ip), payload, evidence, method, confidence)
+}
+
+func (s *VulnScanner) storeVulnSurface(targetID, vulnType, severity, rawURL, requestMethod, param, location, payload, evidence, detectionMethod string, confidence int) {
+	verdict := CandDetected
+	if confidence >= ConfEvidence {
+		verdict = VerifyVerified
+	}
+	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL,
+		Method: requestMethod, Parameter: param, Location: location, Payload: payload, Evidence: evidence,
+		Source: "vuln-scanner", DetectionMethod: detectionMethod,
+		Confidence: confidence, Verdict: verdict,
 	})
 }
 

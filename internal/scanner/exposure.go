@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -66,9 +67,6 @@ func (s *ExposureScanner) Run(ctx context.Context, targetID string, logFn LogFun
 		return ctx.Err()
 	}
 	if err := s.runConfigLeaks(ctx, targetID, logFn); err != nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err := s.runJWTChecks(ctx, targetID, logFn); err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
 	return nil
@@ -222,12 +220,13 @@ func (s *ExposureScanner) runGitExposure(ctx context.Context, targetID string, l
 	logFn("info", "exposure", "Checking for exposed .git / .svn / .hg directories...")
 
 	bases := s.loadServiceBases(ctx, targetID, 300)
-	checks := []struct{ path, marker, vcs string }{
-		{"/.git/HEAD", "ref:", "git"},
-		{"/.git/config", "[core]", "git"},
-		{"/.svn/entries", "", "svn"},
-		{"/.hg/requires", "", "hg"},
-		{"/.bzr/branch-format", "Bazaar", "bzr"},
+	checks := []struct{ path, vcs string }{
+		{"/.git/HEAD", "git"},
+		{"/.git/config", "git"},
+		{"/.svn/wc.db", "svn"},
+		{"/.svn/entries", "svn"},
+		{"/.hg/requires", "hg"},
+		{"/.bzr/branch-format", "bzr"},
 	}
 
 	sem := make(chan struct{}, 15)
@@ -236,17 +235,21 @@ func (s *ExposureScanner) runGitExposure(ctx context.Context, targetID string, l
 	seen := &sync.Map{} // avoid duplicate report per base
 
 	for _, base := range bases {
-		for _, c := range checks {
-			if ctx.Err() != nil {
-				break
-			}
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(b, path, marker, vcs string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				u := strings.TrimRight(b, "/") + path
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			b = strings.TrimRight(b, "/")
+			baseline := soft404Baseline(ctx, b)
+			for _, c := range checks {
+				if ctx.Err() != nil {
+					return
+				}
+				u := b + c.path
 				reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				req, err := http.NewRequestWithContext(reqCtx, "GET", u, nil)
 				if err != nil {
@@ -260,41 +263,71 @@ func (s *ExposureScanner) runGitExposure(ctx context.Context, targetID string, l
 					return
 				}
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+				contentType := resp.Header.Get("Content-Type")
 				resp.Body.Close()
 				cancel()
 
-				if resp.StatusCode != 200 {
-					return
+				if resp.StatusCode != 200 || baseline.matches(resp.StatusCode, body, contentType) {
+					continue
 				}
-				bs := string(body)
-				// Must look like real VCS metadata (not an HTML catch-all page).
-				valid := (vcs == "git" && (strings.HasPrefix(bs, "ref:") || strings.Contains(bs, "[core]"))) ||
-					(vcs == "svn" && (strings.Contains(bs, "dir") || len(bs) < 400)) ||
-					(vcs == "hg" && len(bs) < 200) ||
-					(vcs == "bzr" && strings.Contains(bs, "Bazaar"))
-				if marker != "" && !strings.Contains(bs, marker) {
-					valid = false
+				if !validVCSMetadata(c.vcs, c.path, body) {
+					continue
 				}
-				if strings.Contains(strings.ToLower(bs), "<html") {
-					valid = false
+				if _, dup := seen.LoadOrStore(b+c.vcs, true); dup {
+					continue
 				}
-				if !valid {
-					return
-				}
-				if _, dup := seen.LoadOrStore(b+vcs, true); dup {
-					return
-				}
-				s.store(targetID, "exposed_"+vcs, "high", strings.TrimRight(b, "/")+"/."+vcs+"/", "",
-					fmt.Sprintf("Exposed %s directory — full source recoverable (e.g. git-dumper)", vcs))
+				s.store(targetID, "exposed_"+c.vcs, "high", b+"/."+c.vcs+"/", "",
+					fmt.Sprintf("Exposed %s directory — verified from native repository metadata at %s", c.vcs, c.path))
 				found.Add(1)
-				logFn("warn", "exposure", fmt.Sprintf("Exposed .%s directory: %s", vcs, u))
-				s.notify(targetID, "exposed_"+vcs, u)
-			}(base, c.path, c.marker, c.vcs)
-		}
+				logFn("warn", "exposure", fmt.Sprintf("Exposed .%s directory: %s", c.vcs, u))
+				s.notify(targetID, "exposed_"+c.vcs, u)
+			}
+		}(base)
 	}
 	wg.Wait()
 	logFn("info", "exposure", fmt.Sprintf("VCS exposure check done. Found %d.", found.Load()))
 	return nil
+}
+
+var (
+	gitHeadMetadataRe = regexp.MustCompile(`(?m)^(?:ref:\s+refs/(?:heads|tags)/[^\s]+|[0-9a-fA-F]{40,64})\s*$`)
+	svnEntriesRe      = regexp.MustCompile(`(?m)^(?:8|9|10|11|12|13|14)\r?\n(?:dir\r?\n)?`)
+)
+
+// validVCSMetadata recognizes native repository formats. Length-based checks are
+// intentionally forbidden: a tiny catch-all "ok" response is not VCS evidence.
+func validVCSMetadata(vcs, path string, body []byte) bool {
+	if len(body) == 0 || looksLikeHTML(body) {
+		return false
+	}
+	text := strings.TrimSpace(strings.TrimPrefix(string(body), "\ufeff"))
+	switch vcs {
+	case "git":
+		if strings.HasSuffix(path, "/HEAD") {
+			return gitHeadMetadataRe.MatchString(text)
+		}
+		low := strings.ToLower(text)
+		return strings.Contains(low, "[core]") &&
+			(strings.Contains(low, "repositoryformatversion") || strings.Contains(low, "filemode") ||
+				strings.Contains(low, "bare =") || strings.Contains(low, "logallrefupdates"))
+	case "svn":
+		if strings.HasSuffix(path, "/wc.db") {
+			return bytes.HasPrefix(body, []byte("SQLite format 3\x00"))
+		}
+		return svnEntriesRe.Match(body)
+	case "hg":
+		for _, line := range strings.Fields(text) {
+			switch line {
+			case "revlogv1", "store", "fncache", "dotencode", "generaldelta", "sparserevlog", "persistent-nodemap", "share-safe":
+				return true
+			}
+		}
+		return false
+	case "bzr":
+		return strings.HasPrefix(text, "Bazaar-NG branch format") ||
+			strings.HasPrefix(text, "Bazaar branch format")
+	}
+	return false
 }
 
 // ── JWT weakness checks (alg:none, weak HMAC secret) ─────────────────────────
@@ -319,9 +352,7 @@ var sensitiveClaimKeys = map[string]bool{
 	"password": true, "passwd": true, "pwd": true, "secret": true, "api_key": true,
 	"apikey": true, "access_token": true, "refresh_token": true, "private_key": true,
 	"ssn": true, "credit_card": true, "card": true, "cvv": true, "pin": true,
-	"is_admin": true, "isadmin": true, "role": true, "roles": true, "admin": true,
-	"permissions": true, "scope": true, "email": true, "phone": true, "address": true,
-	"salary": true, "dob": true, "national_id": true, "passport": true,
+	"national_id": true, "passport": true,
 }
 
 // sensitiveClaims returns the names of sensitive claims present in the payload.

@@ -293,7 +293,7 @@ func (v *SQLmapVerifier) requestSiblingTypes(ctx context.Context, c Vulnerabilit
 	for rows.Next() {
 		var name, location string
 		if rows.Scan(&name, &location) == nil {
-			if typ := jsonTypeFromLocation(location); typ != "" {
+			if typ := insertionJSONType(location); typ != "" {
 				out[name] = typ
 			}
 		}

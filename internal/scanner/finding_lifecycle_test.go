@@ -81,6 +81,35 @@ func TestDetectorSignalStaysQueuedForVerifier(t *testing.T) {
 	}
 }
 
+func TestGenericScorerCannotConfirmStaticDOMXSS(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	c := VulnerabilityCandidate{
+		TargetID: tid, Type: "dom_xss", Subtype: "static-flow", URL: "https://m.local/app.js",
+		Method: "STATIC", Parameter: "innerHTML ← location.hash", Location: "javascript",
+		DetectionSource: "js-analysis", DetectionMethod: "source-to-sink", Severity: "medium",
+		Confidence: 80, Evidence: "static source-to-sink only",
+	}
+	id, err := RecordCandidateDetection(context.Background(), db, c, FindingMeta{Actor: "js-analysis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &VerifyScanner{db: db}
+	if err := s.Run(context.Background(), tid, func(_, _, _ string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if state := candidateState(context.Background(), db, id); state != CandDetected {
+		t.Fatalf("static DOM candidate was promoted without browser execution: %s", state)
+	}
+	var status, lifecycle string
+	if err := db.QueryRow(`SELECT status,lifecycle FROM vuln_findings WHERE candidate_id=?`, id).Scan(&status, &lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusCandidate || lifecycle != CandDetected {
+		t.Fatalf("generic scorer produced a green DOM finding: status=%s lifecycle=%s", status, lifecycle)
+	}
+}
+
 func TestExistingCandidateResultUsesCandidateID(t *testing.T) {
 	db, tid := testDB(t)
 	defer db.Close()

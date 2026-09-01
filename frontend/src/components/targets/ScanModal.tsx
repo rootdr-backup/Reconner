@@ -104,6 +104,9 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   // Slow permutation/brute-force phase of subdomain enum — on by default, but
   // toggleable per scan because it is the longest part of enumeration.
   const [subBrute, setSubBrute] = useState(true)
+  // ASN ownership and bug-bounty scope are not equivalent. Keep the potentially
+  // broad CIDR sweep off until the operator has verified those ranges manually.
+  const [asnDiscovery, setASNDiscovery] = useState(false)
   // Single-endpoint mode: when the scope is a full URL (has a path and/or query),
   // offer to confine the WHOLE scan to that exact endpoint and the paths under it —
   // param discovery, crawl, JS, and every vuln module (XSS/SQLi/…) run against the
@@ -128,6 +131,8 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   useEffect(() => {
     if (!open) return
     setIdorA(''); setIdorB('')
+    setSubBrute(true)
+    setASNDiscovery(false)
     targetsApi.identities(target.id).then(r => setIdCount(r.length)).catch(() => setIdCount(0))
   }, [open, target.id])
   const idorSelected = selected.has('idor')
@@ -197,6 +202,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
       if (webSpeed === 'slow') orderedModules.push('speed_slow')
       if (webSpeed === 'fast') orderedModules.push('speed_fast')
       if (!subBrute) orderedModules.push('no_subdomain_brute')
+      if (asnDiscovery) orderedModules.push('asn_discovery')
       if (scopeIsURL && singleEndpoint) orderedModules.push('single_endpoint')
       await startModules(orderedModules)
       addToast('success', `Scan started for ${label}`)
@@ -283,17 +289,28 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
         {/* Subdomain permutation brute-force toggle — the slowest part of enum.
             Only relevant when subdomain enumeration is selected. */}
         {selected.has('subdomain_enum') && (
-          <label className="flex items-start gap-3 rounded-lg border border-white/[.08] bg-white/[.02] p-3 cursor-pointer">
-            <input type="checkbox" checked={subBrute} onChange={e => setSubBrute(e.target.checked)}
-              className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
-            <span>
-              <span className="text-xs font-medium text-text-primary">Subdomain permutation brute-force</span>
-              <span className="block text-[10px] text-text-muted mt-0.5">
-                Wordlist brute-force + name permutations + deep alterx/puredns pass. The longest part of
-                enumeration — turn OFF for a fast passive-only map (passive sources, resolution, ASN &amp; vhost still run).
+          <div className="space-y-2">
+            <label className="flex items-start gap-3 rounded-lg border border-white/[.08] bg-white/[.02] p-3 cursor-pointer">
+              <input type="checkbox" checked={subBrute} onChange={e => setSubBrute(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
+              <span>
+                <span className="text-xs font-medium text-text-primary">Deep DNS discovery</span>
+                <span className="block text-[10px] text-text-muted mt-0.5">
+                  Adaptive dev/tool wordlist + target-derived permutations + dnsx/puredns verification. Turn OFF for a fast passive map.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+            <label className="flex items-start gap-3 rounded-lg border border-severity-high/30 bg-severity-high/[.05] p-3 cursor-pointer">
+              <input type="checkbox" checked={asnDiscovery} onChange={e => setASNDiscovery(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
+              <span>
+                <span className="text-xs font-medium text-text-primary">ASN / CIDR discovery <span className="text-severity-high font-normal">(scope-verified only)</span></span>
+                <span className="block text-[10px] text-text-muted mt-0.5">
+                  Reverse-resolves organisation netblocks. Enable only after WHOIS/program-scope verification; ASN ownership alone does not make every IP in scope.
+                </span>
+              </span>
+            </label>
+          </div>
         )}
 
         {/* Pre-scan authentication — only for single-domain scans (subdomain

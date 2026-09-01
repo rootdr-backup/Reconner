@@ -87,6 +87,36 @@ func insertionIdentity(ip insertionPoint) string {
 		insertionLocation(ip) + "|" + strings.ToLower(strings.TrimSpace(ip.ContentType))
 }
 
+// insertionSiblingGroupKey identifies fields that belong to the same logical
+// request. Active detectors must replay those fields together: dropping a CSRF
+// token, tenant, action or required JSON property makes validation reject the
+// mutation before it reaches the sink and is a deterministic false negative.
+func insertionSiblingGroupKey(ip insertionPoint) string {
+	loc := insertionLocation(ip)
+	if strings.HasPrefix(loc, "graphql:") {
+		parts := strings.Split(loc, ":")
+		if len(parts) >= 3 {
+			loc = strings.Join(parts[:3], ":") // same endpoint + operation
+		}
+	}
+	return strings.ToUpper(strings.TrimSpace(ip.Method)) + "\x00" + ip.URL + "\x00" +
+		strings.ToLower(strings.TrimSpace(ip.ContentType)) + "\x00" + loc
+}
+
+func insertionJSONType(location string) string {
+	loc := strings.ToLower(strings.TrimSpace(location))
+	if strings.HasPrefix(loc, "json:") {
+		return strings.TrimPrefix(loc, "json:")
+	}
+	return ""
+}
+
+func insertionHasBodySiblings(ip insertionPoint) bool {
+	loc := insertionLocation(ip)
+	return loc == "body" || loc == "json" || loc == "multipart" || loc == "xml" ||
+		strings.HasPrefix(loc, "graphql:")
+}
+
 // isPathLocation reports whether the insertion point injects into a path segment,
 // and returns the 0-based segment index.
 func isPathLocation(loc string) (int, bool) {
@@ -239,6 +269,9 @@ func semanticRouteIdentity(ip insertionPoint) (string, bool) {
 // the `limit` budget is spent on real, distinct attack surface rather than value
 // variants or analytics params.
 func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, limit int) []insertionPoint {
+	if limit <= 0 {
+		limit = 1000000
+	}
 	pool := limit * 20
 	if pool < 5000 {
 		pool = 5000
@@ -259,18 +292,41 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 	// fuzzing a patched CMS core is wasted effort and a false-positive magnet;
 	// nuclei's CMS templates still cover the real known-CVE surface.
 	cmsSkip := loadCMSSkipHosts(db, targetID)
-	seen := make(map[string]bool)
-	semanticCounts := make(map[string]int)
-	var out []insertionPoint
+	var all []insertionPoint
+	siblingGroups := make(map[string]map[string]string)
+	siblingTypeGroups := make(map[string]map[string]string)
 	for rows.Next() {
 		var ip insertionPoint
 		var reflected int
 		if err := rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected); err != nil {
 			continue
 		}
-		if !urlHostInScope(ctx, ip.URL) {
+		ip.Method = strings.ToUpper(strings.TrimSpace(ip.Method))
+		if ip.Method == "" {
+			ip.Method = "GET"
+		}
+		if ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
 			continue
 		}
+		all = append(all, ip)
+		if insertionHasBodySiblings(ip) {
+			key := insertionSiblingGroupKey(ip)
+			if siblingGroups[key] == nil {
+				siblingGroups[key] = map[string]string{}
+			}
+			siblingGroups[key][ip.Param] = ip.Value
+			if typ := insertionJSONType(ip.Location); typ != "" {
+				if siblingTypeGroups[key] == nil {
+					siblingTypeGroups[key] = map[string]string{}
+				}
+				siblingTypeGroups[key][ip.Param] = typ
+			}
+		}
+	}
+	seen := make(map[string]bool)
+	semanticCounts := make(map[string]int)
+	var out []insertionPoint
+	for _, ip := range all {
 		if ip.Param == "" || isTrackingParam(ip.Param) {
 			continue
 		}
@@ -293,7 +349,151 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 			break
 		}
 	}
+	for i := range out {
+		key := insertionSiblingGroupKey(out[i])
+		if group := siblingGroups[key]; len(group) > 0 {
+			out[i].Siblings = make(map[string]string, len(group))
+			for name, value := range group {
+				out[i].Siblings[name] = value
+			}
+		}
+		if types := siblingTypeGroups[key]; len(types) > 0 {
+			out[i].SiblingTypes = make(map[string]string, len(types))
+			for name, typ := range types {
+				out[i].SiblingTypes[name] = typ
+			}
+		}
+	}
 	return out
+}
+
+// loadRoutedInsertionPoints is the proof-oriented surface loader used by
+// detectors whose positive result is independently replayed (LFI/SSRF/SSTI and
+// similar classes). Unlike the older generic loader it does not discard CMS or
+// analytics-looking parameters: a deterministic file signature, evaluated
+// template marker, or OAST callback remains valid on those surfaces. Likely
+// class matches are ordered first; fallback controls how many unfamiliar names
+// are retained so new framework conventions do not become silent blind spots.
+func loadRoutedInsertionPoints(ctx context.Context, db *database.DB, targetID string, class VulnClass, limit, fallback int) []insertionPoint {
+	if limit <= 0 {
+		limit = 1000000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT url,parameter,COALESCE(value,''),COALESCE(method,'GET'),
+		       COALESCE(content_type,''),COALESCE(location,'query'),COALESCE(is_reflected,0)
+		FROM parameters WHERE target_id=?
+		ORDER BY COALESCE(is_reflected,0) DESC, LENGTH(url), url, parameter`, targetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	type routedPoint struct {
+		ip        insertionPoint
+		reflected bool
+	}
+	var prone, other []routedPoint
+	seen := map[string]bool{}
+	siblingGroups := map[string]map[string]string{}
+	siblingTypeGroups := map[string]map[string]string{}
+	for rows.Next() {
+		var ip insertionPoint
+		var reflected int
+		if rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected) != nil {
+			continue
+		}
+		ip.Method = strings.ToUpper(strings.TrimSpace(ip.Method))
+		if ip.Method == "" {
+			ip.Method = "GET"
+		}
+		if ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
+			continue
+		}
+		if insertionHasBodySiblings(ip) {
+			key := insertionSiblingGroupKey(ip)
+			if siblingGroups[key] == nil {
+				siblingGroups[key] = map[string]string{}
+			}
+			siblingGroups[key][ip.Param] = ip.Value
+			if typ := insertionJSONType(ip.Location); typ != "" {
+				if siblingTypeGroups[key] == nil {
+					siblingTypeGroups[key] = map[string]string{}
+				}
+				siblingTypeGroups[key][ip.Param] = typ
+			}
+		}
+		key := insertionIdentity(ip)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		r := routedPoint{ip: ip, reflected: reflected != 0}
+		if paramProneTo(class, ip.Param, ip.Value) {
+			prone = append(prone, r)
+		} else {
+			other = append(other, r)
+		}
+	}
+
+	// Reflected inputs are more likely to reach a renderer, but stable ordering
+	// within each tier keeps scans reproducible and makes regression comparisons
+	// meaningful.
+	sort.SliceStable(prone, func(i, j int) bool {
+		if prone[i].reflected != prone[j].reflected {
+			return prone[i].reflected
+		}
+		return insertionIdentity(prone[i].ip) < insertionIdentity(prone[j].ip)
+	})
+	sort.SliceStable(other, func(i, j int) bool {
+		if other[i].reflected != other[j].reflected {
+			return other[i].reflected
+		}
+		return insertionIdentity(other[i].ip) < insertionIdentity(other[j].ip)
+	})
+
+	combined := make([]routedPoint, 0, len(prone)+fallback)
+	combined = append(combined, prone...)
+	if fallback < 0 || fallback > len(other) {
+		fallback = len(other)
+	}
+	combined = append(combined, other[:fallback]...)
+
+	semanticCounts := map[string]int{}
+	out := make([]insertionPoint, 0, minInt(limit, len(combined)))
+	for _, r := range combined {
+		ip := r.ip
+		if routeKey, normalized := semanticRouteIdentity(ip); normalized {
+			if semanticCounts[routeKey] >= 2 {
+				continue
+			}
+			semanticCounts[routeKey]++
+		}
+		key := insertionSiblingGroupKey(ip)
+		if group := siblingGroups[key]; len(group) > 0 {
+			ip.Siblings = make(map[string]string, len(group))
+			for name, value := range group {
+				ip.Siblings[name] = value
+			}
+		}
+		if types := siblingTypeGroups[key]; len(types) > 0 {
+			ip.SiblingTypes = make(map[string]string, len(types))
+			for name, typ := range types {
+				ip.SiblingTypes[name] = typ
+			}
+		}
+		out = append(out, ip)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // loadXSSInsertionPoints is intentionally broader than the shared injection

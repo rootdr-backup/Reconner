@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,8 +99,15 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 	// dom_xss findings (browser-proven) and operator-triaged rows are preserved.
 	_, _ = s.db.ExecContext(ctx, `
 		DELETE FROM vuln_findings
-		WHERE target_id = ? AND type = 'dom_xss'
-		  AND COALESCE(status,'') = 'candidate' AND COALESCE(triage,'') = ''`, targetID)
+		WHERE target_id = ? AND type = 'dom_xss' AND COALESCE(triage,'') = ''
+		  AND (
+			COALESCE(status,'') = 'candidate'
+			OR candidate_id IN (
+				SELECT id FROM candidates
+				WHERE target_id=? AND type='dom_xss' AND subtype='static-flow'
+				  AND status NOT IN ('CONFIRMED','VERIFIED')
+			)
+		  )`, targetID, targetID)
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM js_findings WHERE target_id=? AND type='dom_param'`, targetID)
 
 	var targetDomain string
@@ -138,7 +146,11 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 	}
 
 	addInScope := func(u string, m *sync.Mutex, files map[string]bool) {
-		if targetDomain == "" || isInScope(u, targetDomain) {
+		parsed, err := url.Parse(strings.TrimSpace(u))
+		// Tool crawlers can emit third-party assets found several hops away. Admit
+		// only the target domain here; discoverJSFromHTML separately permits a
+		// non-tracker CDN bundle when the target page references it directly.
+		if err == nil && (targetDomain == "" || isTargetDomainHost(parsed.Hostname(), targetDomain)) {
 			m.Lock()
 			files[u] = true
 			m.Unlock()
@@ -220,35 +232,28 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 		s.discoverJSFromHTML(ctx, svcURL, targetDomain, &jsFiles, &jsMu)
 	}
 
-	logFn("info", "js_analysis", fmt.Sprintf("Found %d unique JS files. Analyzing...", len(jsFiles)))
-
-	sem := make(chan struct{}, s.cfg.Workers.JSAnalysis)
-	var wg sync.WaitGroup
-	var analyzed int
-	var analyzedMu sync.Mutex
-
+	jsMu.Lock()
+	seeds := make([]string, 0, len(jsFiles))
 	for jsURL := range jsFiles {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(u string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			if err := s.analyzeJSFile(ctx, targetID, u); err != nil {
-				s.logger.Debug("JS analysis failed", "url", u, "error", err)
-			}
-			analyzedMu.Lock()
-			analyzed++
-			if analyzed%10 == 0 {
-				logFn("info", "js_analysis", fmt.Sprintf("Analyzed %d/%d JS files...", analyzed, len(jsFiles)))
-			}
-			analyzedMu.Unlock()
-		}(jsURL)
+		seeds = append(seeds, jsURL)
 	}
-	wg.Wait()
+	jsMu.Unlock()
+	logFn("info", "js_analysis", fmt.Sprintf("Found %d seed JS files. Traversing same-site dependency graph...", len(seeds)))
+	analyzed := s.analyzeJSGraph(ctx, targetID, targetDomain, seeds, logFn)
+
+	// Static source→sink flows are internal leads only. Immediately route them to
+	// the real-browser verifier so a user sees a DOM-XSS finding only when an
+	// attacker-controlled URL/window/message source actually executes. The stored
+	// PoC is the alert(document.domain) equivalent of the nonce payload Chromium
+	// proved; a failed/inert lead remains hidden in candidates.
+	var pendingDOM int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM candidates
+		WHERE target_id=? AND type='dom_xss' AND subtype='static-flow'
+		  AND status IN ('DETECTED','TRIAGED','INCONCLUSIVE')`, targetID).Scan(&pendingDOM)
+	if pendingDOM > 0 && ctx.Err() == nil {
+		logFn("info", "dom_xss", fmt.Sprintf("Routing %d static DOM-XSS lead(s) to runtime browser proof...", pendingDOM))
+		VerifyDOMXSSOnPages(ctx, s.db, targetID, logFn)
+	}
 
 	// Optional active verification of discovered credentials.
 	if s.cfg.VerifySecrets {
@@ -361,7 +366,7 @@ func verifyHTTP(ctx context.Context, method, url string, headers map[string]stri
 
 func isJSURL(u string) bool {
 	lower := strings.ToLower(strings.Split(u, "?")[0])
-	return strings.HasSuffix(lower, ".js") || strings.HasSuffix(lower, ".mjs") || strings.Contains(lower, ".js?")
+	return strings.HasSuffix(lower, ".js") || strings.HasSuffix(lower, ".mjs") || strings.HasSuffix(lower, ".cjs")
 }
 
 // thirdPartyJSHosts are well-known analytics / ads / public-library CDN hosts.
@@ -404,14 +409,13 @@ func isInScope(jsURL, targetDomain string) bool {
 		return false
 	}
 	host := strings.ToLower(strings.TrimPrefix(parsed.Hostname(), "www."))
-	domain := strings.ToLower(strings.TrimPrefix(targetDomain, "www."))
-	if host == domain || strings.HasSuffix(host, "."+domain) {
+	if isTargetDomainHost(host, targetDomain) {
 		return true
 	}
 	return !isThirdPartyJSHost(host)
 }
 
-var jsLinkRE = regexp.MustCompile(`(?i)src=["']([^"']+\.(?:js|mjs)[^"']*)["']`)
+var jsLinkRE = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']([^"']+\.(?:js|mjs|cjs)(?:[?#][^"']*)?)["']`)
 
 func (s *JSScanner) discoverJSFromHTML(ctx context.Context, pageURL, targetDomain string, jsFiles *map[string]bool, mu *sync.Mutex) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
@@ -425,6 +429,9 @@ func (s *JSScanner) discoverJSFromHTML(ctx context.Context, pageURL, targetDomai
 		return
 	}
 	defer resp.Body.Close()
+	if targetDomain != "" && !isTargetDomainHost(resp.Request.URL.Hostname(), targetDomain) {
+		return // redirect left target scope; do not trust its script inventory
+	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	matches := jsLinkRE.FindAllStringSubmatch(string(body), -1)
@@ -432,19 +439,9 @@ func (s *JSScanner) discoverJSFromHTML(ctx context.Context, pageURL, targetDomai
 		if len(m) < 2 {
 			continue
 		}
-		jsURL := m[1]
-		if !strings.HasPrefix(jsURL, "http") {
-			// Resolve relative URL
-			base := strings.TrimRight(pageURL, "/")
-			if strings.HasPrefix(jsURL, "/") {
-				// absolute path
-				parsed, err := parseBase(pageURL)
-				if err == nil {
-					jsURL = parsed + jsURL
-				}
-			} else {
-				jsURL = base + "/" + jsURL
-			}
+		jsURL := resolveJSReference(resp.Request.URL.String(), m[1])
+		if jsURL == "" {
+			continue
 		}
 		if targetDomain == "" || isInScope(jsURL, targetDomain) {
 			mu.Lock()
@@ -452,6 +449,248 @@ func (s *JSScanner) discoverJSFromHTML(ctx context.Context, pageURL, targetDomai
 			mu.Unlock()
 		}
 	}
+}
+
+type jsVisitState uint8
+
+const (
+	jsDiscovered jsVisitState = iota + 1
+	jsVisiting
+	jsDone
+)
+
+const (
+	jsDependencyMaxDepth = 12
+	jsDependencyMaxFiles = 5000
+)
+
+var jsDependencyPatterns = []*regexp.Regexp{
+	regexp.MustCompile("(?m)\\b(?:import|export)\\s+(?:[^;\\n]*?\\s+from\\s*)?[\\\"'`]([^\\\"'`]+)[\\\"'`]"),
+	regexp.MustCompile("(?m)\\b(?:import|require)\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]\\s*\\)"),
+	regexp.MustCompile("(?m)\\bimportScripts\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]"),
+	regexp.MustCompile("[\\\"'`]([^\\\"'`\\s]+\\.(?:js|mjs|cjs)(?:[?#][^\\\"'`\\s]*)?)[\\\"'`]"),
+}
+
+// analyzeJSGraph follows JavaScript-to-JavaScript dependencies to a bounded depth
+// with an explicit state map. Cycles such as a→b→a are visited once, redirects and
+// bodies are re-validated, and each accepted file is fetched/analyzed only once.
+func (s *JSScanner) analyzeJSGraph(ctx context.Context, targetID, targetDomain string, seeds []string, logFn LogFunc) int {
+	workers := 16
+	if s.cfg != nil && s.cfg.Workers.JSAnalysis > 0 {
+		workers = s.cfg.Workers.JSAnalysis
+	}
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 32 {
+		workers = 32
+	}
+	maxFiles := jsDependencyMaxFiles
+	if s.cfg != nil && s.cfg.Limits.MaxURLsPerModule > 0 && s.cfg.Limits.MaxURLsPerModule < maxFiles {
+		maxFiles = s.cfg.Limits.MaxURLsPerModule
+	}
+
+	states := map[string]jsVisitState{}
+	var stateMu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+	var analyzed atomic.Int64
+	var schedule func(string, string, int)
+
+	schedule = func(raw, parent string, depth int) {
+		if ctx.Err() != nil || depth > jsDependencyMaxDepth {
+			return
+		}
+		u := normalizeJSURL(raw)
+		if u == "" || !isJSURL(u) {
+			return
+		}
+		if parent == "" {
+			if targetDomain != "" && !isInScope(u, targetDomain) {
+				return
+			}
+		} else if !jsDependencyInScope(u, parent, targetDomain) {
+			return
+		}
+
+		stateMu.Lock()
+		if states[u] != 0 || len(states) >= maxFiles {
+			stateMu.Unlock()
+			return
+		}
+		states[u] = jsDiscovered
+		stateMu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			stateMu.Lock()
+			states[u] = jsVisiting
+			stateMu.Unlock()
+			content, finalURL, client, fetchErr := fetchJSContent(ctx, u)
+			if fetchErr == nil && !jsRedirectInScope(finalURL, u, parent, targetDomain) {
+				fetchErr = fmt.Errorf("JS redirect left the accepted scope")
+			}
+			if fetchErr == nil && finalURL != u {
+				stateMu.Lock()
+				if states[finalURL] != 0 {
+					fetchErr = fmt.Errorf("JS redirect target already visited")
+				} else {
+					states[finalURL] = jsVisiting
+				}
+				stateMu.Unlock()
+			}
+			if fetchErr == nil {
+				if err := s.analyzeJSContent(ctx, targetID, finalURL, content, client); err == nil {
+					n := analyzed.Add(1)
+					if n%25 == 0 {
+						logFn("info", "js_analysis", fmt.Sprintf("Analyzed %d JS dependency files...", n))
+					}
+				}
+			}
+			<-sem
+
+			if fetchErr == nil {
+				for _, dep := range extractJSDependencies(finalURL, string(content)) {
+					schedule(dep, finalURL, depth+1)
+				}
+			} else {
+				s.logger.Debug("JS dependency rejected", "url", u, "error", fetchErr)
+			}
+			stateMu.Lock()
+			states[u] = jsDone
+			if finalURL != "" {
+				states[finalURL] = jsDone
+			}
+			stateMu.Unlock()
+		}()
+	}
+
+	for _, seed := range seeds {
+		schedule(seed, "", 0)
+	}
+	wg.Wait()
+	if len(states) >= maxFiles {
+		logFn("warn", "js_analysis", fmt.Sprintf("JS dependency safety cap reached (%d files); narrow the target or raise max_urls_per_module for a deeper pass", maxFiles))
+	}
+	return int(analyzed.Load())
+}
+
+func normalizeJSURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return ""
+	}
+	u.Fragment = ""
+	u.Host = strings.ToLower(u.Host)
+	return u.String()
+}
+
+func resolveJSReference(baseURL, ref string) string {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return ""
+	}
+	r, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil {
+		return ""
+	}
+	return normalizeJSURL(base.ResolveReference(r).String())
+}
+
+func extractJSDependencies(baseURL, content string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, re := range jsDependencyPatterns {
+		for _, m := range re.FindAllStringSubmatch(content, -1) {
+			if len(m) < 2 {
+				continue
+			}
+			dep := resolveJSReference(baseURL, m[1])
+			if dep != "" && isJSURL(dep) && !seen[dep] {
+				seen[dep] = true
+				out = append(out, dep)
+			}
+		}
+	}
+	return out
+}
+
+func jsDependencyInScope(child, parent, targetDomain string) bool {
+	cu, cerr := url.Parse(child)
+	pu, perr := url.Parse(parent)
+	if cerr != nil || perr != nil || isThirdPartyJSHost(strings.ToLower(cu.Hostname())) {
+		return false
+	}
+	if targetDomain == "" || isTargetDomainHost(cu.Hostname(), targetDomain) {
+		return true
+	}
+	// A page may legitimately load its own bundle from a separate first-party CDN
+	// hostname. Permit recursion only within that already-observed host; never let
+	// an import jump from it into an arbitrary third-party dependency graph.
+	return strings.EqualFold(cu.Hostname(), pu.Hostname())
+}
+
+func isTargetDomainHost(host, targetDomain string) bool {
+	host = normalizeHost(host)
+	if host == "" {
+		return false
+	}
+	scopes, _ := SplitScope(targetDomain)
+	for _, scope := range scopes {
+		scope = strings.TrimPrefix(strings.TrimSpace(scope), "*.")
+		if scopeHost := hostOfURL(scope); scopeHost != "" && hostInDomainScope(host, scopeHost) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsRedirectInScope(finalURL, requested, parent, targetDomain string) bool {
+	if finalURL == "" {
+		return false
+	}
+	if parent == "" {
+		return targetDomain == "" || isInScope(finalURL, targetDomain)
+	}
+	return jsDependencyInScope(finalURL, parent, targetDomain) && jsDependencyInScope(finalURL, requested, targetDomain)
+}
+
+func fetchJSContent(ctx context.Context, jsURL string) ([]byte, string, *http.Client, error) {
+	client := &http.Client{Timeout: 20 * time.Second, Transport: sharedHTTPTransport}
+	req, err := http.NewRequestWithContext(ctx, "GET", jsURL, nil)
+	if err != nil {
+		return nil, "", client, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", client, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", client, fmt.Errorf("JS HTTP status %d", resp.StatusCode)
+	}
+	content, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024+1))
+	if err != nil {
+		return nil, "", client, err
+	}
+	if len(content) == 0 || len(content) > 10*1024*1024 || strings.TrimSpace(string(content)) == "" {
+		return nil, "", client, fmt.Errorf("empty or oversized JS body")
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	prefix := strings.ToLower(strings.TrimSpace(string(content[:minInt(len(content), 512)])))
+	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/json") ||
+		strings.HasPrefix(ct, "image/") || strings.Contains(ct, "text/css") || strings.Contains(ct, "font/") ||
+		strings.HasPrefix(prefix, "<!doctype html") ||
+		strings.HasPrefix(prefix, "<html") || strings.HasPrefix(prefix, "<head") || strings.HasPrefix(prefix, "<body") {
+		return nil, "", client, fmt.Errorf("non-JavaScript HTML response")
+	}
+	return content, normalizeJSURL(resp.Request.URL.String()), client, nil
 }
 
 func parseBase(rawURL string) (string, error) {
@@ -463,32 +702,19 @@ func parseBase(rawURL string) (string, error) {
 }
 
 func (s *JSScanner) analyzeJSFile(ctx context.Context, targetID, jsURL string) error {
-	client := &http.Client{Timeout: 20 * time.Second, Transport: sharedHTTPTransport}
-	req, err := http.NewRequestWithContext(ctx, "GET", jsURL, nil)
+	content, finalURL, client, err := fetchJSContent(ctx, jsURL)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+	return s.analyzeJSContent(ctx, targetID, finalURL, content, client)
+}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil
-	}
-
-	content, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return err
-	}
+func (s *JSScanner) analyzeJSContent(ctx context.Context, targetID, jsURL string, content []byte, client *http.Client) error {
 
 	hash := fmt.Sprintf("%x", sha256.Sum256(content))
 	jsFileID := uuid.New().String()
 
-	_, err = s.db.Exec(`
+	_, err := s.db.Exec(`
 		INSERT INTO js_files (id, target_id, url, size, hash, analyzed, last_seen)
 		VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
 		ON CONFLICT(target_id, url) DO UPDATE SET

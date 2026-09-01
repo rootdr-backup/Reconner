@@ -29,7 +29,7 @@ func TestLog4ShellListenerPromotesTokenToFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Register a Log4Shell probe.
-	tok := "rcnoob0123456789"
+	tok := "rcnoob0123456789abcdef0123"
 	if _, err := h.db.Exec(
 		`INSERT INTO oob_probes (token, target_id, url, parameter, kind, sink) VALUES (?,?,?,?,?,?)`,
 		tok, "tgt-1", "10.0.0.5:8080", "", "log4shell", "log4shell headers"); err != nil {
@@ -92,8 +92,8 @@ func TestOOBVulnTypeMapping(t *testing.T) {
 }
 
 func TestOOBTokenRegex(t *testing.T) {
-	got := oobTokenRe.FindString("blah\x00cn=rcnoobabc0123def,dc=x")
-	if got != "rcnoobabc0123def" {
+	got := oobTokenRe.FindString("blah\x00cn=rcnoobabc0123def456789abcd,dc=x")
+	if got != "rcnoobabc0123def456789abcd" {
 		t.Fatalf("token extract = %q", got)
 	}
 	if oobTokenRe.MatchString("rcnoobZZZ") {

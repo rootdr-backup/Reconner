@@ -115,7 +115,7 @@ func (s *OriginIPScanner) Run(ctx context.Context, targetID string, logFn LogFun
 			found++
 			mu.Unlock()
 			logFn("warn", "origin_ip", fmt.Sprintf("Origin IP candidate [%s]: %s (%s)", sev, ip, domain))
-			if s.broadcast != nil {
+			if s.broadcast != nil && confirmed {
 				s.broadcast("new_vuln_finding", map[string]any{
 					"target_id": targetID, "type": "origin_ip_disclosure", "url": domain, "parameter": "",
 				})

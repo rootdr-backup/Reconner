@@ -61,7 +61,6 @@ func (s *CachePoisonScanner) Run(ctx context.Context, targetID string, logFn Log
 		logFn("info", "cache_poison", "No cacheable pages to test")
 		return nil
 	}
-	auth := loadAuthHeaders(ctx, s.db, targetID)
 	logFn("info", "cache_poison", fmt.Sprintf("Testing %d page(s) for web cache poisoning (unkeyed headers)...", len(urls)))
 
 	sem := make(chan struct{}, 6)
@@ -77,7 +76,7 @@ func (s *CachePoisonScanner) Run(ctx context.Context, targetID string, logFn Log
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if s.testURL(ctx, targetID, u, auth, logFn) {
+			if s.testURL(ctx, targetID, u, nil, logFn) {
 				found.Add(1)
 			}
 		}(u)
@@ -88,6 +87,7 @@ func (s *CachePoisonScanner) Run(ctx context.Context, targetID string, logFn Log
 }
 
 func (s *CachePoisonScanner) testURL(ctx context.Context, targetID, baseURL string, auth map[string]string, logFn LogFunc) bool {
+	observed := false
 	for _, hdr := range cachePoisonHeaders {
 		if ctx.Err() != nil {
 			return false
@@ -108,36 +108,44 @@ func (s *CachePoisonScanner) testURL(ctx context.Context, targetID, baseURL stri
 		}
 
 		// 2) Clean request to the SAME cache-busted URL, no header.
-		body2, cacheHdr := s.fetch(ctx, testURL, nil, auth)
+		body2, cacheHeaders := s.fetch(ctx, testURL, nil, nil)
 		if strings.Contains(body2, canary) {
-			// The poisoned value survived into a request that never sent it →
-			// it was served from cache. Confirmed.
-			s.store(targetID, "high", baseURL, hdr,
-				fmt.Sprintf("Web cache poisoning CONFIRMED: unkeyed header %q was reflected AND persisted into a clean cached response (cache: %s). An attacker can poison the shared cache for all users.", hdr, orNone(cacheHdr)), 90)
-			logFn("warn", "cache_poison", fmt.Sprintf("Cache poisoning CONFIRMED: %s via %s", baseURL, hdr))
-			s.broadcastFinding(targetID, baseURL, hdr)
-			return true
+			if cacheServedFromCache(cacheHeaders) {
+				// The poisoned value survived into an unauthenticated request that
+				// never sent it AND carries a cache-hit signal: shared-cache replay.
+				s.store(targetID, "high", baseURL, hdr,
+					fmt.Sprintf("Web cache poisoning CONFIRMED: unkeyed header %q persisted into a clean unauthenticated cache-hit response (cache: %s).", hdr, orNone(cacheHeaderSummary(cacheHeaders))), 95)
+				logFn("warn", "cache_poison", fmt.Sprintf("Cache poisoning CONFIRMED: %s via %s", baseURL, hdr))
+				s.broadcastFinding(targetID, baseURL, hdr)
+				return true
+			}
+			// Persistence without an observable shared-cache hit can be application
+			// state or a private cache. Keep it reviewable, never verified.
+			s.store(targetID, "medium", baseURL, hdr,
+				fmt.Sprintf("Header %q persisted into a clean response, but no shared-cache HIT/Age proof was present.", hdr), 75)
+			observed = true
+			continue
 		}
 
 		// Reflected but not (yet) proven cached — lower-confidence candidate.
 		s.store(targetID, "medium", baseURL, hdr,
-			fmt.Sprintf("Unkeyed header %q is reflected in the response. If the endpoint is cached, this is exploitable as web cache poisoning — verify caching (cache header seen: %s).", hdr, orNone(cacheHdr)), 55)
+			fmt.Sprintf("Unkeyed header %q is reflected in the response. If the endpoint is cached, this may be exploitable as web cache poisoning (cache header seen: %s).", hdr, orNone(cacheHeaderSummary(cacheHeaders))), 55)
 		// Reflecting X-Forwarded-Host and friends is extremely common and is NOT a
 		// vulnerability without a proven cache hit, so this stays a CANDIDATE (see
 		// store: confidence 55 < ConfEvidence) and does NOT fire a "new finding"
 		// broadcast — surfacing it as a confirmed high was a major cache-poison noise source.
 		logFn("info", "cache_poison", fmt.Sprintf("Unkeyed header reflected (candidate): %s via %s (caching not proven)", baseURL, hdr))
-		return true
+		observed = true
 	}
-	return false
+	return observed
 }
 
-func (s *CachePoisonScanner) fetch(ctx context.Context, u string, extraHeaders, auth map[string]string) (string, string) {
+func (s *CachePoisonScanner) fetch(ctx context.Context, u string, extraHeaders, auth map[string]string) (string, http.Header) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", u, nil)
 	if err != nil {
-		return "", ""
+		return "", http.Header{}
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
 	for k, v := range auth {
@@ -148,19 +156,22 @@ func (s *CachePoisonScanner) fetch(ctx context.Context, u string, extraHeaders, 
 	}
 	resp, err := cachePoisonClient.Do(req)
 	if err != nil {
-		return "", ""
+		return "", http.Header{}
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
-	cacheHdr := strings.TrimSpace(resp.Header.Get("X-Cache") + " " + resp.Header.Get("CF-Cache-Status") + " " + resp.Header.Get("Age") + " " + resp.Header.Get("Cache-Control"))
-	return string(body), cacheHdr
+	return string(body), resp.Header.Clone()
+}
+
+func cacheHeaderSummary(h http.Header) string {
+	return strings.TrimSpace(h.Get("X-Cache") + " " + h.Get("CF-Cache-Status") + " " + h.Get("X-Cache-Status") + " age=" + h.Get("Age") + " " + h.Get("Cache-Control"))
 }
 
 // candidateURLs picks alive HTML pages worth testing (real hosts only).
 func (s *CachePoisonScanner) candidateURLs(ctx context.Context, targetID string) []string {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url FROM http_services
-		WHERE target_id = ? AND status_code = 200 AND COALESCE(source,'probe') = 'probe'
+		WHERE target_id = ? AND status_code = 200
 		  AND (content_type LIKE '%html%' OR content_type = '')
 		ORDER BY url LIMIT ?`, targetID, cachePoisonMaxURLs)
 	if err != nil {
@@ -174,7 +185,7 @@ func (s *CachePoisonScanner) candidateURLs(ctx context.Context, targetID string)
 			out = append(out, u)
 		}
 	}
-	return out
+	return filterURLsByHostScope(ctx, out)
 }
 
 func (s *CachePoisonScanner) store(targetID, sev, url, param, evidence string, confidence int) {

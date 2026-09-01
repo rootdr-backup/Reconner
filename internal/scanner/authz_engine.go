@@ -254,8 +254,10 @@ func (s *AuthzEngine) VerifyWrite(ctx context.Context, targetID string, ids []Id
 
 // RunWorkflow executes a researcher-defined multi-step workflow with variable
 // propagation and, if a step marked ExpectDenied succeeded (a prerequisite /
-// workflow authorization bypass), records a verified finding with the step chain
-// as evidence.
+// workflow authorization signal), records a high-confidence candidate with the
+// step chain as evidence. A caller-supplied expectation is not by itself a
+// server-side authorization invariant, so this path deliberately does not emit a
+// confirmed-finding notification.
 func (s *AuthzEngine) RunWorkflow(ctx context.Context, targetID string, ids []Identity, steps []WorkflowStep, seed map[string]string) WorkflowResult {
 	res := RunWorkflow(ctx, s.db, targetID, ids, steps, seed)
 	if res.FlaggedStep < 0 {
@@ -269,14 +271,11 @@ func (s *AuthzEngine) RunWorkflow(ctx context.Context, targetID string, ids []Id
 		chain = append(chain, line)
 		items = append(items, EvidenceItem{IdentityLabel: st.Identity, Request: st.Method + " " + st.URL, Response: "HTTP " + itoa(st.Status) + " — " + st.Verdict, Comparison: line})
 	}
-	evidence := "Workflow authorization bypass: step " + itoa(fs.Index) + " (" + fs.Identity + " " + fs.Method + " " + fs.URL +
-		") was expected to be DENIED but succeeded (AUTHORIZED) within the chain:\n" + strings.Join(chain, "\n")
+	evidence := "Workflow authorization candidate: step " + itoa(fs.Index) + " (" + fs.Identity + " " + fs.Method + " " + fs.URL +
+		") was configured as expected DENIED but succeeded (AUTHORIZED) within the chain. Confirm the business prerequisite before reporting:\n" + strings.Join(chain, "\n")
 	findingID := s.storeFinding(ctx, targetID, "workflow_authz_bypass", "high", fs.URL, "step-"+itoa(fs.Index), evidence, 88)
 	StoreEvidence(ctx, s.db, findingID, targetID, "workflow",
-		"A step expected to require prerequisites/authorization succeeded for an identity that should not have been able to complete it.", items)
-	if s.broadcast != nil {
-		s.broadcast("new_vuln_finding", map[string]any{"target_id": targetID, "type": "workflow_authz_bypass", "url": fs.URL, "parameter": "step-" + itoa(fs.Index)})
-	}
+		"Candidate: a user-configured expected-denied step succeeded; validate the business prerequisite before promotion.", items)
 	return res
 }
 

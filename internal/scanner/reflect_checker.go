@@ -134,96 +134,144 @@ type openRedirectResult struct {
 
 const evilRedirectHost = "evil.com"
 
-// checkOpenRedirectURL injects redirect payloads and FOLLOWS the redirect chain
-// manually (up to 8 hops), returning whether the final destination leaves the
-// origin (external = verified) or stays same-origin/relative (internal =
-// candidate). Per spec, only an external final Location is a real finding.
+var openRedirectPayloads = []string{
+	"https://evil.com",
+	"//evil.com",
+	"https://evil.com/",
+	"//evil.com/%2F..",
+	"/\\evil.com",
+	"\\/\\/evil.com",
+	"https:/evil.com",
+	"https://target.example@evil.com",
+	"//evil.com/%2e%2e",
+	"https://evil.com%2f",
+	"%2f%2fevil.com",
+	"/%2f/evil.com",
+	"/%5cevil.com",
+	"%2f%5cevil.com",
+	"///evil.com",
+	"https:%2f%2fevil.com",
+}
+
+// checkOpenRedirectURL is the legacy query-string entry point used by focused
+// checks and tests. Keep it on the same request-shape-aware verifier as the
+// production discovery module so both paths have identical redirect semantics
+// and neither follows an injected destination outside scope.
 func checkOpenRedirectURL(rawURL, param string) (openRedirectResult, bool) {
-	parsed, err := url.Parse(rawURL)
+	return checkOpenRedirectPoint(context.Background(), insertionPoint{
+		URL: rawURL, Param: param, Method: http.MethodGet, Location: "query",
+	}, nil)
+}
+
+// checkOpenRedirectPoint is the request-shape-aware open-redirect verifier. It
+// supports query, form, JSON, multipart, GraphQL, path, cookie and header
+// insertion points, preserves authentication and required sibling fields, and
+// never follows the browser onto evil.com: observing a Location/meta/JS target
+// whose parsed final host is our injected host is already the proof.
+func checkOpenRedirectPoint(ctx context.Context, ip insertionPoint, auth map[string]string) (openRedirectResult, bool) {
+	origin, err := url.Parse(ip.URL)
 	if err != nil {
 		return openRedirectResult{}, false
 	}
-	originHost := strings.ToLower(strings.TrimPrefix(parsed.Hostname(), "www."))
-
-	payloads := []string{
-		"https://evil.com",
-		"//evil.com",
-		"https://evil.com/",
-		"//evil.com/%2F..",
-		"/\\evil.com",
-		"\\/\\/evil.com",
-		"https:/evil.com",
-		"https://target.example@evil.com",
-		"//evil.com/%2e%2e",
-		"https://evil.com%2f",
-		// Encoded-separator bypasses: an app that URL-DECODES the parameter before
-		// building its redirect turns these into //evil.com — a common real-world
-		// filter bypass. These only ever produce a finding because the final
-		// destination is validated to be the injected attacker host, so adding them
-		// widens coverage without any false-positive risk. (They previously could
-		// not even be delivered: the old q.Encode() construction double-encoded the
-		// '%' to %25, so %2f arrived as %252f and was inert.)
-		"%2f%2fevil.com",
-		"/%2f/evil.com",
-		"/%5cevil.com",
-		"%2f%5cevil.com",
-		"///evil.com",
-		"https:%2f%2fevil.com",
-	}
-
-	var candidate *openRedirectResult // remember an internal redirect as fallback
-
-	for _, payload := range payloads {
-		// Build the test URL with MINIMAL escaping so a pre-encoded bypass payload
-		// (%2f, %2e%2e, %5c) reaches the server byte-for-byte instead of being
-		// double-encoded by url.Values.Encode() into an inert literal.
-		testURLStr := injectParam(rawURL, param, payload)
-		parsedTest, perr := url.Parse(testURLStr)
-		if perr != nil {
+	originHost := strings.ToLower(strings.TrimPrefix(origin.Hostname(), "www."))
+	var candidate *openRedirectResult
+	for _, payload := range openRedirectPayloads {
+		reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		req, err := buildInjectedRequest(reqCtx, ip, payload, auth)
+		if err != nil {
+			cancel()
 			continue
 		}
-
-		finalLoc, chain, redirected := followRedirectChain(testURLStr)
+		testDesc := fmt.Sprintf("%s %s [%s=%s]", req.Method, req.URL.String(), ip.Param, payload)
+		res, redirected := followRedirectRequest(reqCtx, req, originHost, auth)
+		cancel()
 		if !redirected {
-			// No 3xx Location — but the app may redirect via a meta-refresh tag or
-			// a JS location assignment (a real open-redirect vector the header walk
-			// misses). Low-FP: we only flag when the redirect construct points at
-			// our injected attacker host.
-			if mh := metaOrJSRedirectHost(testURLStr, parsedTest); mh != "" && isInjectedRedirectHost(mh) && isExternalRedirectHost(mh, originHost) {
-				return openRedirectResult{
-					class:    redirectExternal,
-					testURL:  testURLStr,
-					finalLoc: "client-side redirect (meta refresh / JS) → " + mh,
-					chain:    fmt.Sprintf("param=%s payload=%s\n  client-side redirect to %s", param, payload, mh),
-				}, true
-			}
 			continue
 		}
-		provenance := fmt.Sprintf("param=%s payload=%s\n%s", param, payload, chain)
-
-		finalHost := hostFromLocation(finalLoc, parsedTest)
-		if finalHost != "" && isInjectedRedirectHost(finalHost) && isExternalRedirectHost(finalHost, originHost) {
-			// Confirmed: our injected host is where the browser ends up.
-			return openRedirectResult{
-				class:    redirectExternal,
-				testURL:  testURLStr,
-				finalLoc: finalLoc,
-				chain:    provenance,
-			}, true
+		res.testURL = testDesc
+		res.chain = fmt.Sprintf("method=%s location=%s param=%s payload=%s\n%s",
+			strings.ToUpper(ip.Method), insertionLocation(ip), ip.Param, payload, res.chain)
+		if res.class == redirectExternal {
+			return res, true
 		}
-		// Redirect happened but stayed same-origin/relative → candidate only.
 		if candidate == nil {
-			candidate = &openRedirectResult{
-				class:    redirectInternal,
-				testURL:  testURLStr,
-				finalLoc: finalLoc,
-				chain:    provenance,
-			}
+			copy := res
+			candidate = &copy
 		}
 	}
-
 	if candidate != nil {
 		return *candidate, true
+	}
+	return openRedirectResult{}, false
+}
+
+func followRedirectRequest(ctx context.Context, first *http.Request, originHost string, auth map[string]string) (openRedirectResult, bool) {
+	client := &http.Client{
+		Timeout:       8 * time.Second,
+		Transport:     sharedHTTPTransport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	cur := first
+	var chain strings.Builder
+	redirected := false
+	for hop := 0; hop < 8; hop++ {
+		resp, err := client.Do(cur)
+		if err != nil {
+			break
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		resp.Body.Close()
+		base := cur.URL
+		loc := strings.TrimSpace(resp.Header.Get("Location"))
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 && loc != "" {
+			redirected = true
+			fmt.Fprintf(&chain, "  %d %s -> %s\n", resp.StatusCode, cur.URL.String(), loc)
+			host := hostFromLocation(loc, base)
+			if host != "" && isInjectedRedirectHost(host) && isExternalRedirectHost(host, originHost) {
+				return openRedirectResult{class: redirectExternal, finalLoc: loc, chain: chain.String()}, true
+			}
+			nextRef, err := url.Parse(loc)
+			if err != nil {
+				break
+			}
+			next := base.ResolveReference(nextRef)
+			nextHost := strings.ToLower(strings.TrimPrefix(next.Hostname(), "www."))
+			if nextHost != "" && nextHost != originHost {
+				// Do not send scanner traffic to an unscoped third-party redirect.
+				break
+			}
+			method := http.MethodGet
+			var bodyReader io.ReadCloser
+			if (resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect) && cur.GetBody != nil {
+				method = cur.Method
+				bodyReader, _ = cur.GetBody()
+			}
+			nextReq, err := http.NewRequestWithContext(ctx, method, next.String(), bodyReader)
+			if err != nil {
+				break
+			}
+			nextReq.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+			for k, v := range auth {
+				nextReq.Header.Set(k, v)
+			}
+			if bodyReader != nil {
+				nextReq.Header.Set("Content-Type", cur.Header.Get("Content-Type"))
+			}
+			cur = nextReq
+			continue
+		}
+
+		if host := metaOrJSRedirectHostFromBody(body, resp.Header.Get("Content-Type"), base); host != "" {
+			redirected = true
+			fmt.Fprintf(&chain, "  %d %s -> client-side %s\n", resp.StatusCode, cur.URL.String(), host)
+			if isInjectedRedirectHost(host) && isExternalRedirectHost(host, originHost) {
+				return openRedirectResult{class: redirectExternal, finalLoc: "client-side redirect -> " + host, chain: chain.String()}, true
+			}
+		}
+		break
+	}
+	if redirected {
+		return openRedirectResult{class: redirectInternal, chain: chain.String()}, true
 	}
 	return openRedirectResult{}, false
 }
@@ -317,6 +365,14 @@ func metaOrJSRedirectHost(pageURL string, base *url.URL) string {
 		return "" // only HTML documents run meta/JS redirects
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	return metaOrJSRedirectHostFromBody(body, resp.Header.Get("Content-Type"), base)
+}
+
+func metaOrJSRedirectHostFromBody(body []byte, contentType string, base *url.URL) string {
+	ct := strings.ToLower(contentType)
+	if ct != "" && !strings.Contains(ct, "html") {
+		return ""
+	}
 	dest := ""
 	if m := metaRefreshRe.FindSubmatch(body); m != nil {
 		dest = string(m[1])

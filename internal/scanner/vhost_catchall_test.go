@@ -33,7 +33,7 @@ func runVhostScan(t *testing.T, serverURL, domain string) []string {
 	s := &SubdomainScanner{db: db}
 	var mu sync.Mutex
 	found := map[string]bool{}
-	s.vhostScan(context.Background(), tid, domain, found, &mu, func(_, _, _ string) {})
+	s.vhostScan(context.Background(), tid, domain, found, &mu, nil, func(_, _, _ string) {})
 
 	rows, err := db.Query(`SELECT subdomain FROM subdomains WHERE target_id=? AND source='vhost'`, tid)
 	if err != nil {

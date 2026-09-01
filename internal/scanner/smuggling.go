@@ -124,11 +124,6 @@ func (s *SmugglingScanner) testHost(ctx context.Context, targetID, rawURL string
 				probe.name, smugDelayHit, baseElapsed.Round(time.Millisecond))
 			s.store(targetID, rawURL, probe.name, ev)
 			logFn("warn", "smuggling", fmt.Sprintf("Request smuggling (%s): %s", probe.name, rawURL))
-			if s.broadcast != nil {
-				s.broadcast("new_vuln_finding", map[string]any{
-					"target_id": targetID, "type": "request_smuggling", "url": rawURL, "parameter": "",
-				})
-			}
 			return true
 		}
 	}

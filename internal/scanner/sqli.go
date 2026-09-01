@@ -252,7 +252,7 @@ func (s *SQLiScanner) plantBlindSQLi(ctx context.Context, targetID string, logFn
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "sqli",
 		nil, // OOB SQL functions are tried on every param, as before
-		func(cb string) []string { return sqliOOBPayloads(cb, o.callbackHost) })
+		func(_ insertionPoint, cb string) []string { return sqliOOBPayloads(cb, o.callbackHost) })
 	if n > 0 {
 		logFn("info", "sqli", fmt.Sprintf("Planted %d blind-SQLi OOB probe(s); execution reported via callback.", n))
 	}
@@ -298,14 +298,14 @@ func (s *SQLiScanner) selectCandidates(ctx context.Context, targetID string) []i
 		if ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
 			continue
 		}
-		groupKey := sqliSiblingGroupKey(ip)
+		groupKey := insertionSiblingGroupKey(ip)
 		loc := insertionLocation(ip)
 		if loc == "body" || loc == "json" || loc == "multipart" || loc == "xml" || strings.HasPrefix(loc, "graphql:") {
 			if siblingGroups[groupKey] == nil {
 				siblingGroups[groupKey] = map[string]string{}
 			}
 			siblingGroups[groupKey][ip.Param] = ip.Value
-			if typ := jsonTypeFromLocation(ip.Location); typ != "" {
+			if typ := insertionJSONType(ip.Location); typ != "" {
 				if siblingTypeGroups[groupKey] == nil {
 					siblingTypeGroups[groupKey] = map[string]string{}
 				}
@@ -347,7 +347,7 @@ func (s *SQLiScanner) selectCandidates(ctx context.Context, targetID string) []i
 	}
 	for i := range ranked {
 		ip := &ranked[i].ip
-		groupKey := sqliSiblingGroupKey(*ip)
+		groupKey := insertionSiblingGroupKey(*ip)
 		if group := siblingGroups[groupKey]; len(group) > 0 {
 			ip.Siblings = make(map[string]string, len(group))
 			for k, v := range group {
@@ -395,26 +395,6 @@ func (s *SQLiScanner) selectCandidates(ctx context.Context, targetID string) []i
 		out = append(out, r.ip)
 	}
 	return out
-}
-
-func jsonTypeFromLocation(location string) string {
-	loc := strings.ToLower(strings.TrimSpace(location))
-	if strings.HasPrefix(loc, "json:") {
-		return strings.TrimPrefix(loc, "json:")
-	}
-	return ""
-}
-
-func sqliSiblingGroupKey(ip insertionPoint) string {
-	loc := insertionLocation(ip)
-	if strings.HasPrefix(loc, "graphql:") {
-		parts := strings.Split(loc, ":")
-		if len(parts) >= 3 {
-			loc = strings.Join(parts[:3], ":") // same endpoint + operation
-		}
-	}
-	return strings.ToUpper(ip.Method) + "\x00" + ip.URL + "\x00" +
-		strings.ToLower(ip.ContentType) + "\x00" + loc
 }
 
 // sqliBaseValue keeps the request on the originally discovered object/route.

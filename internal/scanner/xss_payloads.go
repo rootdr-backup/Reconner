@@ -1,6 +1,10 @@
 package scanner
 
-import "strings"
+import (
+	"strings"
+
+	xhtml "golang.org/x/net/html"
+)
 
 // XSS executing-payload bank for the active DAST confirm stage.
 //
@@ -61,7 +65,10 @@ func htmlTextExecLadder() []xssExecPayload {
 		{"<svg\tonload=" + xssAlert + ">", "svg", "onload"},
 		{"<svg\nonload=" + xssAlert + ">", "svg", "onload"},
 		{`<svg onload=` + xssAlert + `//`, "svg", "onload"},
-		{`<image src=x onerror=` + xssAlert + `>`, "image", "onerror"},
+		// In an HTML document the tokenizer aliases the obsolete <image> spelling
+		// to a live <img> element. Correlate against the parsed name, not the source
+		// spelling, so this evasive vector remains detectable.
+		{`<image src=x onerror=` + xssAlert + `>`, "img", "onerror"},
 		// ── rare tags / rare events (bypass tag/handler allowlists) ──
 		{`<xss id=x tabindex=1 onfocusin=` + xssAlert + `></xss>`, "xss", "onfocusin"},
 		{`<div onpointerenter=` + xssAlert + `>x</div>`, "div", "onpointerenter"},
@@ -153,22 +160,141 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 	}
 }
 
-// execPayloadSurvived reports whether an executing payload's proof survived RAW in
-// the response: for a tag vector the element must form as a live start tag AND its
-// handler token must be present unencoded; for a tagless vector (javascript: URL,
-// JS-string breakout, unquoted-attr handler) the exact executing token must be
-// present unencoded. This is the browserless guarantee that the REPORTED payload
-// is one the app did not neutralise.
+// execPayloadSurvived reports whether the executing primitive from p survived on
+// the SAME parsed element/subtree in the response. Element-name and token checks
+// must never be independent: a page may already contain a legitimate <svg> while
+// reflecting our URL-encoded "onload" text inside og:url. The old global checks
+// joined those unrelated facts and produced a false positive.
+//
+// We parse p to derive its exact executable signal (event-handler name+value,
+// javascript: URL, srcdoc, or script body), then require that signal beneath a
+// live response element named p.Elem. Percent-encoded or quoted-attribute text
+// does not become such a node. Tagless JS/URL vectors still require runtime proof.
 func execPayloadSurvived(body string, p xssExecPayload) bool {
-	low := strings.ToLower(body)
-	tok := strings.ToLower(p.Token)
-	if tok == "" || !strings.Contains(low, tok) {
-		return false
-	}
 	if p.Elem == "" {
 		// Exact tagless text survival is still only reflection. Whether a JS
 		// expression/scheme/handler is syntactically live requires runtime proof.
 		return false
 	}
-	return htmlTagInjected(body, p.Elem)
+	want := expectedExecSignals(p)
+	if len(want) == 0 {
+		return false
+	}
+	doc, err := xhtml.Parse(strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	return elementSubtreeHasSignals(doc, strings.ToLower(strings.TrimSpace(p.Elem)), want)
+}
+
+type execSignal struct {
+	kind  string // event | javascript-url | srcdoc | script
+	name  string // attribute name for attribute-backed signals
+	value string
+}
+
+// expectedExecSignals parses the payload in a normal HTML body and extracts only
+// browser-executable primitives. Generic attributes such as src=x/autofocus are
+// deliberately ignored: they cannot prove that JavaScript survived.
+func expectedExecSignals(p xssExecPayload) []execSignal {
+	doc, err := xhtml.Parse(strings.NewReader("<!doctype html><html><body>" + p.Payload + "</body></html>"))
+	if err != nil {
+		return nil
+	}
+	var target *xhtml.Node
+	var find func(*xhtml.Node)
+	find = func(n *xhtml.Node) {
+		if target != nil {
+			return
+		}
+		if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, p.Elem) {
+			target = n
+			return
+		}
+		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+			find(ch)
+		}
+	}
+	find(doc)
+	if target == nil {
+		return nil
+	}
+	return collectExecSignals(target)
+}
+
+func collectExecSignals(root *xhtml.Node) []execSignal {
+	var out []execSignal
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.ElementNode {
+			for _, attr := range n.Attr {
+				name := strings.ToLower(strings.TrimSpace(attr.Key))
+				value := strings.TrimSpace(attr.Val)
+				switch {
+				case strings.HasPrefix(name, "on") && len(name) > 2 && value != "":
+					out = append(out, execSignal{kind: "event", name: name, value: value})
+				case name == "srcdoc" && value != "":
+					out = append(out, execSignal{kind: "srcdoc", name: name, value: value})
+				case value != "" && strings.HasPrefix(strings.ToLower(value), "javascript:"):
+					out = append(out, execSignal{kind: "javascript-url", name: name, value: value})
+				}
+			}
+			if strings.EqualFold(n.Data, "script") {
+				if value := strings.TrimSpace(nodeText(n)); value != "" {
+					out = append(out, execSignal{kind: "script", value: value})
+				}
+			}
+		}
+		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+			walk(ch)
+		}
+	}
+	walk(root)
+	return out
+}
+
+func nodeText(root *xhtml.Node) string {
+	var b strings.Builder
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.TextNode {
+			b.WriteString(n.Data)
+		}
+		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+			walk(ch)
+		}
+	}
+	walk(root)
+	return b.String()
+}
+
+func elementSubtreeHasSignals(root *xhtml.Node, element string, want []execSignal) bool {
+	if root.Type == xhtml.ElementNode && strings.EqualFold(root.Data, element) {
+		got := collectExecSignals(root)
+		if allExecSignalsPresent(got, want) {
+			return true
+		}
+	}
+	for ch := root.FirstChild; ch != nil; ch = ch.NextSibling {
+		if elementSubtreeHasSignals(ch, element, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func allExecSignalsPresent(got, want []execSignal) bool {
+	for _, expected := range want {
+		matched := false
+		for _, actual := range got {
+			if actual.kind == expected.kind && actual.name == expected.name && actual.value == expected.value {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return len(want) > 0
 }

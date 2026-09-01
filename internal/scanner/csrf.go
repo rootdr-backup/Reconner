@@ -53,6 +53,7 @@ func (s *CSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		logFn("info", "csrf", "No pages to check")
 		return nil
 	}
+	auth := loadAuthHeaders(ctx, s.db, targetID)
 
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -66,7 +67,7 @@ func (s *CSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		go func(page string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			found.Add(int64(s.checkPage(ctx, targetID, page, logFn)))
+			found.Add(int64(s.checkPageWithAuth(ctx, targetID, page, auth, logFn)))
 		}(p)
 	}
 	wg.Wait()
@@ -78,7 +79,7 @@ func (s *CSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 func (s *CSRFScanner) loadPages(ctx context.Context, targetID string) []string {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT url FROM http_services
-		WHERE target_id=? AND COALESCE(source,'probe')='probe' AND status_code BETWEEN 200 AND 399
+		WHERE target_id=? AND status_code BETWEEN 200 AND 399
 		LIMIT ?`, targetID, s.cfg.URLLimit())
 	if err != nil {
 		return nil
@@ -95,6 +96,10 @@ func (s *CSRFScanner) loadPages(ctx context.Context, targetID string) []string {
 }
 
 func (s *CSRFScanner) checkPage(ctx context.Context, targetID, page string, logFn LogFunc) int {
+	return s.checkPageWithAuth(ctx, targetID, page, nil, logFn)
+}
+
+func (s *CSRFScanner) checkPageWithAuth(ctx context.Context, targetID, page string, auth map[string]string, logFn LogFunc) int {
 	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", page, nil)
@@ -102,6 +107,9 @@ func (s *CSRFScanner) checkPage(ctx context.Context, targetID, page string, logF
 		return 0
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
 	resp, err := csrfClient.Do(req)
 	if err != nil {
 		return 0

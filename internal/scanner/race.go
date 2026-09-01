@@ -128,17 +128,12 @@ func (s *RaceScanner) testPoint(ctx context.Context, targetID string, ip inserti
 		return false
 	}
 
-	sev, confidence := "low", 45
+	sev, confidence := "low", 75
 	ev := fmt.Sprintf(
 		"%d simultaneous identical requests to %s (param %s) returned INCONSISTENT outcomes %s. A non-atomic limit/uniqueness check is a strong race-condition signal (e.g. coupon reuse, double-spend, limit bypass) — verify the business impact manually.",
 		raceBurst, ip.URL, ip.Param, formatCounts(counts))
-	s.store(targetID, ip.URL, ip.Param, sev, ev, confidence)
+	s.store(targetID, ip, sev, ev, confidence)
 	logFn("warn", "race", fmt.Sprintf("Race signal: %s param=%s outcomes=%s", ip.URL, ip.Param, formatCounts(counts)))
-	if s.broadcast != nil {
-		s.broadcast("new_vuln_finding", map[string]any{
-			"target_id": targetID, "type": "race_condition", "url": ip.URL, "parameter": ip.Param,
-		})
-	}
 	return true
 }
 
@@ -146,7 +141,11 @@ func (s *RaceScanner) testPoint(ctx context.Context, targetID string, ip inserti
 // parameter name looks race-prone. GET endpoints are excluded — racing an
 // idempotent read is meaningless and noisy.
 func (s *RaceScanner) candidatePoints(ctx context.Context, targetID string) []insertionPoint {
-	all := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())
+	limit := 200
+	if s.cfg != nil && s.cfg.URLLimit() > 0 && s.cfg.URLLimit() < limit {
+		limit = s.cfg.URLLimit()
+	}
+	all := loadInsertionPoints(ctx, s.db, targetID, limit)
 	seen := map[string]bool{}
 	var out []insertionPoint
 	for _, ip := range all {
@@ -168,15 +167,15 @@ func (s *RaceScanner) candidatePoints(ctx context.Context, targetID string) []in
 	return out
 }
 
-func (s *RaceScanner) store(targetID, url, param, sev, evidence string, confidence int) {
+func (s *RaceScanner) store(targetID string, ip insertionPoint, sev, evidence string, confidence int) {
 	priority := confidence * 2
 	verdict := CandDetected
 	if confidence >= ConfEvidence {
 		verdict = VerifyVerified
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
-		TargetID: targetID, Type: "race_condition", Severity: sev, URL: url,
-		Method: "POST", Parameter: param, Location: "body", Evidence: evidence,
+		TargetID: targetID, Type: "race_condition", Severity: sev, URL: ip.URL,
+		Method: ip.Method, Parameter: ip.Param, Location: insertionLocation(ip), Evidence: evidence,
 		Source: "race-native", DetectionMethod: "parallel-replay", Confidence: confidence,
 		Priority: priority, Verdict: verdict,
 	})

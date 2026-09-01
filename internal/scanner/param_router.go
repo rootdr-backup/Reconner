@@ -32,6 +32,8 @@ const (
 	ClassIDOR     VulnClass = "idor"
 	ClassSSTI     VulnClass = "ssti"
 	ClassCMDi     VulnClass = "cmdi"
+	ClassNoSQLi   VulnClass = "nosqli"
+	ClassCRLF     VulnClass = "crlf"
 	ClassXSS      VulnClass = "xss"
 )
 
@@ -63,6 +65,11 @@ var classTokens = map[VulnClass]map[string]bool{
 	ClassCMDi: set("cmd", "command", "exec", "execute", "ping", "host", "ip", "query",
 		"jump", "code", "func", "option", "process", "daemon", "run", "shell", "system",
 		"do", "cli", "download", "log"),
+	ClassNoSQLi: set("user", "username", "email", "login", "password", "pass", "account",
+		"id", "uid", "query", "search", "filter", "where", "selector", "match", "lookup",
+		"name", "token", "key", "value", "criteria", "condition", "sort", "role"),
+	ClassCRLF: set("url", "redirect", "next", "return", "location", "header", "host", "domain",
+		"file", "filename", "download", "disposition", "name", "value", "lang", "path", "callback"),
 	ClassXSS: set("q", "query", "search", "keyword", "name", "message", "comment", "text",
 		"content", "title", "description", "input", "term", "redirect", "url", "return",
 		"callback", "lang", "view", "tab", "id", "page"),
