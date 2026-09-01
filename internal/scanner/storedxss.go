@@ -18,7 +18,9 @@ var storedXSSClient = newPooledClient(12*time.Second, false)
 
 // newXSSToken returns a short, unique, URL-safe marker token.
 func newXSSToken(prefix string) string {
-	b := make([]byte, 5)
+	// 80 bits keeps asynchronous OAST/XSS callback tokens unguessable while
+	// remaining short enough for strict URL, header and template contexts.
+	b := make([]byte, 10)
 	_, _ = rand.Read(b)
 	return prefix + hex.EncodeToString(b)
 }

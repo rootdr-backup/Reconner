@@ -38,25 +38,30 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		return // wildcard domains: brute is meaningless, skip
 	}
 
+	haveDNSX := s.exec.IsToolAvailable("dnsx")
 	havePuredns := s.exec.IsToolAvailable("puredns")
 	haveAlterx := s.exec.IsToolAvailable("alterx")
-	if !havePuredns && !haveAlterx {
-		return
-	}
 
-	// Build the candidate set: bruteWords + alterx permutations of known names.
+	// Build an adaptive large candidate set: curated infrastructure/dev-tool names,
+	// environment and numeric mutations, labels learned from this target, optional
+	// operator wordlists, and alterx output. Resolution remains the admission gate.
 	candidates := make(map[string]bool)
+	knownSnapshot := s.admittedSubdomainNames(ctx, targetID, domain)
+	words := s.deepDNSWords(ctx, domain, knownSnapshot)
+	for _, word := range words {
+		name := strings.ToLower(strings.TrimSpace(word))
+		if !strings.HasSuffix(name, "."+domain) {
+			name += "." + domain
+		}
+		if isValidSubdomain(name, domain) {
+			candidates[name] = true
+		}
+	}
+	logFn("info", "subdomain_enum", fmt.Sprintf("Adaptive DNS wordlist: %d candidates (curated + target-derived + custom)", len(candidates)))
 
 	if haveAlterx {
 		logFn("info", "subdomain_enum", "Generating permutations with alterx...")
-		mu.Lock()
-		var known []string
-		for n := range found {
-			if strings.HasSuffix(n, "."+domain) {
-				known = append(known, n)
-			}
-		}
-		mu.Unlock()
+		known := knownSnapshot
 		if len(known) > 0 {
 			var out []string
 			err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(known, "\n")), targetID,
@@ -76,28 +81,8 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		}
 	}
 
-	// puredns brute-forces the built-in wordlist against the domain at scale.
-	if havePuredns {
-		resolved, err := s.purednsBruteforce(ctx, targetID, domain, logFn)
-		if err == nil {
-			for _, n := range resolved {
-				if isValidSubdomain(n, domain) {
-					mu.Lock()
-					isNew := !found[n]
-					found[n] = true
-					mu.Unlock()
-					if isNew {
-						ip := resolveHost(n)
-						if ip != "" && !wildcardIPs[ip] {
-							_ = s.upsertSubdomain(targetID, n, ip)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Resolve the alterx candidates (puredns already resolved its own output).
+	// Resolve the complete candidate graph once. dnsx is preferred because it is
+	// bundled and fast; puredns and the native bounded pool are fallbacks.
 	if len(candidates) == 0 {
 		return
 	}
@@ -112,33 +97,67 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		names = append(names, n)
 	}
 
-	// If puredns is available, use it to resolve the permutation list fast;
-	// otherwise fall back to the built-in resolver worker pool.
-	if havePuredns {
-		resolved := s.purednsResolve(ctx, targetID, names, logFn)
+	if haveDNSX || havePuredns {
+		var resolved []string
+		engine := "puredns"
+		if haveDNSX {
+			engine = "dnsx"
+			resolved = s.dnsxResolve(ctx, targetID, names)
+		} else {
+			resolved = s.purednsResolve(ctx, targetID, names, logFn)
+		}
 		for _, n := range resolved {
 			mu.Lock()
-			isNew := !found[n]
 			found[n] = true
 			mu.Unlock()
-			if isNew {
-				ip := resolveHost(n)
-				if ip != "" && !wildcardIPs[ip] {
-					_ = s.upsertSubdomain(targetID, n, ip)
-				}
+			ip := firstNonWildcardIP(resolveHostIPs(ctx, n), wildcardIPs)
+			if ip != "" {
+				_ = s.upsertSubdomain(targetID, n, ip)
 			}
 		}
-		logFn("info", "subdomain_enum", fmt.Sprintf("puredns resolved %d/%d permutation candidates", len(resolved), len(names)))
+		logFn("info", "subdomain_enum", fmt.Sprintf("%s resolved %d/%d adaptive candidates", engine, len(resolved), len(names)))
 		return
 	}
 
 	s.resolveCandidates(ctx, targetID, names, found, mu, wildcardIPs, logFn)
 }
 
+// dnsxResolve performs only DNS resolution; every returned name is subsequently
+// checked again by Reconner's wildcard-aware admission gate before storage.
+func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	workers := s.cfg.Workers.SubdomainEnumeration
+	if workers <= 0 {
+		workers = 50
+	}
+	if workers > 200 {
+		workers = 200
+	}
+	seen := map[string]bool{}
+	var out []string
+	_ = s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
+		func(line string) {
+			// dnsx plain output is the input hostname. Be defensive around versions
+			// that append record data after whitespace.
+			fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
+			if len(fields) == 0 {
+				return
+			}
+			name := strings.TrimSuffix(fields[0], ".")
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}, "dnsx", "-silent", "-retry", "2", "-t", fmt.Sprint(workers))
+	return out
+}
+
 // purednsBruteforce runs `puredns bruteforce <wordlist> <domain>` with a
 // generated resolvers file, returning the resolved hostnames.
 func (s *SubdomainScanner) purednsBruteforce(ctx context.Context, targetID, domain string, logFn LogFunc) ([]string, error) {
-	wordFile, err := writeTempLines("recon-words-", bruteWords)
+	wordFile, err := writeTempLines("recon-words-", s.deepDNSWords(ctx, domain, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -206,16 +225,16 @@ func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID strin
 				if ctx.Err() != nil {
 					return
 				}
-				ip := resolveHost(name)
-				if ip == "" || wildcardIPs[ip] {
+				ip := firstNonWildcardIP(resolveHostIPs(ctx, name), wildcardIPs)
+				if ip == "" {
 					continue
 				}
 				mu.Lock()
 				isNew := !found[name]
 				found[name] = true
 				mu.Unlock()
+				_ = s.upsertSubdomain(targetID, name, ip)
 				if isNew {
-					_ = s.upsertSubdomain(targetID, name, ip)
 					cmu.Lock()
 					newFound++
 					cmu.Unlock()

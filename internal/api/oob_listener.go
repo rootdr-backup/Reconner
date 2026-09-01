@@ -9,8 +9,10 @@ import (
 )
 
 // oobTokenRe matches an OAST token as it appears in the DN/path of an inbound
-// JNDI/LDAP (or RMI) callback — newXSSToken("rcnoob") = "rcnoob" + 10 hex chars.
-var oobTokenRe = regexp.MustCompile(`rcnoob[0-9a-f]{10}`)
+// JNDI/LDAP (or RMI) callback. New probes use 20 hex characters (80 bits); the
+// 10-character form remains accepted so callbacks planted before an upgrade are
+// not orphaned while a scan is still running.
+var oobTokenRe = regexp.MustCompile(`rcnoob[0-9a-f]{10,20}`)
 
 // StartLog4ShellListener binds a raw TCP listener that catches NON-HTTP
 // out-of-band callbacks — specifically the LDAP/RMI connection a Log4Shell

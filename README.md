@@ -163,8 +163,13 @@ progress in parallel within the configured CPU and memory budget.
 
 Reconner includes:
 
-- passive and active subdomain discovery, resolution and live-host probing;
-- historical URLs, crawling, headless browsing and JavaScript endpoint analysis;
+- passive and adaptive active subdomain discovery with a DNS/CNAME admission
+  gate, wildcard-aware vhost proof and live-host probing—unresolved/wildcard
+  guesses never enter the expensive web pipeline;
+- scope-gated ASN/CIDR discovery (explicit opt-in after program/WHOIS review),
+  historical URLs, crawling and headless browsing;
+- recursive same-site JavaScript dependency analysis with cycle prevention,
+  redirect/content validation, source-map recovery and bounded resource use;
 - parameter discovery across query, path, forms, JSON, XML, GraphQL and OpenAPI;
 - directory, backup/config exposure, takeover and broken-link checks;
 - reflected and DOM XSS with context classification and browser execution proof;
@@ -177,6 +182,13 @@ Reconner includes:
 
 Reconner's XSS pipeline focuses on **reflected XSS and DOM XSS**. It does not
 run stored-XSS injection as part of the general scan pipeline.
+
+Static JavaScript source-to-sink analysis is routing intelligence, not proof. It
+stays internal until Chromium observes a nonce payload execute; only then does a
+DOM-XSS row become a confirmed finding with an `alert(document.domain)` PoC.
+
+The evidence model, public-data prioritization and detector-by-detector upgrade
+plan are documented in the [vulnerability engine roadmap](docs/VULNERABILITY_ENGINE_ROADMAP.md).
 
 ## Network reconnaissance
 
@@ -262,6 +274,7 @@ npm run build
 Useful project documents:
 
 - [Docker deployment and operations](README.Docker.md)
+- [Vulnerability engine roadmap](docs/VULNERABILITY_ENGINE_ROADMAP.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [License](LICENSE)

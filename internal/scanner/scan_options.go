@@ -18,8 +18,8 @@ const ctxSubBrute subBruteKey = "subdomain_brute"
 
 // WithSubdomainBrute toggles the SLOW active phase of subdomain enumeration —
 // wordlist brute-force + permutation generation (activeEnum) and the deep
-// alterx/puredns/massdns pass (deepDNSEnum). Passive sources, resolution, ASN and
-// vhost discovery always run. Operators disable it per scan when they only want a
+// alterx/dnsx/puredns pass (deepDNSEnum). Passive sources, verified resolution and
+// vhost discovery still run; ASN has its own explicit scope toggle. Operators disable it per scan when they only want a
 // fast passive map (it is by far the longest part of enumeration).
 func WithSubdomainBrute(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, ctxSubBrute, enabled)
@@ -32,6 +32,28 @@ func subdomainBruteEnabled(ctx context.Context) bool {
 		return v
 	}
 	return true
+}
+
+type asnDiscoveryKey string
+
+const ctxASNDiscovery asnDiscoveryKey = "asn_discovery"
+
+// WithASNDiscovery controls the ASN/CIDR reverse-DNS sweep independently from
+// ordinary subdomain enumeration. The sweep can touch addresses which are not
+// in a bug-bounty program even when asnmap associates them with the same
+// organisation, so the dashboard exposes this as an explicit scope decision.
+func WithASNDiscovery(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxASNDiscovery, enabled)
+}
+
+// asnDiscoveryEnabled is fail-closed: a missing toggle means no CIDR sweep. This
+// also keeps automated monitor tasks from silently expanding beyond program
+// scope; operators explicitly opt in after verifying the netblocks.
+func asnDiscoveryEnabled(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxASNDiscovery).(bool); ok {
+		return v
+	}
+	return false
 }
 
 // ── Single-endpoint scan mode ────────────────────────────────────────────────

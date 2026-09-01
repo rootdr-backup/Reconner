@@ -72,9 +72,10 @@ func TestRunWorkflowPropagationAndAbort(t *testing.T) {
 	}
 }
 
-// A workflow prerequisite/authorization bypass: user-b completes a step that
-// should be denied (they weren't invited) → flagged + finding.
-func TestRunWorkflowBypassFinding(t *testing.T) {
+// A caller-marked expected-denied workflow step is a review candidate, not proof
+// of a server-side invariant. It must never be promoted or announced solely from
+// that caller-provided expectation.
+func TestRunWorkflowBypassCandidate(t *testing.T) {
 	withLoopbackAllowed(t)
 	var mu sync.Mutex
 	invited := map[string]bool{} // token → invited to project
@@ -108,7 +109,8 @@ func TestRunWorkflowBypassFinding(t *testing.T) {
 		uuid.New().String(), tid, box.Encrypt(string(hb)))
 
 	ids := LoadIdentities(context.Background(), db, tid, box)
-	eng := NewAuthzEngine(db, nil, cfg, logger.New("error"), nil)
+	announced := 0
+	eng := NewAuthzEngine(db, nil, cfg, logger.New("error"), func(string, any) { announced++ })
 	steps := []WorkflowStep{
 		// user-b (never invited) accepts an invitation — expected DENIED.
 		{IdentityLabel: "user-b", Method: "POST", URL: app.URL + "/invitations/INV1/accept", ExpectDenied: true},
@@ -117,9 +119,11 @@ func TestRunWorkflowBypassFinding(t *testing.T) {
 	if res.FlaggedStep != 0 {
 		t.Fatalf("bypass step must be flagged: %+v", res)
 	}
-	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='workflow_authz_bypass'`, tid).Scan(&n)
-	if n == 0 {
-		t.Fatal("a flagged workflow bypass must create a finding")
+	var status string
+	if err := db.QueryRow(`SELECT status FROM vuln_findings WHERE target_id=? AND type='workflow_authz_bypass'`, tid).Scan(&status); err != nil {
+		t.Fatalf("flagged workflow signal must remain reviewable: %v", err)
+	}
+	if status != StatusCandidate || announced != 0 {
+		t.Fatalf("workflow signal status=%q announcements=%d, want candidate/0", status, announced)
 	}
 }

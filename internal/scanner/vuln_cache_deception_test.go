@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/recon-platform/internal/config"
@@ -70,6 +71,7 @@ func TestCacheDeceptionSPACatchAllNoFP(t *testing.T) {
 // .css path, while a bogus path returns something different (404-style). This must
 // still be detected.
 func TestCacheDeceptionRealPositive(t *testing.T) {
+	var cached atomic.Bool
 	vuln := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// bogus/non-existent control path → 404 with different content
 		if strings.Contains(r.URL.Path, "notreal") {
@@ -78,16 +80,27 @@ func TestCacheDeceptionRealPositive(t *testing.T) {
 			w.Write([]byte("<html>404 not found</html>"))
 			return
 		}
-		// the real (sensitive) page, cached under the .css path
+		isDeceptionPath := strings.Contains(r.URL.Path, "rcndeception") && strings.HasSuffix(r.URL.Path, ".css")
+		if r.Header.Get("Cookie") != "session=v3" && !(isDeceptionPath && cached.Load()) {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("login required"))
+			return
+		}
+		if isDeceptionPath && r.Header.Get("Cookie") == "session=v3" {
+			cached.Store(true) // authenticated request seeds the shared cache key
+		}
+		// the real private page, cached under the confusing .css path
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Cache-Control", "public, max-age=600")
-		w.Header().Set("CF-Cache-Status", "HIT")
+		if isDeceptionPath && r.Header.Get("Cookie") == "" && cached.Load() {
+			w.Header().Set("CF-Cache-Status", "HIT")
+		}
 		w.Write([]byte("<html><body>ACCOUNT for bob — balance 1000, token abc123</body></html>"))
 	}))
 	defer vuln.Close()
 
 	s := newCacheDecScanner(t)
-	s.db.Exec(`INSERT INTO targets (id, domain) VALUES ('t2','vuln.example')`)
+	s.db.Exec(`INSERT INTO targets (id, domain, auth_headers) VALUES ('t2','vuln.example','{"Cookie":"session=v3"}')`)
 	s.db.Exec(`INSERT INTO http_services (id, target_id, url, status_code) VALUES ('h3','t2',?,200)`, vuln.URL+"/account")
 
 	if err := s.RunCacheDeception(context.Background(), "t2", func(_, _, _ string) {}); err != nil {
@@ -108,6 +121,11 @@ func TestCacheDeceptionNoRealHitNoFinding(t *testing.T) {
 			w.Write([]byte("nope"))
 			return
 		}
+		if r.Header.Get("Cookie") != "session=v3" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("login required"))
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Cache-Control", "public, max-age=600") // directive only, NO hit header, no Age
 		w.Write([]byte("<html><body>a unique page</body></html>"))
@@ -115,7 +133,7 @@ func TestCacheDeceptionNoRealHitNoFinding(t *testing.T) {
 	defer site.Close()
 
 	s := newCacheDecScanner(t)
-	s.db.Exec(`INSERT INTO targets (id, domain) VALUES ('t3','x.example')`)
+	s.db.Exec(`INSERT INTO targets (id, domain, auth_headers) VALUES ('t3','x.example','{"Cookie":"session=v3"}')`)
 	s.db.Exec(`INSERT INTO http_services (id, target_id, url, status_code) VALUES ('h4','t3',?,200)`, site.URL+"/account")
 
 	if err := s.RunCacheDeception(context.Background(), "t3", func(_, _, _ string) {}); err != nil {

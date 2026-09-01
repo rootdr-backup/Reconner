@@ -35,43 +35,64 @@ var sstiHTTPClient = &http.Client{
 	},
 }
 
-// Each probe is a template expression for a different engine; when it evaluates
-// server-side, the marker becomes rcnMARKER + result. Using 7*7=49 wrapped in a
-// unique marker gives a near-zero false-positive signal.
-var sstiProbes = []struct {
-	payload string // injected value (contains the marker)
-	expect  string // string that appears only if the template evaluated
+type sstiProbe struct {
+	payload string
+	expect  string
 	engine  string
-}{
-	{"rcnA{{7*7}}rcnB", "rcnA49rcnB", "Jinja2/Twig/Nunjucks ({{7*7}})"},
-	{"rcnA${7*7}rcnB", "rcnA49rcnB", "JSP EL / Spring / Mako ${7*7}"},
-	{"rcnA#{7*7}rcnB", "rcnA49rcnB", "Ruby/Thymeleaf #{7*7}"},
-	{"rcnA<%=7*7%>rcnB", "rcnA49rcnB", "ERB/ASP <%=7*7%>"},
-	{"rcnA{{7*'7'}}rcnB", "rcnA7777777rcnB", "Jinja2 string-multiply"},
-	{"rcnA${{7*7}}rcnB", "rcnA49rcnB", "Freemarker ${{7*7}}"},
-	{"rcnA@(7*7)rcnB", "rcnA49rcnB", "Razor @(7*7)"},
-	// Smarty: bare {math} evaluates inside a template. The unique rcnA…rcnB frame
-	// keeps FP at zero (a literal "49" elsewhere on the page can't satisfy it).
-	{"rcnA{7*7}rcnB", "rcnA49rcnB", "Smarty {7*7}"},
-	// Velocity: #set assigns, then the reference renders — VTL has no {{ }} form, so
-	// it's entirely missed by the brace probes above (real gap for Java stacks).
-	{"#set($rcnC=7*7)rcnA${rcnC}rcnB", "rcnA49rcnB", "Velocity #set($x=7*7)"},
-	// Twig/Jinja concat (~): catches an engine where the arithmetic '*' is filtered
-	// but the tilde concat operator still evaluates — a common WAF-bypass for SSTI.
-	{"rcnA{{'rc'~'n49z'}}rcnB", "rcnArcn49zrcnB", "Twig/Jinja concat (~)"},
-	// Pebble/Jinjava (Java Jinja dialects) share {{ }}; the string-multiply form
-	// distinguishes a true evaluator from a page that merely echoes {{7*7}}.
-	{"rcnA{{'7'*7}}rcnB", "rcnA7777777rcnB", "Jinja/Pebble string*int"},
+}
+
+// sstiProbeSet builds collision-resistant arithmetic probes for the major
+// template syntaxes. Two independently-tagged operand pairs are used during
+// verification (7*7 and 8*8), so a static page containing "49", a reflected
+// payload, a cache hit, or an intermediary rewrite cannot become a finding.
+func sstiProbeSet(token string, a, b int) []sstiProbe {
+	result := a * b
+	end := "z"
+	w := func(expr, engine string) sstiProbe {
+		return sstiProbe{payload: token + expr + end, expect: fmt.Sprintf("%s%dz", token, result), engine: engine}
+	}
+	return []sstiProbe{
+		w(fmt.Sprintf("{{%d*%d}}", a, b), "Jinja2/Twig/Nunjucks/Pebble"),
+		w(fmt.Sprintf("${%d*%d}", a, b), "JSP EL / Spring EL / Mako / FreeMarker"),
+		w(fmt.Sprintf("#{%d*%d}", a, b), "Thymeleaf / Ruby expression"),
+		w(fmt.Sprintf("<%%=%d*%d%%>", a, b), "ERB / ASP"),
+		w(fmt.Sprintf("@(%d*%d)", a, b), "Razor"),
+		w(fmt.Sprintf("{%d*%d}", a, b), "Smarty expression"),
+		{
+			payload: fmt.Sprintf("#set($rcn=%d*%d)%s${rcn}%s", a, b, token, end),
+			expect:  fmt.Sprintf("%s%dz", token, result),
+			engine:  "Apache Velocity",
+		},
+		// Code-context variants close a template expression before rendering our
+		// arithmetic. These cover inputs embedded as a variable/expression name,
+		// which plaintext-only {{7*7}} scanning systematically misses.
+		{
+			payload: fmt.Sprintf("}}%s{{%d*%d}}%s{{", token, a, b, end),
+			expect:  fmt.Sprintf("%s%dz", token, result),
+			engine:  "Jinja/Twig code context",
+		},
+		{
+			payload: fmt.Sprintf("}%s${%d*%d}%s${", token, a, b, end),
+			expect:  fmt.Sprintf("%s%dz", token, result),
+			engine:  "EL/FreeMarker code context",
+		},
+	}
 }
 
 const sstiMaxParams = 150
 
-// Run injects template expressions into parameters and confirms SSTI when the
-// server evaluates the arithmetic (marker + 49). Bounded for speed.
+// Run injects template expressions into request insertion points and confirms
+// SSTI only after two independently-tagged arithmetic evaluations.
 func (s *SSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "ssti", "Starting Server-Side Template Injection checks...")
 
-	points := loadInsertionPoints(ctx, s.db, targetID, sstiMaxParams)
+	limit := sstiMaxParams
+	if s.cfg != nil {
+		limit = s.cfg.URLLimit()
+	}
+	// Template injection can hide behind non-obvious parameter names. Route known
+	// renderer/content fields first, then keep a bounded unfamiliar-name fallback.
+	points := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassSSTI, limit, 96)
 	if len(points) == 0 {
 		return nil
 	}
@@ -92,33 +113,65 @@ func (s *SSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			for _, probe := range sstiProbes {
-				body, _ := sendInjected(ctx, sstiHTTPClient, ip, probe.payload, auth)
-				if body == "" {
+			controlToken := newXSSToken("rcnsstic")
+			controlBody, controlStatus, _ := sendInjectedFull(ctx, sstiHTTPClient, ip, controlToken+"-plain", auth)
+			if looksLikeBlockPage(controlStatus, controlBody) {
+				return
+			}
+			firstToken := newXSSToken("rcnssti")
+			secondToken := newXSSToken("rcnssti")
+			first := sstiProbeSet(firstToken, 7, 7)
+			second := sstiProbeSet(secondToken, 8, 8)
+			for i, probe := range first {
+				body, status, _ := sendInjectedFull(ctx, sstiHTTPClient, ip, probe.payload, auth)
+				if body == "" || looksLikeBlockPage(status, body) || !strings.Contains(body, probe.expect) ||
+					strings.Contains(controlBody, probe.expect) {
 					continue
 				}
-				if strings.Contains(body, probe.expect) {
-					ev := fmt.Sprintf("Template expression evaluated (%s) via %s: marker→%s", probe.engine, ip.Method, probe.expect)
-					s.store(targetID, "ssti", "critical", ip.URL, ip.Param, probe.payload, ev)
-					found.Add(1)
-					logFn("warn", "ssti", fmt.Sprintf("SSTI CONFIRMED (%s): %s param=%s [%s]", probe.engine, ip.URL, ip.Param, ip.Method))
-					s.notify(targetID, ip.URL, ip.Param)
-					return
+				confirm := second[i]
+				body2, status2, _ := sendInjectedFull(ctx, sstiHTTPClient, ip, confirm.payload, auth)
+				if body2 == "" || looksLikeBlockPage(status2, body2) || !strings.Contains(body2, confirm.expect) ||
+					strings.Contains(body2, confirm.payload) {
+					continue
 				}
+				ev := fmt.Sprintf("Server-side template evaluation reproduced with independent arithmetic (%s): 7*7 and 8*8 produced uniquely tagged 49/64 markers [HTTP %d/%d, %s %s]",
+					probe.engine, status, status2, strings.ToUpper(ip.Method), insertionLocation(ip))
+				s.store(targetID, ip, probe.payload, probe.engine, ev)
+				found.Add(1)
+				logFn("warn", "ssti", fmt.Sprintf("SSTI CONFIRMED (%s): %s param=%s [%s/%s]",
+					probe.engine, ip.URL, ip.Param, ip.Method, insertionLocation(ip)))
+				s.notify(targetID, ip.URL, ip.Param)
+				return
 			}
 		}(ip)
 	}
 	wg.Wait()
 
+	// Blind SSTI belongs to the SSTI objective. A standalone SSTI scan now plants
+	// token-correlated callbacks instead of depending on the unrelated OAST module.
+	s.plantBlindSSTI(ctx, targetID, points, auth, logFn)
+
 	logFn("info", "ssti", fmt.Sprintf("SSTI check done. Found %d.", found.Load()))
 	return nil
 }
 
-func (s *SSTIScanner) store(targetID, vulnType, severity, rawURL, param, payload, evidence string) {
+func (s *SSTIScanner) plantBlindSSTI(ctx context.Context, targetID string, points []insertionPoint, auth map[string]string, logFn LogFunc) {
+	o, ok := newOOBCapability(s.cfg)
+	if !ok || len(points) == 0 {
+		return
+	}
+	n := o.plantClass(ctx, s.db, targetID, points, auth, "ssti", nil,
+		func(_ insertionPoint, cb string) []string { return sstiOOBPayloads(cb) })
+	if n > 0 {
+		logFn("info", "ssti", fmt.Sprintf("Planted %d blind-SSTI OOB probe(s); callbacks are correlated to the exact insertion point.", n))
+	}
+}
+
+func (s *SSTIScanner) store(targetID string, ip insertionPoint, payload, subtype, evidence string) {
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
-		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
-		Parameter: param, Location: "query", Payload: payload, Evidence: evidence,
-		Source: "ssti-native", DetectionMethod: "evaluated-marker", Confidence: 96,
+		TargetID: targetID, Type: "ssti", Subtype: subtype, Severity: "critical", URL: ip.URL, Method: ip.Method,
+		Parameter: ip.Param, Location: insertionLocation(ip), Payload: payload, Evidence: evidence,
+		Source: "ssti-native", DetectionMethod: "dual-evaluated-marker-replay", Confidence: 99,
 		Verdict: VerifyVerified,
 	})
 }

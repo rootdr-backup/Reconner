@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	logFn("info", "subdomain_enum", fmt.Sprintf("Starting subdomain enumeration for %s", domain))
 
 	found := make(map[string]bool)
+	var legacyCandidates []string
 	var mu sync.Mutex
 
 	// Snapshot the subdomain count BEFORE this run so we can tell whether the run
@@ -45,23 +47,35 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// target (startSubCount > 0) raises a "new subdomain" notification — the first
 	// enumeration is all-new and would just spam the bell.
 	startSubCount := s.countSubdomains(targetID)
+	// Revalidate previously stored DNS names as well. Older Reconner releases
+	// eagerly inserted every passive-source string before DNS proof, which could
+	// leave tens of thousands of dead/wildcard names feeding later modules. A scan
+	// on this release repairs that historical data in place.
+	if rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
+		WHERE target_id=? AND COALESCE(source,'dns') NOT IN ('seed','vhost')`, targetID); err == nil {
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil && isValidSubdomain(name, domain) {
+				legacyCandidates = append(legacyCandidates, name)
+			}
+		}
+		rows.Close()
+	}
 
 	// Detect wildcard DNS up front so we can flag fake passive subdomains.
-	wildcardIPs := detectWildcard(domain)
-	if len(wildcardIPs) > 0 {
+	wildcardIPs, wildcardCNAMEs := detectWildcard(domain)
+	if len(wildcardIPs) > 0 || len(wildcardCNAMEs) > 0 {
 		logFn("warn", "subdomain_enum", fmt.Sprintf("Wildcard DNS detected (%d IPs) — passive results will be verified by resolution", len(wildcardIPs)))
 	}
 
-	// storeNew now only records the name (no synchronous DNS lookup). The
-	// expensive resolution happens later in a parallel worker pool.
+	// Discovery and admission are deliberately separate. Passive tools are allowed
+	// to be noisy, but their strings remain in-memory candidates until the batched
+	// DNS gate proves A/AAAA/CNAME evidence. This is the choke point that prevents
+	// junk names from entering HTTP/JS/vulnerability pipelines.
 	storeNew := func(sub string) {
 		mu.Lock()
-		isNew := !found[sub]
 		found[sub] = true
 		mu.Unlock()
-		if isNew {
-			_ = s.upsertSubdomain(targetID, sub, "")
-		}
 	}
 	// countFound reads the map size under the lock — the concurrent passive-source
 	// goroutines below must NOT read len(found) directly or it's a data race
@@ -125,7 +139,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// even without provider API keys.
 	if s.exec.IsToolAvailable("subfinder") {
 		logFn("info", "subdomain_enum", "Running subfinder...")
-		before := len(found)
+		before := countFound()
 		tctx, tcancel := context.WithTimeout(ctx, 4*time.Minute)
 		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
 			line = strings.ToLower(strings.TrimSpace(line))
@@ -145,9 +159,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			return ctx.Err()
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("subfinder hit its 4m budget — %d found so far, likely PARTIAL for a large domain", len(found)-before))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("subfinder hit its 4m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("subfinder found %d subdomains", len(found)-before))
+			logFn("info", "subdomain_enum", fmt.Sprintf("subfinder found %d subdomains", countFound()-before))
 		}
 	}
 	// amass removed by design: it's the slowest passive source and added ~0 new
@@ -157,7 +171,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// assetfinder
 	if s.exec.IsToolAvailable("assetfinder") {
 		logFn("info", "subdomain_enum", "Running assetfinder...")
-		before := len(found)
+		before := countFound()
 		tctx, tcancel := context.WithTimeout(ctx, 2*time.Minute)
 		result, err := s.exec.Run(tctx, "assetfinder", "--subs-only", domain)
 		tcancel()
@@ -171,16 +185,16 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			}
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("assetfinder hit its 2m budget — %d found so far, likely PARTIAL for a large domain", len(found)-before))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("assetfinder hit its 2m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("assetfinder found %d new subdomains", len(found)-before))
+			logFn("info", "subdomain_enum", fmt.Sprintf("assetfinder found %d new subdomains", countFound()-before))
 		}
 	}
 
 	// findomain
 	if s.exec.IsToolAvailable("findomain") {
 		logFn("info", "subdomain_enum", "Running findomain...")
-		before := len(found)
+		before := countFound()
 		tctx, tcancel := context.WithTimeout(ctx, 2*time.Minute)
 		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
 			line = strings.ToLower(strings.TrimSpace(line))
@@ -193,9 +207,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			s.logger.Debug("findomain error", "error", err)
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("findomain hit its 2m budget — %d found so far, likely PARTIAL for a large domain", len(found)-before))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("findomain hit its 2m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("findomain found %d new subdomains", len(found)-before))
+			logFn("info", "subdomain_enum", fmt.Sprintf("findomain found %d new subdomains", countFound()-before))
 		}
 	}
 
@@ -203,7 +217,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// no-op when not installed. Parses hostnames out of its plain output.
 	if s.exec.IsToolAvailable("scilla") {
 		logFn("info", "subdomain_enum", "Running scilla...")
-		before := len(found)
+		before := countFound()
 		tctx, tcancel := context.WithTimeout(ctx, 3*time.Minute)
 		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
 			line = strings.ToLower(strings.TrimSpace(line))
@@ -223,9 +237,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			s.logger.Debug("scilla error", "error", err)
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("scilla hit its 3m budget — %d found so far, likely PARTIAL for a large domain", len(found)-before))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("scilla hit its 3m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("scilla found %d new subdomains", len(found)-before))
+			logFn("info", "subdomain_enum", fmt.Sprintf("scilla found %d new subdomains", countFound()-before))
 		}
 	}
 
@@ -244,9 +258,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			}
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("waybackurls hit its 3m budget — PARTIAL results, total so far: %d", len(found)))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("waybackurls hit its 3m budget — PARTIAL results, total so far: %d", countFound()))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("waybackurls added, total: %d", len(found)))
+			logFn("info", "subdomain_enum", fmt.Sprintf("waybackurls added, total: %d", countFound()))
 		}
 	}
 
@@ -265,9 +279,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 			}
 		}
 		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("gau hit its 3m budget — PARTIAL results, total so far: %d", len(found)))
+			logFn("warn", "subdomain_enum", fmt.Sprintf("gau hit its 3m budget — PARTIAL results, total so far: %d", countFound()))
 		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("gau added, total: %d", len(found)))
+			logFn("info", "subdomain_enum", fmt.Sprintf("gau added, total: %d", countFound()))
 		}
 	}
 
@@ -293,20 +307,39 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 		logFn("info", "subdomain_enum", "Permutation brute-force disabled for this scan — passive discovery + resolution only.")
 	}
 
-	// ASN / IP-range discovery: find the org's netblocks and reverse-resolve
-	// hosts that may have no known subdomain (graceful if asnmap absent).
-	s.asnDiscovery(ctx, targetID, domain, found, &mu, logFn)
+	// ASN ownership does not imply bug-bounty scope. Run the reverse sweep only
+	// when the operator explicitly left it enabled for this scan.
+	if asnDiscoveryEnabled(ctx) {
+		s.asnDiscovery(ctx, targetID, domain, found, &mu, logFn)
+	} else {
+		logFn("info", "subdomain_enum", "ASN/CIDR discovery skipped — enable it only after program-scope/WHOIS verification.")
+	}
+	// Historical eager rows are revalidated, but deliberately merged only after
+	// permutation generation so 20k old junk labels cannot explode into hundreds
+	// of thousands of new mutations.
+	mu.Lock()
+	for _, name := range legacyCandidates {
+		found[name] = true
+	}
+	mu.Unlock()
 
-	// Parallel DNS resolution pass (worker pool sized by config).
-	s.resolveAll(ctx, targetID, found, wildcardIPs, logFn)
+	// Parallel admission pass. It returns candidates that had neither a genuine
+	// A/AAAA answer nor an explicit CNAME; wildcard-only answers remain eligible
+	// for vhost proof but are not assets yet.
+	rejected := s.resolveAll(ctx, targetID, found, &mu, wildcardIPs, wildcardCNAMEs, logFn)
 
 	// Virtual-host scan: probe candidate hostnames (that do NOT resolve in DNS)
 	// against the IPs we already know, via the Host header, and record any that
 	// the server actually serves — internal/forgotten vhosts DNS enumeration
 	// can't see. Stored with source='vhost' so the UI can flag them.
-	s.vhostScan(ctx, targetID, domain, found, &mu, logFn)
+	s.vhostScan(ctx, targetID, domain, found, &mu, wildcardIPs, logFn)
 
-	logFn("info", "subdomain_enum", fmt.Sprintf("Subdomain enumeration complete. %d unique subdomains stored.", len(found)))
+	// Vhost verification had the final chance to promote wildcard/unresolved names.
+	// Remove only old eager-DNS rows which still lack evidence; explicit seeds,
+	// CNAME records and browser/server-proven vhosts are preserved.
+	s.pruneRejectedSubdomains(ctx, targetID, rejected)
+
+	logFn("info", "subdomain_enum", fmt.Sprintf("Subdomain enumeration complete. %d verified assets stored from %d discovered candidates.", s.countSubdomains(targetID), countFound()))
 
 	// Notify on genuinely new subdomains (re-scan only — see startSubCount above).
 	if startSubCount > 0 {
@@ -337,16 +370,6 @@ var vhostWordlist = []string{
 	"sso", "login", "monitor", "status", "metrics", "db", "phpmyadmin", "adminer",
 }
 
-// vhostClient does NOT follow redirects and skips TLS verification (we hit hosts
-// by IP, so the cert name won't match — Host-header routing is app-layer anyway).
-var vhostClient = &http.Client{
-	Timeout:   7 * time.Second,
-	Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, MaxIdleConnsPerHost: 4},
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
-
 // vhostBaselineSamples is how many DISTINCT bogus hosts we probe per IP to
 // characterise its default response. One sample cannot tell a stable default
 // apart from a catch-all whose length merely fluctuates — the exact flaw that
@@ -373,6 +396,16 @@ type vhostMatch struct {
 	probe vhostProbe
 }
 
+var vhostPlainClient = &http.Client{
+	Timeout: 7 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     30 * time.Second,
+	},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 // probeVhost fetches scheme://ip/ with an explicit Host header. It returns both
 // the raw body length and a NORMALISED length: the body with every occurrence of
 // the requested hostname removed. A server that echoes the Host into its body
@@ -382,13 +415,54 @@ type vhostMatch struct {
 func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool) {
 	rctx, cancel := context.WithTimeout(ctx, 7*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, "GET", scheme+"://"+ip+"/", nil)
+	if scheme == "http" {
+		urlHost := ip
+		if net.ParseIP(ip) != nil && strings.Contains(ip, ":") {
+			urlHost = "[" + ip + "]"
+		}
+		req, err := http.NewRequestWithContext(rctx, "GET", "http://"+urlHost+"/", nil)
+		if err != nil {
+			return vhostProbe{}, false
+		}
+		req.Host = host
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Reconner/1.0)")
+		resp, err := vhostPlainClient.Do(req)
+		if err != nil {
+			return vhostProbe{}, false
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		norm := strings.ReplaceAll(strings.ToLower(string(b)), strings.ToLower(host), "")
+		return vhostProbe{status: resp.StatusCode, length: len(b), normLen: len(norm)}, true
+	}
+	targetAddr := ip
+	if _, _, err := net.SplitHostPort(ip); err != nil {
+		port := "80"
+		if scheme == "https" {
+			port = "443"
+		}
+		targetAddr = net.JoinHostPort(ip, port)
+	}
+	dialer := &net.Dialer{Timeout: 6 * time.Second}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(dialCtx, network, targetAddr)
+		},
+	}
+	client := &http.Client{Timeout: 7 * time.Second, Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer transport.CloseIdleConnections()
+	// Put the candidate in the URL as well as Request.Host. The custom dialer
+	// still connects to the known IP, while TLS now sends candidate-host SNI —
+	// essential for HTTPS virtual hosts that reject an IP-valued SNI handshake.
+	req, err := http.NewRequestWithContext(rctx, "GET", scheme+"://"+host+"/", nil)
 	if err != nil {
 		return vhostProbe{}, false
 	}
 	req.Host = host // routes the virtual host
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Reconner/1.0)")
-	resp, err := vhostClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return vhostProbe{}, false
 	}
@@ -403,13 +477,15 @@ func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool)
 // (a builtin wordlist under the target domain, plus already-found names) that do
 // NOT resolve in DNS. A candidate whose response differs meaningfully from the
 // baseline is a real vhost and is stored with source='vhost'.
-func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, logFn LogFunc) {
+func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
 	if ctx.Err() != nil {
 		return
 	}
 	// Distinct known IPs (cap to keep the pass bounded).
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT ip FROM subdomains WHERE target_id=? AND ip!='' LIMIT 40`, targetID)
+		`SELECT DISTINCT ip FROM subdomains
+		 WHERE target_id=? AND ip!='' AND (subdomain=? OR subdomain LIKE ?)
+		 LIMIT 40`, targetID, domain, "%."+domain)
 	if err != nil {
 		return
 	}
@@ -421,6 +497,18 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 		}
 	}
 	rows.Close()
+	// Wildcard DNS IPs may not belong to any admitted subdomain yet; they are
+	// nevertheless exactly where Host-header discovery is most valuable.
+	ipSeen := map[string]bool{}
+	for _, ip := range ips {
+		ipSeen[ip] = true
+	}
+	for ip := range wildcardIPs {
+		if !ipSeen[ip] {
+			ips = append(ips, ip)
+			ipSeen[ip] = true
+		}
+	}
 	if len(ips) == 0 {
 		return
 	}
@@ -439,27 +527,43 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	for _, p := range vhostWordlist {
 		add(p + "." + domain)
 	}
+	for _, p := range devToolWords {
+		add(p + "." + domain)
+	}
+	if len(wildcardIPs) > 0 {
+		// DNS brute-force is meaningless on a wildcard zone, but the same adaptive
+		// names are valuable Host-header candidates. Feed a bounded slice into the
+		// differential vhost verifier instead of accepting their wildcard DNS answer.
+		words := s.deepDNSWords(ctx, domain, nil)
+		if len(words) > 650 {
+			words = words[:650]
+		}
+		for _, p := range words {
+			add(p + "." + domain)
+		}
+	}
 	mu.Lock()
+	known := make([]string, 0, len(found))
 	for n := range found {
-		add(n)
+		known = append(known, n)
 	}
 	mu.Unlock()
-	if len(candidates) > 200 {
-		logFn("warn", "vhost", fmt.Sprintf("vhost candidate cap hit: %d found, scanning only the first 200 — a target with a large already-discovered subdomain set may miss some vhost matches", len(candidates)))
-		candidates = candidates[:200]
+	// Map iteration order used to make the 200-name cap random. Stable ordering
+	// keeps curated tool/dev words first and makes large-target runs reproducible.
+	sort.Strings(known)
+	for _, n := range known {
+		add(n)
+	}
+	const vhostCandidateCap = 800
+	if len(candidates) > vhostCandidateCap {
+		logFn("warn", "vhost", fmt.Sprintf("vhost candidate cap hit: %d candidates; prioritising the curated/tool names and first %d stable candidates", len(candidates), vhostCandidateCap))
+		candidates = candidates[:vhostCandidateCap]
 	}
 
-	// vhost value is names DNS can't see — resolve once (IP-independent) and probe
-	// only the non-resolving candidates.
-	var probeHosts []string
-	for _, host := range candidates {
-		if ctx.Err() != nil {
-			break
-		}
-		if resolveHost(host) == "" {
-			probeHosts = append(probeHosts, host)
-		}
-	}
+	// Probe names DNS cannot distinguish: NXDOMAIN/no-address candidates and names
+	// whose only address is the wildcard answer. Ordinary independently-resolving
+	// hosts are already admitted and do not need expensive Host-header probing.
+	probeHosts := classifyVhostCandidates(ctx, candidates, wildcardIPs)
 
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan: %d IP(s) × %d candidate host(s)...", len(ips), len(probeHosts)))
 
@@ -542,8 +646,16 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 				if !ok || !vhostDistinctBand(baseStatus, minNorm, maxNorm, margin, p) {
 					return
 				}
+				// A real routing decision is reproducible. Re-probe before admitting the
+				// asset so a transient 5xx, rotating error page or WAF challenge cannot
+				// turn one noisy response into a vhost and trigger the whole pipeline.
+				confirm, ok := probeVhost(ctx, scheme, ip, host)
+				if !ok || !vhostDistinctBand(baseStatus, minNorm, maxNorm, margin, confirm) ||
+					confirm.status/100 != p.status/100 || absInt(confirm.normLen-p.normLen) > margin {
+					return
+				}
 				mmu.Lock()
-				matches = append(matches, vhostMatch{host: host, probe: p})
+				matches = append(matches, vhostMatch{host: host, probe: confirm})
 				mmu.Unlock()
 			}(host)
 		}
@@ -577,6 +689,53 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan done. %d vhost(s) discovered.", discovered))
 }
 
+func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardIPs map[string]bool) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	workers := 32
+	if len(candidates) < workers {
+		workers = len(candidates)
+	}
+	jobs := make(chan string)
+	hits := make(chan string, len(candidates))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for host := range jobs {
+				ips := resolveHostIPs(ctx, host)
+				if len(ips) == 0 || overlapsWildcardIPs(ips, wildcardIPs) {
+					hits <- host
+				}
+			}
+		}()
+	}
+	for _, host := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		jobs <- host
+	}
+	close(jobs)
+	wg.Wait()
+	close(hits)
+	var out []string
+	for host := range hits {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // vhostDistinctBand decides whether a candidate response is a real, different
 // virtual host vs the IP's default-response BAND [minNorm, maxNorm]. A different
 // status class, or a host-neutralised length outside the band by more than the
@@ -601,7 +760,9 @@ func (s *SubdomainScanner) upsertVhost(targetID, subdomain, ip string) bool {
 	res, err := s.db.Exec(`
 		INSERT INTO subdomains (id, target_id, subdomain, ip, source, last_seen)
 		VALUES (?, ?, ?, ?, 'vhost', CURRENT_TIMESTAMP)
-		ON CONFLICT(target_id, subdomain) DO NOTHING`,
+		ON CONFLICT(target_id, subdomain) DO UPDATE SET
+			ip=excluded.ip, source='vhost', last_seen=CURRENT_TIMESTAMP
+		WHERE COALESCE(subdomains.source,'dns') NOT IN ('seed','vhost')`,
 		id, targetID, subdomain, ip)
 	if err != nil {
 		return false
@@ -620,10 +781,16 @@ func (s *SubdomainScanner) asnDiscovery(ctx context.Context, targetID, domain st
 	logFn("info", "subdomain_enum", "Discovering ASN / IP ranges via asnmap...")
 
 	var cidrs []string
+	cidrSeen := map[string]bool{}
 	err := s.exec.RunWithCallback(ctx, targetID, func(line string) {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "/") {
-			cidrs = append(cidrs, line)
+		for _, field := range strings.FieldsFunc(line, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == ',' || r == '[' || r == ']' || r == '"'
+		}) {
+			field = strings.TrimSpace(field)
+			if _, _, parseErr := net.ParseCIDR(field); parseErr == nil && !cidrSeen[field] && len(cidrs) < 64 {
+				cidrSeen[field] = true
+				cidrs = append(cidrs, field)
+			}
 		}
 	}, "asnmap", "-d", domain, "-silent")
 	if err != nil && ctx.Err() != nil {
@@ -665,7 +832,7 @@ func (s *SubdomainScanner) asnDiscovery(ctx context.Context, targetID, domain st
 				if ctx.Err() != nil {
 					return
 				}
-				rc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				rc, cancel := context.WithTimeout(ctx, 3*time.Second)
 				names, err := net.DefaultResolver.LookupAddr(rc, ipStr)
 				cancel()
 				if err != nil {
@@ -680,8 +847,8 @@ func (s *SubdomainScanner) asnDiscovery(ctx context.Context, targetID, domain st
 					isNew := !found[name]
 					found[name] = true
 					mu.Unlock()
+					_ = s.upsertSubdomain(targetID, name, ipStr)
 					if isNew {
-						_ = s.upsertSubdomain(targetID, name, ipStr)
 						cmu.Lock()
 						newFound++
 						cmu.Unlock()
@@ -749,13 +916,10 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 		candidates[w+"."+domain] = true
 	}
 
-	// Permutations from the labels of already-found subdomains.
-	mu.Lock()
-	existing := make([]string, 0, len(found))
-	for n := range found {
-		existing = append(existing, n)
-	}
-	mu.Unlock()
+	// Permute only already-admitted assets. Passive candidate strings have not
+	// passed DNS proof yet and using a 20k junk feed as mutation seeds causes an
+	// avoidable combinatorial explosion.
+	existing := s.admittedSubdomainNames(ctx, targetID, domain)
 
 	for _, name := range existing {
 		if !strings.HasSuffix(name, "."+domain) {
@@ -804,16 +968,16 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 				if ctx.Err() != nil {
 					return
 				}
-				ip := resolveHost(name)
-				if ip == "" || wildcardIPs[ip] {
+				ip := firstNonWildcardIP(resolveHostIPs(ctx, name), wildcardIPs)
+				if ip == "" {
 					continue
 				}
 				mu.Lock()
 				isNew := !found[name]
 				found[name] = true
 				mu.Unlock()
+				_ = s.upsertSubdomain(targetID, name, ip)
 				if isNew {
-					_ = s.upsertSubdomain(targetID, name, ip)
 					cmu.Lock()
 					newFound++
 					cmu.Unlock()
@@ -830,24 +994,47 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 	logFn("info", "subdomain_enum", fmt.Sprintf("Active enum: tested %d candidates, found %d new subdomains", len(names), newFound))
 }
 
+func (s *SubdomainScanner) admittedSubdomainNames(ctx context.Context, targetID, domain string) []string {
+	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
+		WHERE target_id=? AND (COALESCE(ip,'')!='' OR COALESCE(source,'dns') IN ('seed','vhost'))
+		ORDER BY subdomain`, targetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && isValidSubdomain(name, domain) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // resolveAll resolves every discovered subdomain concurrently and updates its
 // IP. Names that resolve to a wildcard IP are kept but logged so HTTP probing
 // can later dedupe them by content.
-func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, found map[string]bool, wildcardIPs map[string]bool, logFn LogFunc) {
+func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, found map[string]bool, mu *sync.Mutex, wildcardIPs, wildcardCNAMEs map[string]bool, logFn LogFunc) map[string]bool {
 	workers := s.cfg.Workers.SubdomainEnumeration
 	if workers <= 0 {
 		workers = 20
 	}
 
+	mu.Lock()
 	names := make([]string, 0, len(found))
 	for n := range found {
 		names = append(names, n)
 	}
+	mu.Unlock()
+	sort.Strings(names)
 
 	jobs := make(chan string, len(names))
 	var wg sync.WaitGroup
-	var resolved, wildcardHits int
+	var resolved, cnameOnly, wildcardHits, unresolved int
 	var cmu sync.Mutex
+	rejected := make(map[string]bool)
+	cnameCandidates, cnamePrefilter := s.dnsxCNAMECandidates(ctx, targetID, names)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -857,18 +1044,39 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 				if ctx.Err() != nil {
 					return
 				}
-				ip := resolveHost(name)
+				ips := resolveHostIPs(ctx, name)
+				ip := firstNonWildcardIP(ips, wildcardIPs)
 				if ip == "" {
+					if len(ips) > 0 && overlapsWildcardIPs(ips, wildcardIPs) {
+						cmu.Lock()
+						rejected[name] = true
+						wildcardHits++
+						cmu.Unlock()
+						continue
+					}
+					// A dangling but explicit CNAME is a real DNS asset and must remain
+					// available to takeover checks, but it is not sent to the web pipeline.
+					cname := ""
+					if !cnamePrefilter || cnameCandidates[name] {
+						cname = lookupExplicitCNAME(ctx, name)
+					}
+					if cname != "" && !wildcardCNAMEs[cname] {
+						_ = s.upsertSubdomainSource(targetID, name, "", "dns-cname")
+						cmu.Lock()
+						cnameOnly++
+						cmu.Unlock()
+						continue
+					}
+					cmu.Lock()
+					rejected[name] = true
+					unresolved++
+					cmu.Unlock()
 					continue
 				}
-				isWildcard := wildcardIPs[ip]
 				cmu.Lock()
 				resolved++
-				if isWildcard {
-					wildcardHits++
-				}
 				cmu.Unlock()
-				_ = s.upsertSubdomain(targetID, name, ip)
+				_ = s.upsertSubdomainSource(targetID, name, ip, "dns")
 				if s.broadcast != nil {
 					s.broadcast("new_subdomain", map[string]any{
 						"target_id": targetID,
@@ -886,42 +1094,195 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	close(jobs)
 	wg.Wait()
 
-	logFn("info", "subdomain_enum", fmt.Sprintf("Resolved %d/%d subdomains (%d wildcard-matched)", resolved, len(names), wildcardHits))
+	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d explicit CNAME, %d wildcard-only, %d unresolved (from %d candidates)", resolved, cnameOnly, wildcardHits, unresolved, len(names)))
+	return rejected
+}
+
+func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID string, names []string) (map[string]bool, bool) {
+	if s.exec == nil || len(names) == 0 || !s.exec.IsToolAvailable("dnsx") {
+		return nil, false
+	}
+	out := map[string]bool{}
+	err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
+		func(line string) {
+			fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
+			if len(fields) > 0 {
+				out[strings.TrimSuffix(fields[0], ".")] = true
+			}
+		}, "dnsx", "-silent", "-cname", "-retry", "1")
+	if err != nil && ctx.Err() == nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // detectWildcard probes a few random hostnames; if they resolve, the shared
 // IPs are wildcard answers we should treat with suspicion.
-func detectWildcard(domain string) map[string]bool {
+func detectWildcard(domain string) (map[string]bool, map[string]bool) {
 	wildcardIPs := make(map[string]bool)
+	wildcardCNAMEs := make(map[string]bool)
 	probes := []string{
 		"zz9z3k7q1wildcard." + domain,
 		"qx84jd02noexist." + domain,
 		"a1b2c3d4e5random." + domain,
+		"rcn7f4a9neverexists." + domain,
+		"nohost2c8e1b6d." + domain,
 	}
+	resolvedProbes := 0
+	allIPs := map[string]bool{}
+	cnameCounts := map[string]int{}
+	type wildcardProbeResult struct {
+		ips   []net.IPAddr
+		cname string
+	}
+	results := make(chan wildcardProbeResult, len(probes))
+	var wg sync.WaitGroup
 	for _, p := range probes {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, p)
-		cancel()
-		if err != nil {
-			continue
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			ips, _ := net.DefaultResolver.LookupIPAddr(ctx, name)
+			cancel()
+			results <- wildcardProbeResult{ips: ips, cname: lookupExplicitCNAME(context.Background(), name)}
+		}(p)
+	}
+	wg.Wait()
+	close(results)
+	for result := range results {
+		if result.cname != "" {
+			cnameCounts[result.cname]++
 		}
-		for _, ip := range ips {
-			wildcardIPs[ip.IP.String()] = true
+		if len(result.ips) > 0 {
+			resolvedProbes++
+		}
+		for _, ip := range result.ips {
+			value := ip.IP.String()
+			if value != "" {
+				allIPs[value] = true
+			}
 		}
 	}
-	return wildcardIPs
+	// Require at least three independent random labels to resolve, then retain the
+	// union of their addresses. This catches rotating wildcard/CDN pools where no
+	// single IP necessarily appears twice, without trusting one poisoned answer.
+	if resolvedProbes >= 3 {
+		for ip := range allIPs {
+			wildcardIPs[ip] = true
+		}
+	}
+	for cname, n := range cnameCounts {
+		if n >= 3 {
+			wildcardCNAMEs[cname] = true
+		}
+	}
+	return wildcardIPs, wildcardCNAMEs
 }
 
 func (s *SubdomainScanner) upsertSubdomain(targetID, subdomain, ip string) error {
+	return s.upsertSubdomainSource(targetID, subdomain, ip, "dns")
+}
+
+func (s *SubdomainScanner) upsertSubdomainSource(targetID, subdomain, ip, source string) error {
 	id := uuid.New().String()
 	_, err := s.db.Exec(`
-		INSERT INTO subdomains (id, target_id, subdomain, ip, last_seen)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO subdomains (id, target_id, subdomain, ip, source, last_seen)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(target_id, subdomain) DO UPDATE SET
 			ip = excluded.ip,
+			source = CASE WHEN COALESCE(subdomains.source,'dns') IN ('seed','vhost')
+				THEN subdomains.source ELSE excluded.source END,
 			last_seen = CURRENT_TIMESTAMP
-	`, id, targetID, subdomain, ip)
+	`, id, targetID, subdomain, ip, source)
 	return err
+}
+
+// pruneRejectedSubdomains repairs rows created by older eager-admission builds.
+// The delete is intentionally narrow: never touch explicit seeds, CNAME records,
+// verified vhosts or anything that was previously observed alive.
+func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID string, rejected map[string]bool) {
+	if len(rejected) == 0 {
+		return
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM subdomains
+		WHERE target_id=? AND subdomain=? AND COALESCE(source,'dns')='dns'
+		  AND COALESCE(is_alive,0)=0`)
+	if err != nil {
+		_ = tx.Rollback()
+		return
+	}
+	for name := range rejected {
+		if ctx.Err() != nil {
+			break
+		}
+		_, _ = stmt.ExecContext(ctx, targetID, name)
+	}
+	_ = stmt.Close()
+	_ = tx.Commit()
+}
+
+func resolveHostIPs(parent context.Context, host string) []string {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	rows, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ip := row.IP.String()
+		if ip != "" && !seen[ip] {
+			seen[ip] = true
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func firstNonWildcardIP(ips []string, wildcard map[string]bool) string {
+	// If an answer overlaps the random-label wildcard profile, treat the complete
+	// RRset as wildcard. Rotating pools often return one familiar and one new IP;
+	// selecting the new address would incorrectly admit the fake hostname.
+	for _, ip := range ips {
+		if wildcard[ip] {
+			return ""
+		}
+	}
+	for _, ip := range ips {
+		return ip
+	}
+	return ""
+}
+
+func overlapsWildcardIPs(ips []string, wildcard map[string]bool) bool {
+	if len(ips) == 0 || len(wildcard) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if wildcard[ip] {
+			return true
+		}
+	}
+	return false
+}
+
+func lookupExplicitCNAME(parent context.Context, host string) string {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	cname, err := net.DefaultResolver.LookupCNAME(ctx, host)
+	if err != nil {
+		return ""
+	}
+	cname = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(cname), "."))
+	if cname == "" || cname == strings.ToLower(strings.TrimSuffix(host, ".")) {
+		return ""
+	}
+	return cname
 }
 
 func resolveHost(host string) string {
@@ -935,14 +1296,23 @@ func resolveHost(host string) string {
 }
 
 func isValidSubdomain(sub, domain string) bool {
-	if sub == "" || domain == "" {
+	sub = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(sub), "."))
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if sub == "" || domain == "" || len(sub) > 253 {
 		return false
 	}
 	if !strings.HasSuffix(sub, "."+domain) && sub != domain {
 		return false
 	}
-	if strings.Contains(sub, "..") || strings.Contains(sub, "*") {
-		return false
+	for _, label := range strings.Split(sub, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
 	}
 	return true
 }

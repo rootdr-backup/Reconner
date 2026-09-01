@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -21,6 +22,7 @@ import (
 // out-of-band confirmation WITHOUT a multi-class OAST module that would plant
 // probes for — and therefore emit findings of — unrelated vulnerability classes.
 type oobCapability struct {
+	callbackBase string // normalized http(s) origin used for /oob/<token>
 	callbackHost string // host[:port] of the public callback (for http payloads)
 	oobHost      string // bare host for raw JNDI/LDAP listeners
 	rawPort      int
@@ -33,8 +35,15 @@ func newOOBCapability(cfg *config.Config) (oobCapability, bool) {
 	if cfg == nil {
 		return oobCapability{}, false
 	}
-	base := strings.TrimRight(cfg.BlindXSSCallbackURL, "/")
-	if base == "" {
+	raw := strings.TrimSpace(cfg.BlindXSSCallbackURL)
+	if raw == "" {
+		return oobCapability{}, false
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return oobCapability{}, false
 	}
 	rawPort := cfg.OOBRawPort
@@ -42,10 +51,15 @@ func newOOBCapability(cfg *config.Config) (oobCapability, bool) {
 		rawPort = 1389
 	}
 	return oobCapability{
-		callbackHost: stripScheme(base),
-		oobHost:      oobHostOnly(base),
+		callbackBase: strings.ToLower(u.Scheme) + "://" + u.Host,
+		callbackHost: u.Host,
+		oobHost:      u.Hostname(),
 		rawPort:      rawPort,
 	}, true
+}
+
+func (o oobCapability) callbackURL(token string) string {
+	return strings.TrimRight(o.callbackBase, "/") + "/oob/" + token
 }
 
 // plantClass registers one probe of `kind` for each insertion point matching
@@ -61,7 +75,7 @@ func (o oobCapability) plantClass(
 	auth map[string]string,
 	kind string,
 	prone func(insertionPoint) bool,
-	payloadsFor func(cb string) []string,
+	payloadsFor func(ip insertionPoint, cb string) []string,
 ) int {
 	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
@@ -74,9 +88,9 @@ func (o oobCapability) plantClass(
 			continue
 		}
 		token := registerOOBProbe(db, targetID, ip.URL, ip.Param, kind, "param:"+ip.Param)
-		cb := "http://" + o.callbackHost + "/oob/" + token
+		cb := o.callbackURL(token)
 		planted++
-		for _, v := range payloadsFor(cb) {
+		for _, v := range payloadsFor(ip, cb) {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(ip insertionPoint, v string) {

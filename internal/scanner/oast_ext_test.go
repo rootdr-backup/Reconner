@@ -53,12 +53,39 @@ func TestLog4ShellParamPayloads(t *testing.T) {
 func TestSSRFOOBPayloadsBypasses(t *testing.T) {
 	host := "oast.example.com"
 	cb := "http://" + host + "/oob/rcnoob0123456789"
-	ps := ssrfOOBPayloads(cb, host)
+	ps := ssrfOOBPayloads(cb, host, "https://allowed.example/image.png")
 	joined := strings.Join(ps, "\n")
 	// direct, https, protocol-relative, and fragment-bypass forms.
 	for _, want := range []string{cb, "https://" + host + "/oob/", "//" + host + "/oob/", cb + "#"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("SSRF set missing variant %q; got %v", want, ps)
+		}
+	}
+}
+
+func TestSSRFOOBPayloadsPreserveHTTPSPath(t *testing.T) {
+	cb := "https://oob.example.test/oob/rcnoob0123456789abcdef0123"
+	got := ssrfOOBPayloads(cb, "oob.example.test", "https://allowed.example/path")
+	for _, bad := range []string{"https://oob.example.test//oob.example.test/", "//oob.example.test//oob.example.test/"} {
+		for _, payload := range got {
+			if strings.Contains(payload, bad) {
+				t.Fatalf("malformed HTTPS callback payload %q", payload)
+			}
+		}
+	}
+	if !containsString(got, "//oob.example.test/oob/rcnoob0123456789abcdef0123") {
+		t.Fatalf("missing protocol-relative HTTPS callback path: %#v", got)
+	}
+}
+
+func TestRCEOOBDNSFallbackUsesHostOnly(t *testing.T) {
+	got := rceOOBPayloads("https://oob.example.test/oob/rcnoob0123456789abcdef0123")
+	if !containsString(got, "| nslookup oob.example.test") {
+		t.Fatalf("DNS fallback must contain host only: %#v", got)
+	}
+	for _, payload := range got {
+		if strings.HasPrefix(payload, "| nslookup ") && strings.Contains(strings.TrimPrefix(payload, "| nslookup "), "/") {
+			t.Fatalf("DNS fallback contains an invalid URL path: %q", payload)
 		}
 	}
 }

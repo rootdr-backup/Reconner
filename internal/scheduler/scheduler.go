@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -1057,6 +1059,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if len(seeded) == 0 && webPrimary != "" {
 		seeded = []string{webPrimary}
 	}
+	// Subdomain enumeration is root-oriented (one domain per Run call), unlike
+	// the DB-reading web modules below. A target-level scan therefore needs an
+	// explicit fan-out list covering every managed asset; passing webPrimary here
+	// used to enumerate only the first asset in a multi-asset target (issue #7).
+	subdomainRoots := s.loadSubdomainRoots(ctx, targetID, effectiveScope, scopeOverride)
 	// A scope token may be a bare host (example.com) OR a full ENDPOINT URL
 	// (https://x.com/appointment?h=…). Seed the HOST into subdomains so http_probe
 	// covers it, and — for endpoint URLs — register the exact URL + its query/path
@@ -1097,6 +1104,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// network/ingram pseudo-modules a stale client might still send.
 	speed := scanner.SpeedNormal
 	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
+	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
 	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
 	for _, m := range sentModules {
 		switch m {
@@ -1106,6 +1114,10 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			speed = scanner.SpeedFast
 		case "no_subdomain_brute":
 			subBrute = false
+		case "asn_discovery":
+			asnDiscovery = true
+		case "no_asn_discovery": // accepted for compatibility with the short-lived preview toggle
+			asnDiscovery = false
 		case "single_endpoint":
 			singleEndpoint = true
 		default:
@@ -1117,6 +1129,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 	ctx = scanner.WithWebSpeed(ctx, speed)
 	ctx = scanner.WithSubdomainBrute(ctx, subBrute)
+	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
 	// Single-endpoint mode: confine the pipeline to the seeded endpoint URL(s) and
 	// the paths under them. Also force the slow subdomain brute OFF (there is one
 	// host) and drop subdomain enumeration from the module list — the point is to
@@ -1172,6 +1185,14 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			"message": message,
 			"time":    time.Now().Format(time.RFC3339),
 		})
+	}
+	runPlannedModule := func(moduleCtx context.Context, module string) error {
+		if module == ModuleSubdomainEnum {
+			return runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
+				return s.runModule(moduleCtx, module, targetID, root, logFn)
+			})
+		}
+		return s.runModule(moduleCtx, module, targetID, domainFor(module), logFn)
 	}
 
 	// Tool availability audit: log exactly which external tools are present vs
@@ -1290,7 +1311,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					wg.Add(1)
 					go func(m string) {
 						defer wg.Done()
-						err := s.runModule(modCtx, m, targetID, domainFor(m), logFn)
+						err := runPlannedModule(modCtx, m)
 						gmu.Lock()
 						defer gmu.Unlock()
 						if err != nil && ctx.Err() == nil && modCtx.Err() == nil {
@@ -1313,7 +1334,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			}
 		}
 
-		err := s.runModule(modCtx, module, targetID, domainFor(module), logFn)
+		err := runPlannedModule(modCtx, module)
 		if finishPhase() {
 			// Operator skipped this phase: mark it handled (so a resume doesn't
 			// redo it) and move on WITHOUT recording a task error.
@@ -1398,6 +1419,102 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if taskType == monitorWatchType && finalStatus == "finished" {
 		s.escalateIfChanged(targetID, target.Domain, knownSubdomains, startedAt)
 	}
+}
+
+// loadSubdomainRoots returns the domain roots that a target-level subdomain
+// enumeration must cover. Managed assets are authoritative when present because
+// users can add, edit or delete them after the target was created; the original
+// targets.domain string may then be stale. A per-asset task remains pinned to its
+// scope_override. IP/CIDR assets are intentionally omitted from DNS enumeration.
+func (s *Scheduler) loadSubdomainRoots(ctx context.Context, targetID, fallbackScope, scopeOverride string) []string {
+	if strings.TrimSpace(scopeOverride) != "" {
+		return normalizeSubdomainRoots([]string{scopeOverride})
+	}
+
+	var values []string
+	rows, err := s.db.QueryContext(ctx, `SELECT value FROM assets WHERE target_id=? ORDER BY created_at ASC, id ASC`, targetID)
+	if err == nil {
+		for rows.Next() {
+			var value string
+			if rows.Scan(&value) == nil && strings.TrimSpace(value) != "" {
+				values = append(values, value)
+			}
+		}
+		rows.Close()
+	}
+	if len(values) == 0 {
+		values = []string{fallbackScope}
+	}
+	return normalizeSubdomainRoots(values)
+}
+
+// normalizeSubdomainRoots turns asset values (bare hosts, URLs, wildcards or
+// host:port forms) into stable DNS roots, preserving asset order and deduping.
+func normalizeSubdomainRoots(values []string) []string {
+	seen := map[string]bool{}
+	var roots []string
+	for _, value := range values {
+		tokens, _ := scanner.SplitScope(value)
+		for _, token := range tokens {
+			raw := strings.TrimSpace(token)
+			if raw == "" {
+				continue
+			}
+			// Reject network scopes before URL parsing turns 10.0.0.0/24 into
+			// the misleading host "10.0.0.0".
+			if net.ParseIP(strings.Trim(raw, "[]")) != nil {
+				continue
+			}
+			if _, _, err := net.ParseCIDR(raw); err == nil {
+				continue
+			}
+
+			parseValue := raw
+			if !strings.Contains(parseValue, "://") {
+				parseValue = "//" + parseValue
+			}
+			host := ""
+			if parsed, err := url.Parse(parseValue); err == nil {
+				host = parsed.Hostname()
+			}
+			host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+			host = strings.TrimPrefix(host, "*.")
+			if host == "" || net.ParseIP(host) != nil || strings.ContainsAny(host, "/?#") || seen[host] {
+				continue
+			}
+			seen[host] = true
+			roots = append(roots, host)
+		}
+	}
+	return roots
+}
+
+// runSubdomainRootFanout executes every in-scope root even if one root fails.
+// It is deliberately sequential: each SubdomainScanner.Run already fans out
+// passive sources, DNS workers and tools internally, so root-level parallelism
+// would multiply traffic and tool processes without improving coverage.
+func runSubdomainRootFanout(ctx context.Context, roots []string, logFn scanner.LogFunc, run func(string) error) error {
+	if len(roots) == 0 {
+		logFn("warn", ModuleSubdomainEnum, "No domain assets are eligible for subdomain enumeration (IP/CIDR-only scope).")
+		return nil
+	}
+	if len(roots) > 1 {
+		logFn("info", ModuleSubdomainEnum, fmt.Sprintf("Multi-asset fan-out: enumerating all %d in-scope domain assets: %v", len(roots), roots))
+	}
+	var firstErr error
+	for i, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		logFn("info", ModuleSubdomainEnum, fmt.Sprintf("Asset %d/%d: enumerating %s", i+1, len(roots), root))
+		if err := run(root); err != nil {
+			logFn("error", ModuleSubdomainEnum, fmt.Sprintf("Asset %s failed: %v; continuing with remaining assets", root, err))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("subdomain enumeration for %s: %w", root, err)
+			}
+		}
+	}
+	return firstErr
 }
 
 // monitorWatchType / monitorEscalationType tag the two halves of the periodic

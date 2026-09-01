@@ -22,7 +22,12 @@ func TestCORSCriticalReflectedWithCreds(t *testing.T) {
 			w.Header().Set("Access-Control-Allow-Origin", origin) // reflects ANY origin
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
+		if r.Header.Get("Cookie") != "session=v3" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"account":"alice","balance":4200}`))
 	}))
 	defer srv.Close()
 
@@ -35,7 +40,7 @@ func TestCORSCriticalReflectedWithCreds(t *testing.T) {
 		t.Fatal(err)
 	}
 	tid := uuid.New().String()
-	_, _ = db.Exec(`INSERT INTO targets (id,domain,priority,kind) VALUES (?,?, 'medium','web')`, tid, "x.example")
+	_, _ = db.Exec(`INSERT INTO targets (id,domain,priority,kind,auth_headers) VALUES (?,?, 'medium','web',?)`, tid, "x.example", `{"Cookie":"session=v3"}`)
 	_, _ = db.Exec(`INSERT INTO http_services (id,target_id,url,status_code,source) VALUES (?,?,?,200,'probe')`, uuid.New().String(), tid, srv.URL)
 
 	s := &CORSScanner{db: db, cfg: &config.Config{}}
@@ -82,6 +87,39 @@ func TestCORSWildcardNotReported(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='cors_misconfig'`, tid).Scan(&n)
 	if n != 0 {
 		t.Errorf("ACAO:* must NOT be reported, got %d findings", n)
+	}
+}
+
+func TestCORSCredentialPolicyWithoutSensitiveReplayIsCandidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		_, _ = w.Write([]byte("public status page"))
+	}))
+	defer srv.Close()
+	db, err := database.New(filepath.Join(t.TempDir(), "candidate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	tid := uuid.NewString()
+	_, _ = db.Exec(`INSERT INTO targets (id,domain,priority,kind) VALUES (?,?,'medium','web')`, tid, "x.example")
+	_, _ = db.Exec(`INSERT INTO http_services (id,target_id,url,status_code,source) VALUES (?,?,?,200,'probe')`, uuid.NewString(), tid, srv.URL)
+	s := &CORSScanner{db: db, cfg: &config.Config{}}
+	if err := s.Run(context.Background(), tid, func(string, string, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM vuln_findings WHERE target_id=? AND type='cors_misconfig'`, tid).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusCandidate {
+		t.Fatalf("policy-only CORS status=%q, want candidate", status)
 	}
 }
 

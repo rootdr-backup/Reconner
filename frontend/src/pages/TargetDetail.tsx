@@ -100,6 +100,7 @@ function TriageBar({ targetId, finding, onDone }: { targetId: string; finding: V
 // falls back to a generic message so no confirmed finding is left without advice.
 const REMEDIATION: Record<string, string> = {
   xss: 'Contextually output-encode all user-controlled data at the sink (HTML/attribute/JS/URL). Prefer framework auto-escaping, add a strict Content-Security-Policy, and set HttpOnly on session cookies.',
+  dom_xss: 'Treat URL, window.name and postMessage data as untrusted. Avoid innerHTML/outerHTML/document.write/eval sinks; use textContent or a proven HTML sanitizer, validate message origins, and enforce a strict Content-Security-Policy.',
   sqli: 'Use parameterized queries / prepared statements everywhere; never concatenate input into SQL. Apply least-privilege DB accounts and validate input types server-side.',
   nosqli: 'Reject operator objects ($where/$ne/$regex) from user input; cast query values to the expected scalar type; use an allowlist for query fields.',
   idor: 'Enforce a server-side authorization (ownership/ACL) check on EVERY object access, keyed to the authenticated principal — never trust the client-supplied object id. Prefer unguessable identifiers.',
@@ -136,7 +137,11 @@ const GET_PARAM_VULNS = new Set([
 // isn't a GET-param class or the pieces needed to rebuild the request are missing.
 function buildPocUrl(type: string, rawUrl: string, param?: string, payload?: string): string | null {
   if (!rawUrl || !param || !payload) return null
-  if (!GET_PARAM_VULNS.has(String(type || '').toLowerCase())) return null
+  const normalizedType = String(type || '').toLowerCase()
+  if (normalizedType === 'dom_xss') {
+    if (param === 'dom:hash') return `${rawUrl.split('#', 1)[0]}#${payload}`
+    if (param.startsWith('dom:') || param.startsWith('path:')) return null
+  } else if (!GET_PARAM_VULNS.has(normalizedType)) return null
   try {
     const u = new URL(rawUrl)
     u.searchParams.set(param, payload)
@@ -1006,7 +1011,7 @@ export default function TargetDetail() {
                     {(tab === 'vulns' || tab === 'candidates') && (pageData as VulnFinding[]).map(v => {
                       const pocUrl = buildPocUrl(v.type, v.url, v.parameter, v.payload)
                       const reproUrl = pocUrl || v.url
-                      const isXss = String(v.type || '').toLowerCase() === 'xss'
+                      const isXss = ['xss', 'dom_xss'].includes(String(v.type || '').toLowerCase())
                       return (
                       <tr key={v.id} className="table-row">
                         <td className="table-cell whitespace-nowrap">

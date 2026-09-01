@@ -431,12 +431,10 @@ func (s *IDORScanner) testTarget(ctx context.Context, targetID string, t idorTar
 		baseURL, strings.Join(readable, ", "), t.baseID, baseLen)
 
 	s.store(targetID, "idor", severity, baseURL, t.param, evidence, confidence)
-	logFn("warn", "idor", fmt.Sprintf("IDOR [%s]: %s (neighbours readable: %s)", severity, baseURL, strings.Join(readable, ", ")))
-	if s.broadcast != nil {
-		s.broadcast("new_vuln_finding", map[string]any{
-			"target_id": targetID, "type": "idor", "url": baseURL, "parameter": t.param,
-		})
-	}
+	// A single identity cannot prove those objects belong to a different user.
+	// Keep the strong differential visible for analyst review, but do not announce
+	// it as a new finding; the two-identity paths above own confirmed BOLA alerts.
+	logFn("info", "idor", fmt.Sprintf("IDOR candidate [%s]: %s (neighbours readable: %s; second identity required)", severity, baseURL, strings.Join(readable, ", ")))
 	return true
 }
 

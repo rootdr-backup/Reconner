@@ -54,7 +54,8 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT subdomain FROM subdomains 
-		WHERE target_id = ? 
+		WHERE target_id = ?
+		  AND (COALESCE(ip,'') != '' OR COALESCE(source,'dns') IN ('seed','vhost'))
 		ORDER BY subdomain
 	`, targetID)
 	if err != nil {

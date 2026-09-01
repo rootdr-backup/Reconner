@@ -454,27 +454,29 @@ func (s *VerifyScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT vf.id, vf.type, vf.severity, vf.url, vf.parameter, vf.payload,
-		       COALESCE(p.method,'GET'), COALESCE(vf.confidence,0), COALESCE(vf.status,'finding')
+		       COALESCE(p.method,'GET'), COALESCE(vf.confidence,0), COALESCE(vf.status,'finding'),
+		       COALESCE(vf.lifecycle,'LEGACY'), COALESCE(vf.candidate_id,'')
 		FROM vuln_findings vf
 		LEFT JOIN parameters p ON p.target_id = vf.target_id AND p.url = vf.url AND p.parameter = vf.parameter
 		WHERE vf.target_id = ?
 	`, targetID)
 	if err != nil {
 		// method join is best-effort; fall back to a plain select
-		rows, err = s.db.QueryContext(ctx, `SELECT id, type, severity, url, parameter, payload, 'GET', COALESCE(confidence,0), COALESCE(status,'finding') FROM vuln_findings WHERE target_id = ?`, targetID)
+		rows, err = s.db.QueryContext(ctx, `SELECT id, type, severity, url, parameter, payload, 'GET', COALESCE(confidence,0), COALESCE(status,'finding'), COALESCE(lifecycle,'LEGACY'), COALESCE(candidate_id,'') FROM vuln_findings WHERE target_id = ?`, targetID)
 		if err != nil {
 			return err
 		}
 	}
 	type finding struct {
 		id, typ, sev, url, param, payload, method string
+		lifecycle, candidateID                    string
 		existingConf                              int
 		existingStatus                            string
 	}
 	var findings []finding
 	for rows.Next() {
 		var f finding
-		if err := rows.Scan(&f.id, &f.typ, &f.sev, &f.url, &f.param, &f.payload, &f.method, &f.existingConf, &f.existingStatus); err == nil {
+		if err := rows.Scan(&f.id, &f.typ, &f.sev, &f.url, &f.param, &f.payload, &f.method, &f.existingConf, &f.existingStatus, &f.lifecycle, &f.candidateID); err == nil {
 			findings = append(findings, f)
 		}
 	}
@@ -494,7 +496,25 @@ func (s *VerifyScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 		// confidence a module already computed for this finding (e.g. a
 		// magic-byte-confirmed backup at 95, an OOB-confirmed blind bug at 100).
 		// Only an active re-verification below is allowed to lower it.
+		canonicalPending := f.candidateID != "" && f.lifecycle != CandConfirmed && f.lifecycle != CandVerified
+		canonicalRejected := f.candidateID != "" && (f.lifecycle == CandRejected || f.lifecycle == CandDuplicate)
+		// DOM XSS has a deliberately higher proof bar: legacy rows without a
+		// canonical runtime-execution candidate are also pending. A fresh scan can
+		// re-confirm them in Chromium; until then they must not carry a green badge.
+		if f.typ == "dom_xss" && (f.candidateID == "" || (f.lifecycle != CandConfirmed && f.lifecycle != CandVerified)) {
+			canonicalPending = true
+		}
+		if canonicalRejected {
+			_, _ = s.db.Exec(`UPDATE vuln_findings SET confidence=0, priority=0, status='rejected' WHERE id=?`, f.id)
+			continue
+		}
 		conf := baseConfidence[f.typ]
+		// The lifecycle is authoritative. A scorer must never turn DETECTED static
+		// analysis into a finding merely because a type-wide confidence floor is
+		// high (this was promoting unexecuted DOM-XSS JS leads to green findings).
+		if canonicalPending {
+			conf = f.existingConf
+		}
 		if f.existingConf > conf {
 			conf = f.existingConf
 		}
@@ -525,7 +545,7 @@ func (s *VerifyScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 		// (403-bypass, CORS, host-header, CRLF, prototype-pollution, jwt-no-exp…)
 		// to Candidates while a replay-confirmed bug stays a Finding.
 		status := StatusCandidate
-		if conf >= ConfEvidence {
+		if conf >= ConfEvidence && !canonicalPending {
 			status = StatusFinding
 		}
 		if replayed && conf == 45 {

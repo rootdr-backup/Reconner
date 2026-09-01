@@ -243,9 +243,9 @@ func analyzeJWT(token string) []jwtIssue {
 	// alg=none — an unsigned token in circulation.
 	if alg == "NONE" || alg == "" {
 		out = append(out, jwtIssue{
-			kind: "alg_none", severity: "critical", confidence: ConfEvidence,
-			detail:   "JWT issued with alg=none (unsigned) — any identity is forgeable",
-			evidence: "Token header alg=" + jwtAlg(hdr) + " (no signature). A server accepting this cannot authenticate the bearer. Forge any claims: " + forgeAlgNone(token),
+			kind: "alg_none", severity: "high", confidence: ConfCandidateHi,
+			detail:   "Unsigned alg=none JWT observed; live acceptance needs replay proof",
+			evidence: "Token header alg=" + jwtAlg(hdr) + " and the token is unsigned. This is a high-signal candidate, not yet an auth-bypass finding; the active verifier separately replays an alg=none forgery against a protected endpoint. Candidate token: " + forgeAlgNone(token),
 		})
 	}
 
@@ -257,6 +257,19 @@ func analyzeJWT(token string) []jwtIssue {
 				kind: "weak_secret", severity: "critical", confidence: ConfPoC,
 				detail:   fmt.Sprintf("JWT %s signed with a weak/known secret %q — token forgery", alg, sec),
 				evidence: fmt.Sprintf("The token's signature verifies with secret=%q, so arbitrary tokens can be minted. Proof — a forged admin token: %s", sec, forged),
+			})
+		}
+	}
+
+	// Remote key URLs are attack surface, not proof. Merely carrying jku/x5u is
+	// valid JOSE behavior; only a forged-token acceptance or an OAST callback can
+	// prove key injection/SSRF. Preserve the lead as a hidden/info candidate.
+	for _, key := range []string{"jku", "x5u"} {
+		if value, ok := hdr[key].(string); ok && strings.TrimSpace(value) != "" {
+			out = append(out, jwtIssue{
+				kind: key + "_header_candidate", severity: "info", confidence: ConfHiddenCutoff,
+				detail:   fmt.Sprintf("JWT %s header references a remote key URL", key),
+				evidence: fmt.Sprintf("%s=%q observed. This is not a vulnerability by itself; verify strict allow-listing with a controlled forged-key/OAST test.", key, value),
 			})
 		}
 	}
@@ -309,7 +322,8 @@ func (s *JWTScanner) collectJWTs(ctx context.Context, targetID string) []string 
 	var out []string
 	add := func(t string) {
 		t = strings.TrimSpace(t)
-		if t != "" && looksLikeJWT(t) && !seen[t] {
+		parts := strings.Split(t, ".")
+		if t != "" && looksLikeJWT(t) && !isDemoJWT(parts) && !seen[t] {
 			seen[t] = true
 			out = append(out, t)
 		}

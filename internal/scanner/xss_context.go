@@ -658,7 +658,8 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 		for _, p := range buildExecPayloads(a) {
 			execR := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
 			if browserRendersResponse(execR.Status, execR.ContentType, execR.Body, execR.NoSniff) &&
-				cspAllowsInlineScript(execR.CSP) && execPayloadSurvived(execR.Body, p) {
+				cspAllowsInlineScript(execR.CSP) && execPayloadSurvived(execR.Body, p) &&
+				!execPayloadSurvived(baseR.Body, p) {
 				ev := "reflected XSS PROVEN in " + a.Context + " context: the context-specific breakout formed live executable markup and the exact handler/script survived unencoded. Executable payload: " +
 					p.Payload + " | context-agnostic polyglot: " + xssPolyglot
 				return VerifyResult{Verdict: VerifyVerified, Confidence: 95, Evidence: ev, Method: "xss-context"}
