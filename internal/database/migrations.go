@@ -127,6 +127,9 @@ func RunMigrations(db *DB) error {
 			}
 		}
 	}
+	if err := backfillAssetUpdatedAt(db); err != nil {
+		return fmt.Errorf("assets updated-at migration failed: %w", err)
+	}
 	if err := migrateParametersRequestIdentity(db); err != nil {
 		return fmt.Errorf("parameters request-identity migration failed: %w", err)
 	}
@@ -135,6 +138,18 @@ func RunMigrations(db *DB) error {
 	}
 
 	return nil
+}
+
+// SQLite rejects ALTER TABLE ADD COLUMN when the default is a non-constant
+// expression such as CURRENT_TIMESTAMP and the table already contains rows.
+// Add the column with a portable constant default, then backfill legacy assets
+// in a separate statement where CURRENT_TIMESTAMP is valid. New application
+// writes set updated_at explicitly.
+func backfillAssetUpdatedAt(db *DB) error {
+	_, err := db.Exec(`UPDATE assets
+		SET updated_at=COALESCE(NULLIF(updated_at,''),created_at,CURRENT_TIMESTAMP)
+		WHERE updated_at IS NULL OR updated_at=''`)
+	return err
 }
 
 // migrateBrowserlessXSSConfirmations repairs findings created by pre-1.3 builds
@@ -372,7 +387,7 @@ const alterAssetsAddSourceID = `ALTER TABLE assets ADD COLUMN source_id TEXT DEF
 const alterAssetsAddApprovalStatus = `ALTER TABLE assets ADD COLUMN approval_status TEXT DEFAULT 'approved';`
 const alterAssetsAddMonitorEnabled = `ALTER TABLE assets ADD COLUMN monitor_enabled INTEGER DEFAULT 1;`
 const alterAssetsAddMetadata = `ALTER TABLE assets ADD COLUMN metadata TEXT DEFAULT '{}';`
-const alterAssetsAddUpdatedAt = `ALTER TABLE assets ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;`
+const alterAssetsAddUpdatedAt = `ALTER TABLE assets ADD COLUMN updated_at DATETIME DEFAULT '';`
 
 const createBountyIndexes = `
 CREATE INDEX IF NOT EXISTS idx_bounty_programs_filter ON bounty_programs(provider, status, offers_bounties, wildcard_count, asset_count);
