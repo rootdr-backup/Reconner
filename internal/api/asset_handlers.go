@@ -30,7 +30,9 @@ func detectAssetKind(value string) (kind, netScope string, webHosts []string) {
 func (h *Handler) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, target_id, COALESCE(name,''), value, COALESCE(kind,'web'), created_at
+		`SELECT id, target_id, COALESCE(name,''), value, COALESCE(kind,'web'), COALESCE(asset_type,'domain'),
+		 COALESCE(source,'manual'), COALESCE(source_id,''), COALESCE(approval_status,'approved'),
+		 COALESCE(monitor_enabled,1), COALESCE(metadata,'{}'), created_at, COALESCE(updated_at,created_at)
 		 FROM assets WHERE target_id = ? ORDER BY created_at ASC`, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
@@ -40,7 +42,10 @@ func (h *Handler) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	out := make([]models.Asset, 0)
 	for rows.Next() {
 		var a models.Asset
-		if rows.Scan(&a.ID, &a.TargetID, &a.Name, &a.Value, &a.Kind, &a.CreatedAt) == nil {
+		var monitor int
+		if rows.Scan(&a.ID, &a.TargetID, &a.Name, &a.Value, &a.Kind, &a.AssetType, &a.Source, &a.SourceID,
+			&a.ApprovalStatus, &monitor, &a.Metadata, &a.CreatedAt, &a.UpdatedAt) == nil {
+			a.MonitorEnabled = monitor == 1
 			out = append(out, a)
 		}
 	}
@@ -49,17 +54,23 @@ func (h *Handler) handleListAssets(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	var req struct{ Name, Value string }
+	var req struct {
+		Name      string `json:"name"`
+		Value     string `json:"value"`
+		AssetType string `json:"asset_type"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Value) == "" {
 		h.writeError(w, http.StatusBadRequest, "asset value is required")
 		return
 	}
 	value := strings.TrimSpace(req.Value)
 	kind, _, _ := detectAssetKind(value)
+	assetType := normalizeManualAssetType(req.AssetType, value, kind)
 	aid := uuid.New().String()
 	if _, err := h.db.Exec(
-		`INSERT INTO assets (id, target_id, name, value, kind) VALUES (?, ?, ?, ?, ?)`,
-		aid, id, strings.TrimSpace(req.Name), value, kind); err != nil {
+		`INSERT INTO assets (id, target_id, name, value, kind, asset_type, source, approval_status, monitor_enabled, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 'manual', 'approved', 1, CURRENT_TIMESTAMP)`,
+		aid, id, strings.TrimSpace(req.Name), value, kind, assetType); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			h.writeError(w, http.StatusConflict, "that asset already exists on this target")
 			return
@@ -68,12 +79,41 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.hub.Broadcast("target_updated", map[string]string{"id": id})
-	h.writeSuccess(w, models.Asset{ID: aid, TargetID: id, Name: strings.TrimSpace(req.Name), Value: value, Kind: kind})
+	h.writeSuccess(w, models.Asset{ID: aid, TargetID: id, Name: strings.TrimSpace(req.Name), Value: value, Kind: kind, AssetType: assetType, Source: "manual", ApprovalStatus: "approved", MonitorEnabled: true})
+}
+
+func normalizeManualAssetType(explicit, value, kind string) string {
+	t := strings.ToLower(strings.TrimSpace(explicit))
+	allowed := map[string]bool{"domain": true, "url": true, "page": true, "js": true, "wildcard": true, "api": true, "cidr": true, "ip": true, "source_code": true, "android": true, "ios": true, "hardware": true, "other": true}
+	if allowed[t] {
+		return t
+	}
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if strings.HasPrefix(lower, "*.") {
+		return "wildcard"
+	}
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		if strings.HasSuffix(strings.Split(lower, "?")[0], ".js") {
+			return "js"
+		}
+		return "url"
+	}
+	if kind == "network" {
+		if strings.Contains(lower, "/") {
+			return "cidr"
+		}
+		return "ip"
+	}
+	return "domain"
 }
 
 func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 	id, aid := mux.Vars(r)["id"], mux.Vars(r)["aid"]
-	var req struct{ Name, Value string }
+	var req struct {
+		Name      string `json:"name"`
+		Value     string `json:"value"`
+		AssetType string `json:"asset_type"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid body")
 		return
@@ -86,7 +126,8 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := strings.TrimSpace(req.Value); v != "" {
 		kind, _, _ := detectAssetKind(v)
-		if _, err := h.db.Exec(`UPDATE assets SET value=?, kind=? WHERE id=? AND target_id=?`, v, kind, aid, id); err != nil {
+		assetType := normalizeManualAssetType(req.AssetType, v, kind)
+		if _, err := h.db.Exec(`UPDATE assets SET value=?, kind=?, asset_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`, v, kind, assetType, aid, id); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				h.writeError(w, http.StatusConflict, "another asset already uses that value")
 				return
@@ -128,9 +169,19 @@ func (h *Handler) handleScanAsset(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var value string
-	if err := h.db.QueryRowContext(r.Context(), `SELECT value FROM assets WHERE id=? AND target_id=?`, aid, id).Scan(&value); err != nil {
+	var value, assetType string
+	var approval string
+	if err := h.db.QueryRowContext(r.Context(), `SELECT value,COALESCE(approval_status,'approved'),COALESCE(asset_type,'domain') FROM assets WHERE id=? AND target_id=?`, aid, id).Scan(&value, &approval, &assetType); err != nil {
 		h.writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if approval != "approved" {
+		h.writeError(w, http.StatusConflict, "asset is pending approval or suspended by an upstream scope change")
+		return
+	}
+	scannable := map[string]bool{"domain": true, "wildcard": true, "url": true, "page": true, "js": true, "api": true, "ip": true, "cidr": true}
+	if !scannable[assetType] {
+		h.writeError(w, http.StatusBadRequest, "this asset type is catalog/reference metadata and has no compatible scan pipeline")
 		return
 	}
 	task, err := h.sched.CreateScopedTask(id, req.Modules, req.Priority, value)
@@ -154,7 +205,8 @@ func (h *Handler) seedAssetsFromScope(targetID, scope string) {
 		}
 		seen[tok] = true
 		kind, _, _ := detectAssetKind(tok)
-		_, _ = h.db.Exec(`INSERT INTO assets (id, target_id, name, value, kind) VALUES (?, ?, '', ?, ?)
-			ON CONFLICT(target_id, value) DO NOTHING`, uuid.New().String(), targetID, tok, kind)
+		assetType := normalizeManualAssetType("", tok, kind)
+		_, _ = h.db.Exec(`INSERT INTO assets (id, target_id, name, value, kind, asset_type, source, approval_status, monitor_enabled, updated_at) VALUES (?, ?, '', ?, ?, ?, 'manual', 'approved', 1, CURRENT_TIMESTAMP)
+			ON CONFLICT(target_id, value) DO NOTHING`, uuid.New().String(), targetID, tok, kind, assetType)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/recon-platform/internal/bounty"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/models"
@@ -199,6 +200,7 @@ type Scheduler struct {
 	smugglingScanner   *scanner.SmugglingScanner
 	verifyScanner      *scanner.VerifyScanner
 	monitorScanner     *scanner.MonitorScanner
+	bountyCatalog      *bounty.Service
 
 	queue     chan string
 	cancelMap map[string]context.CancelFunc
@@ -276,9 +278,14 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.smugglingScanner = scanner.NewSmugglingScanner(db, exec, cfg, log, bc)
 	s.verifyScanner = scanner.NewVerifyScanner(db, exec, cfg, log, bc)
 	s.monitorScanner = scanner.NewMonitorScanner(db, exec, cfg, log)
+	s.bountyCatalog = bounty.NewService(db, log)
 
 	return s
 }
+
+// BountyCatalog exposes the single process-wide catalog service to the API so
+// manual sync and scheduled sync share the same lock and cannot overlap.
+func (s *Scheduler) BountyCatalog() *bounty.Service { return s.bountyCatalog }
 
 // broadcastAndScore forwards every event to the websocket hub and, for new
 // vuln findings, pushes a Telegram alert only when the finding is high-signal
@@ -349,6 +356,11 @@ func (s *Scheduler) Start() {
 
 	s.wg.Add(1)
 	go s.monitoringScheduler()
+
+	// Catalog synchronization can take a few minutes on the first Bugcrowd
+	// import. Keep it isolated so it can never delay due project monitors.
+	s.wg.Add(1)
+	go s.bountyCatalogScheduler()
 }
 
 func (s *Scheduler) Stop() {
@@ -1056,6 +1068,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		webPrimary = webHosts[0]
 	}
 	seeded := webHosts
+	if scopeOverride == "" {
+		if managed := s.loadProjectWebSeeds(ctx, targetID); len(managed) > 0 {
+			seeded = managed
+		}
+	}
 	if len(seeded) == 0 && webPrimary != "" {
 		seeded = []string{webPrimary}
 	}
@@ -1082,6 +1099,10 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		if didSeed {
 			if n := scanner.NormalizeEndpointURL(tok); n != "" {
 				endpointSeeds = append(endpointSeeds, n)
+				if strings.HasSuffix(strings.ToLower(strings.Split(n, "?")[0]), ".js") {
+					_, _ = s.db.Exec(`INSERT INTO js_files(id,target_id,url,size,hash,analyzed,last_seen)
+						VALUES(?,?,?,0,'',0,CURRENT_TIMESTAMP) ON CONFLICT(target_id,url) DO NOTHING`, uuid.New().String(), targetID, n)
+				}
 			}
 		}
 		_, _ = s.db.Exec(`INSERT INTO subdomains (id, target_id, subdomain, source, last_seen)
@@ -1421,6 +1442,35 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 }
 
+// loadProjectWebSeeds keeps a target-level scan aligned with the editable
+// Project asset list. It includes exact page/API/JS URLs (not just DNS roots),
+// and excludes pending/suspended or non-web assets.
+func (s *Scheduler) loadProjectWebSeeds(ctx context.Context, targetID string) []string {
+	rows, err := s.db.QueryContext(ctx, `SELECT value FROM assets WHERE target_id=?
+		AND COALESCE(approval_status,'approved')='approved'
+		AND COALESCE(asset_type,'domain') IN ('domain','wildcard','url','page','js','api')
+		ORDER BY created_at ASC,id ASC`, targetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	out := []string{}
+	for rows.Next() {
+		var v string
+		if rows.Scan(&v) != nil {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 // loadSubdomainRoots returns the domain roots that a target-level subdomain
 // enumeration must cover. Managed assets are authoritative when present because
 // users can add, edit or delete them after the target was created; the original
@@ -1432,7 +1482,10 @@ func (s *Scheduler) loadSubdomainRoots(ctx context.Context, targetID, fallbackSc
 	}
 
 	var values []string
-	rows, err := s.db.QueryContext(ctx, `SELECT value FROM assets WHERE target_id=? ORDER BY created_at ASC, id ASC`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT value FROM assets WHERE target_id=?
+		AND COALESCE(approval_status,'approved')='approved'
+		AND COALESCE(asset_type,'domain') IN ('domain','wildcard')
+		ORDER BY created_at ASC, id ASC`, targetID)
 	if err == nil {
 		for rows.Next() {
 			var value string
@@ -1545,13 +1598,56 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 	s.logger.Info("Watch pass found changes — escalating", "target", domain,
 		"new_subdomains", newSubs, "changes", changes)
 	if s.notifier != nil {
-		summary := fmt.Sprintf("%d new subdomain(s), %d change(s) — running backup discovery + nuclei", newSubs, changes)
+		summary := fmt.Sprintf("%d new subdomain(s), %d change(s) — scheduling change-specific verification", newSubs, changes)
 		s.notifier.NotifyMonitorChange(domain, "new-asset", summary, "", "")
 	}
 
-	// Re-probe first so any brand-new hosts are fingerprinted, then run the value
-	// checks the user asked to always run on change.
-	esc := []string{ModuleHTTPProbe, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei}
+	// Build a selective follow-up from the actual diff. A changed JS seed needs
+	// recursive JS/endpoints/DOM analysis; an HTTP/security change needs web
+	// fingerprint + exposure checks. New hosts retain the broader discovery pass.
+	// This is both faster and stronger than blindly running the same four modules.
+	types := map[string]bool{}
+	rows, err := s.db.Query(`SELECT DISTINCT change_type FROM monitoring_changes WHERE target_id=? AND detected_at>=?`,
+		targetID, since.UTC().Format("2006-01-02 15:04:05"))
+	if err == nil {
+		for rows.Next() {
+			var typ string
+			if rows.Scan(&typ) == nil {
+				types[typ] = true
+			}
+		}
+		rows.Close()
+	}
+	modules := map[string]bool{}
+	add := func(names ...string) {
+		for _, name := range names {
+			modules[name] = true
+		}
+	}
+	if newSubs > 0 {
+		add(ModuleHTTPProbe, ModuleTakeover, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei)
+	}
+	if types["js_change"] {
+		add(ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleDOMXSS, ModuleExposure)
+	}
+	if types["page_change"] || types["http_change"] || types["status_change"] {
+		add(ModuleHTTPProbe, ModuleHeadlessCrawl, ModuleJSAnalysis, ModuleParamDiscovery, ModuleBackupDiscovery, ModuleNuclei)
+	}
+	for typ := range types {
+		if strings.HasPrefix(typ, "security:") || typ == "security_header_removed" {
+			add(ModuleExposure, ModuleCORS, ModuleNuclei)
+		}
+	}
+	if len(modules) == 0 {
+		add(ModuleHTTPProbe, ModuleBackupDiscovery, ModuleNuclei)
+	}
+	preferred := []string{ModuleHTTPProbe, ModuleHeadlessCrawl, ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleDOMXSS, ModuleTakeover, ModuleExposure, ModuleCORS, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei}
+	esc := make([]string, 0, len(modules))
+	for _, m := range preferred {
+		if modules[m] {
+			esc = append(esc, m)
+		}
+	}
 	if _, err := s.CreateTaskTyped(targetID, esc, 2, monitorEscalationType); err != nil {
 		s.logger.Error("Failed to enqueue watch escalation", "target", domain, "error", err)
 	}
@@ -1877,6 +1973,37 @@ func (s *Scheduler) monitoringScheduler() {
 			return
 		case <-ticker.C:
 			s.runDueMonitors()
+		}
+	}
+}
+
+func (s *Scheduler) bountyCatalogScheduler() {
+	defer s.wg.Done()
+	syncCatalog := func(label string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-s.stopCh:
+				cancel()
+			case <-done:
+			}
+		}()
+		if err := s.bountyCatalog.SyncAll(ctx, false); err != nil && !strings.Contains(err.Error(), "already running") {
+			s.logger.Warn(label+" bounty catalog sync incomplete", "error", err)
+		}
+		close(done)
+		cancel()
+	}
+	syncCatalog("Initial")
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			syncCatalog("Scheduled")
 		}
 	}
 }

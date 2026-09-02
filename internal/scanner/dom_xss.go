@@ -946,6 +946,31 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
+// serverReflectsDOMSource keeps ownership of server-rendered vectors with the
+// reflected-XSS detector. A query/path payload that is already present in the raw
+// HTTP response may still execute after Chromium renders it, but reporting that
+// same proof again as DOM XSS creates a duplicate and mislabels its source. Hash,
+// window.name and postMessage are never sent in the document request and therefore
+// remain intrinsically DOM-only.
+func serverReflectsDOMSource(ctx context.Context, pageURL, mode, param string, auth map[string]string) bool {
+	base := strings.SplitN(pageURL, "#", 2)[0]
+	ip := insertionPoint{URL: base, Method: "GET"}
+	switch mode {
+	case "query":
+		if param == "" {
+			param = "rcx"
+		}
+		ip.Param, ip.Location = param, "query"
+	case "path":
+		ip.Param, ip.Location = "path", param
+	default:
+		return false
+	}
+	marker := newXSSToken("rcndomraw")
+	r := sendInjectedResponse(ctx, dastClient, ip, marker, auth)
+	return r.Status > 0 && strings.Contains(r.Body, marker)
+}
+
 // VerifyDOMXSSOnPages drives a REAL headless browser to CONFIRM DOM XSS: for each
 // HTML page it places an executing payload in location.hash and in a query param
 // and observes whether it actually runs (the value flows attacker-URL → app JS →
@@ -1019,6 +1044,13 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		for _, test := range tests {
 			if budget <= 0 {
 				break
+			}
+			// Query/path values present in the raw server response belong to the
+			// reflected-XSS pipeline. Its browser verifier observes the same runtime
+			// execution, so running the DOM ladder too would produce two findings for
+			// one vulnerability. DOM-only sources continue below.
+			if serverReflectsDOMSource(ctx, page.URL, test.mode, test.param, auth) {
+				continue
 			}
 			// One inert DOM canary prevents the complete cross-context payload
 			// ladder from running on sources the page never consumes. A static

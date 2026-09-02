@@ -32,12 +32,19 @@ type Target struct {
 // Asset is one individually-scannable entry of a target (a domain, IP, CIDR, or
 // a mix of them). Named, add/removable, and scanned on its own.
 type Asset struct {
-	ID        string    `json:"id"`
-	TargetID  string    `json:"target_id"`
-	Name      string    `json:"name"`
-	Value     string    `json:"value"`
-	Kind      string    `json:"kind"` // web | network | mixed
-	CreatedAt time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	TargetID       string    `json:"target_id"`
+	Name           string    `json:"name"`
+	Value          string    `json:"value"`
+	Kind           string    `json:"kind"`       // web | network | mixed
+	AssetType      string    `json:"asset_type"` // domain | url | js | wildcard | cidr | ip | api | other
+	Source         string    `json:"source"`
+	SourceID       string    `json:"source_id"`
+	ApprovalStatus string    `json:"approval_status"` // approved | pending | suspended
+	MonitorEnabled bool      `json:"monitor_enabled"`
+	Metadata       string    `json:"metadata"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type Subdomain struct {
@@ -185,15 +192,15 @@ type VulnFinding struct {
 }
 
 type Task struct {
-	ID            string   `json:"id"`
-	TargetID      string   `json:"target_id"`
-	Name          string   `json:"name"` // user-supplied scan name (falls back to target domain when empty)
-	Type          string   `json:"type"`
-	Status        string   `json:"status"`
-	Priority      int      `json:"priority"`
-	Progress      int      `json:"progress"`
-	Total         int      `json:"total"`
-	CurrentModule string   `json:"current_module"`
+	ID            string `json:"id"`
+	TargetID      string `json:"target_id"`
+	Name          string `json:"name"` // user-supplied scan name (falls back to target domain when empty)
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	Priority      int    `json:"priority"`
+	Progress      int    `json:"progress"`
+	Total         int    `json:"total"`
+	CurrentModule string `json:"current_module"`
 	// EtaSeconds / ModuleEtaSeconds: live estimate of seconds remaining for the
 	// whole scan and the current module (0 when not running / unknown).
 	EtaSeconds       int      `json:"eta_seconds"`

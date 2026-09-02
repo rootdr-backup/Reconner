@@ -2,8 +2,34 @@ package scanner
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+func TestServerReflectsDOMSourceSeparatesReflectedFromDOMOnly(t *testing.T) {
+	withLoopbackAllowed(t)
+	reflected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<div>` + r.URL.Query().Get("q") + `</div>`))
+	}))
+	defer reflected.Close()
+	if !serverReflectsDOMSource(context.Background(), reflected.URL+"/?q=x", "query", "q", nil) {
+		t.Fatal("raw server reflection must stay owned by reflected-XSS")
+	}
+
+	domOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<div id=x></div><script>x.innerHTML=new URLSearchParams(location.search).get('q')</script>`))
+	}))
+	defer domOnly.Close()
+	if serverReflectsDOMSource(context.Background(), domOnly.URL+"/?q=x", "query", "q", nil) {
+		t.Fatal("client-only query flow must remain eligible for DOM-XSS proof")
+	}
+	if serverReflectsDOMSource(context.Background(), domOnly.URL, "hash", "", nil) {
+		t.Fatal("fragments are not sent to the server and must remain DOM-only")
+	}
+}
 
 // TestAnalyzeDOMXSSPrecise proves direct URL and unguarded postMessage flows reach
 // real markup/code sinks while unrelated values and non-sinks stay silent.

@@ -14,7 +14,7 @@ import (
 
 // TestRunXSSIsolatesFromSQLi proves the standalone XSS objective is XSS-only: on
 // an endpoint that is BOTH reflected-XSS-vulnerable AND emits a SQL error on a
-// broken quote, RunXSS confirms the XSS finding but registers NO SQLi candidate
+// broken quote, RunXSS detects the XSS but registers NO SQLi candidate
 // (the error-based SQLi side-channel is skipped in XSS-only mode).
 func TestRunXSSIsolatesFromSQLi(t *testing.T) {
 	withLoopbackAllowed(t)
@@ -50,9 +50,9 @@ func TestRunXSSIsolatesFromSQLi(t *testing.T) {
 	}
 
 	var xss int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='xss'`, tid).Scan(&xss)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM candidates WHERE target_id=? AND type='xss' AND status IN ('INCONCLUSIVE','CONFIRMED')`, tid).Scan(&xss)
 	if xss == 0 {
-		t.Error("RunXSS must confirm the reflected XSS")
+		t.Error("RunXSS must retain the reflected-XSS candidate for runtime proof")
 	}
 	// Isolation: no SQLi candidate and no SQLi finding.
 	var sqliCand, sqliFind int

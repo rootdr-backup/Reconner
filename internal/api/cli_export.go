@@ -23,6 +23,7 @@ func NewHandler(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler,
 		cfg:     cfg,
 		logger:  log,
 		updates: newReleaseChecker(),
+		bounty:  sched.BountyCatalog(),
 	}
 }
 

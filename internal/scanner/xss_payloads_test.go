@@ -96,6 +96,28 @@ func TestExecPayloadSurvived(t *testing.T) {
 	}
 }
 
+// Regression for the Tirana Airport false positive: the complete attack string
+// is URL-encoded inside og:url. It is text in one meta attribute, not a script
+// node, even though the decoded request URL would spell a valid payload.
+func TestExecPayloadSurvivedRejectsEncodedScriptInOGURL(t *testing.T) {
+	p := xssExecPayload{Payload: `"><script>alert(document.domain)</script>`, Elem: "script", Token: xssAlert}
+	body := `<!doctype html><html><head><meta name="url" property="og:url" content="https://www.tirana-airport.com/?userid=%22%3E%3Cscript%3Ealert%28document.domain%29%3C%2Fscript%3E"></head><body>` +
+		`<script src="/assets/app.js"></script></body></html>`
+	if execPayloadSurvived(body, p) {
+		t.Fatal("percent-encoded script payload in og:url must never count as a live script")
+	}
+}
+
+func TestAnalyzeReflectionRejectsPercentEncodedOGURLProbe(t *testing.T) {
+	marker := "rcntirana"
+	encodedSuffix := `%27%22%3C%3E%60%5C%5C%2F%28%29%3B%3D+%09`
+	body := `<meta name="url" property="og:url" content="https://www.tirana-airport.com/?userid=` + marker + encodedSuffix + `">`
+	a := analyzeReflectionProbe(body, marker, xssProbeSuffix)
+	if !a.Reflected || a.Executable || !a.Encoded {
+		t.Fatalf("encoded og:url reflection must be reflected+encoded but non-executable: %+v", a)
+	}
+}
+
 func TestEveryTagPayloadUsesCorrelatedExecutionSignal(t *testing.T) {
 	for _, p := range htmlTextExecLadder() {
 		if p.Elem == "" {

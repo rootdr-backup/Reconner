@@ -3,9 +3,11 @@ package scanner
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,6 +34,12 @@ var monitorClient = &http.Client{
 	Transport: sharedHTTPTransport,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
+			return http.ErrUseLastResponse
+		}
+		// A monitored in-scope page can redirect to login, payments or another
+		// third party. Never turn that redirect into an out-of-scope GET. Same-host
+		// HTTP→HTTPS and path redirects remain useful and are still followed.
+		if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
 			return http.ErrUseLastResponse
 		}
 		return nil
@@ -72,8 +80,11 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 
 	logFn("info", "monitor", fmt.Sprintf("Monitoring %d HTTP services for changes...", len(services)))
 	changed := 0
+	knownHTTP := map[string]bool{}
+	knownJS := map[string]bool{}
 
 	for _, svc := range services {
+		knownHTTP[svc.URL] = true
 		if ctx.Err() != nil {
 			break
 		}
@@ -148,6 +159,7 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 		jsRows.Close()
 
 		for _, jf := range jsFiles {
+			knownJS[jf.URL] = true
 			if ctx.Err() != nil {
 				break
 			}
@@ -164,9 +176,109 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 		}
 	}
 
+	// Explicit Project assets can be a full page/API URL or a JavaScript file
+	// that has not yet entered http_services/js_files. Monitor those seeds
+	// directly so a project is useful before (or without) a full recon scan.
+	assetChanges, err := s.monitorProjectAssets(ctx, targetID, knownHTTP, knownJS, logFn)
+	if err != nil {
+		logFn("warn", "monitor", "Some explicit project assets could not be monitored: "+err.Error())
+	}
+	changed += assetChanges
+
 	// New subdomain detection - re-run passive sources and compare
 	logFn("info", "monitor", fmt.Sprintf("Change monitoring complete. Detected %d changes.", changed))
 	return nil
+}
+
+func monitorAssetURL(value, assetType string) string {
+	v := strings.TrimSpace(value)
+	if v == "" || assetType == "wildcard" || assetType == "cidr" || assetType == "ip" ||
+		assetType == "android" || assetType == "ios" || assetType == "hardware" || assetType == "source_code" || assetType == "other" {
+		return ""
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		if u, err := url.Parse(v); err == nil && u.Hostname() != "" {
+			return u.String()
+		}
+		return ""
+	}
+	if strings.ContainsAny(v, " \t\r\n,") {
+		return ""
+	}
+	return "https://" + strings.TrimPrefix(v, "//")
+}
+
+func (s *MonitorScanner) monitorProjectAssets(ctx context.Context, targetID string, knownHTTP, knownJS map[string]bool, logFn LogFunc) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,value,COALESCE(asset_type,'domain'),COALESCE(metadata,'{}')
+		FROM assets WHERE target_id=? AND COALESCE(approval_status,'approved')='approved' AND COALESCE(monitor_enabled,1)=1`, targetID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type record struct{ id, value, typ, metadata string }
+	var assets []record
+	for rows.Next() {
+		var a record
+		if rows.Scan(&a.id, &a.value, &a.typ, &a.metadata) == nil {
+			assets = append(assets, a)
+		}
+	}
+	changed := 0
+	for _, a := range assets {
+		if ctx.Err() != nil {
+			return changed, ctx.Err()
+		}
+		u := monitorAssetURL(a.value, a.typ)
+		if u == "" {
+			continue
+		}
+		isJS := a.typ == "js" || strings.HasSuffix(strings.ToLower(strings.Split(u, "?")[0]), ".js")
+		if (isJS && knownJS[u]) || (!isJS && knownHTTP[u]) {
+			continue
+		}
+		meta := map[string]any{}
+		_ = json.Unmarshal([]byte(a.metadata), &meta)
+		oldHash, _ := meta["monitor_hash"].(string)
+		if isJS {
+			newHash, size, fetchErr := s.fetchHash(ctx, u)
+			if fetchErr != nil || newHash == "" {
+				continue
+			}
+			if oldHash != "" && oldHash != newHash {
+				s.recordChange(targetID, u, "js_change", oldHash, newHash, classifyChangeSeverity("js_change"))
+				logFn("warn", "monitor", fmt.Sprintf("[PROJECT JS CHANGE] %s", u))
+				changed++
+			}
+			meta["monitor_hash"] = newHash
+			meta["monitor_size"] = size
+			meta["monitor_checked_at"] = time.Now().UTC().Format(time.RFC3339)
+		} else {
+			status, title, body, hdr, fetchErr := s.fetchBody(ctx, u)
+			if fetchErr != nil {
+				continue
+			}
+			newHash := normalizedHash(body)
+			oldStatus, _ := meta["monitor_status"].(float64)
+			oldTitle, _ := meta["monitor_title"].(string)
+			if oldHash != "" && (oldHash != newHash || int(oldStatus) != status || oldTitle != title) {
+				severity := "low"
+				if int(oldStatus) != status {
+					severity = classifyChangeSeverity("status")
+				}
+				s.recordChange(targetID, u, "page_change", fmt.Sprintf("status=%d title=%s", int(oldStatus), oldTitle), fmt.Sprintf("status=%d title=%s", status, title), severity)
+				logFn("warn", "monitor", fmt.Sprintf("[PROJECT PAGE CHANGE] %s", u))
+				changed++
+			}
+			meta["monitor_hash"] = newHash
+			meta["monitor_status"] = status
+			meta["monitor_title"] = title
+			meta["monitor_content_type"] = hdr.Get("Content-Type")
+			meta["monitor_checked_at"] = time.Now().UTC().Format(time.RFC3339)
+		}
+		encoded, _ := json.Marshal(meta)
+		_, _ = s.db.ExecContext(ctx, `UPDATE assets SET metadata=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, string(encoded), a.id)
+	}
+	return changed, nil
 }
 
 // fetchBody returns status, title and the raw body for normalized-hash and
@@ -209,6 +321,8 @@ func notificationTitle(changeType string) string {
 		return "JavaScript changed"
 	case "http_change", "status_change":
 		return "HTTP response changed"
+	case "page_change":
+		return "Monitored project page changed"
 	case "new_subdomain":
 		return "New subdomain discovered"
 	case "header_regression":

@@ -541,21 +541,15 @@ func exploitExample(ctxName, injected string) string {
 	return contextPayload(ctxName)
 }
 
-// proveExecutingXSS returns a payload the application does NOT neutralise — one
-// that genuinely executes — so the reported PoC pops instead of being a real bug
-// with a filtered payload. Order of proof strength:
-//  1. Headless browser: navigates the injected GET URL and confirms alert() truly
-//     ran (document.title nonce), returning the EXACT payload that executed (99).
-//  2. Browserless bypass ladder: rotates the context's executing payloads (case/
-//     slash/rare-tag/rare-handler WAF variants) and returns the first whose element
-//     + handler survive RAW as live markup (95).
-//  3. Fallback: injection was proven but every tested vector was filtered — report
-//     the canonical payload at lower confidence so a human can craft a bypass (90).
+// proveExecutingXSS promotes an XSS only after a real browser observes our random
+// execution nonce. The raw-response ladder is useful for choosing a likely PoC,
+// but is deliberately NOT proof: an HTML serializer, inert template, noscript
+// branch, CSP edge case or parser difference can all make executable-looking
+// markup non-executing. This distinction is what keeps reflected HTML injection
+// out of the confirmed-XSS bucket.
 func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, auth map[string]string, baseline string) (payload, proof string, confidence int, executed bool) {
-	// 1) browserless rotation over the executing/bypass ladder: the first alert
-	//    payload whose element + handler survive RAW as live markup in an HTML
-	//    response. Raw survival in an HTML sink means a browser navigating it WILL
-	//    execute — this is the clean, copy-paste alert PoC we prefer to report.
+	// 1) Browserless rotation selects a strong candidate payload. It never sets
+	// executed=true by itself.
 	ladder := ""
 	for _, p := range buildExecPayloads(a) {
 		if ctx.Err() != nil {
@@ -569,7 +563,7 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 			break
 		}
 	}
-	// 2) independent real-execution proof in a headless browser (GET sinks). This
+	// 2) Independent real-execution proof in a headless browser (GET sinks). This
 	//    also catches client-rendered / SPA reflections the raw-HTML pass can't see.
 	browserPayload := ""
 	if b := getXSSBrowser(); b != nil {
@@ -585,7 +579,7 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 		// or a filter the raw check couldn't beat) — report the browser-proven vector.
 		return browserPayload, "browser", 99, true
 	case ladder != "":
-		return ladder, "differential", 95, true
+		return ladder, "differential-candidate", 85, false
 	default:
 		// HTML injection alone is not JavaScript execution. Keep it as a candidate
 		// when every executable vector is filtered or blocked by CSP.
@@ -634,19 +628,16 @@ func (s *DASTScanner) xssCandidate(targetID string, ip insertionPoint, ctxName, 
 	}
 }
 
-// confirmXSS records a CONFIRMED reflected-XSS candidate + a finding. The payload
-// stored is one PROVEN to survive/execute (browser real-exec, or a bypass-ladder
-// vector that landed raw as live markup) — so the report's PoC actually pops. The
-// proof label and confidence come from proveExecutingXSS.
+// confirmXSS records a CONFIRMED reflected-XSS candidate + a finding. Callers may
+// invoke it only for a browser-observed nonce; browserless differential evidence
+// remains a candidate and never reaches this method.
 func (s *DASTScanner) confirmXSS(ctx context.Context, targetID string, ip insertionPoint, ctxName, execPayload, proof string, confidence int) {
 	var how string
 	switch proof {
 	case "browser", "browser+differential":
 		how = "EXECUTION CONFIRMED in a real headless browser (JavaScript changed document.title to our random nonce; the reported PoC uses alert(document.domain))"
-	case "differential":
-		how = "HTML injection proven and this exact payload survived RAW as live markup (bypass-ladder differential vs baseline)"
 	default:
-		how = "HTML injection proven via a benign marker element (differential vs baseline); this canonical payload is a starting point — the app filtered the tested executing vectors, craft a bypass"
+		how = "EXECUTION CONFIRMED in a real headless browser using a random document.title nonce"
 	}
 	ev := fmt.Sprintf("Reflected XSS in %s context at parameter %q. %s. Working payload: %s",
 		ctxName, ip.Param, how, execPayload)

@@ -182,10 +182,10 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">
-            {filterKind === 'web' ? 'Web Targets' : filterKind === 'network' ? 'Network Targets' : 'Targets'}
+            {filterKind === 'web' ? 'Web Projects' : filterKind === 'network' ? 'Network Projects' : 'Projects'}
           </h1>
           <p className="text-xs text-text-muted">
-            {kindTargets.length} target{kindTargets.length === 1 ? '' : 's'} · domains &amp; subdomains — web application scanning
+            {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · group domains, URLs, JavaScript files, network scope, or a public bounty program
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -195,7 +195,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             </Button>
           )}
           <Button size="sm" variant="ghost" onClick={() => fileRef.current?.click()}>Import</Button>
-          <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>+ Add Target</Button>
+          <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>+ New Project</Button>
           <input ref={fileRef} type="file" accept=".txt,.csv" onChange={handleImport} className="hidden" />
         </div>
       </div>
@@ -319,18 +319,18 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
 
       {/* Create / Edit Modal */}
       <Modal open={createOpen || !!editTarget} onClose={() => { setCreateOpen(false); setEditTarget(null); setForm(emptyForm) }}
-        title={editTarget ? 'Edit Target' : 'Add Target'} width="md">
+        title={editTarget ? 'Edit Project' : 'Create Project'} width="md">
         <div className="space-y-3">
-          <Input label="Name" placeholder="friendly label for this target (optional)"
+          {!editTarget && <button type="button" onClick={() => { setCreateOpen(false); navigate('/bounty-programs') }} className="w-full rounded-lg border border-accent/20 bg-accent/[.06] px-3 py-2 text-left text-xs text-accent hover:bg-accent/[.1]">Or choose a HackerOne / Bugcrowd program and import its current scope →</button>}
+          <Input label="Project name" placeholder="friendly label for this project (optional)"
             value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           <div>
-            <label className="label">Scope — domains &amp; subdomains *</label>
+            <label className="label">Initial assets *</label>
             <textarea className="input resize-none font-mono text-xs" rows={5}
-              placeholder={"One or more web hosts — comma or newline separated:\nexample.com\napi.example.com\napp.example.com"}
+              placeholder={"One asset per line — domains, URLs/pages, JS files, IPs or CIDRs:\nexample.com\nhttps://app.example.com/account\nhttps://cdn.example.com/app.js\n10.10.0.0/24"}
               value={form.domain} onChange={e => setForm({ ...form, domain: e.target.value })} />
             <p className="text-[10px] text-text-muted mt-1">
-              Add one or more domains/subdomains to scan. Subdomain enumeration runs only when you tick it in the scan dialog.
-              Pasted <span className="font-mono">http://host:port/</span> is cleaned automatically.
+              Reconner creates individually manageable assets. A full URL stays a page seed, a <span className="font-mono">.js</span> URL stays a JavaScript seed, and network ranges use the network pipeline.
             </p>
           </div>
           <div>
@@ -365,7 +365,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       </Modal>
 
       {/* Delete Confirm Modal */}
-      <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete Target" width="sm">
+      <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete Project" width="sm">
         <div className="space-y-4">
           <p className="text-sm text-text-secondary">
             Are you sure you want to delete <span className="font-semibold text-text-primary break-words" title={deleteTarget?.domain}>
@@ -381,7 +381,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       </Modal>
 
       {/* Bulk Delete Confirm Modal */}
-      <Modal open={bulkOpen} onClose={() => setBulkOpen(false)} title="Delete Selected Targets" width="sm">
+      <Modal open={bulkOpen} onClose={() => setBulkOpen(false)} title="Delete Selected Projects" width="sm">
         <div className="space-y-4">
           <p className="text-sm text-text-secondary">
             Permanently delete <span className="font-semibold text-text-primary">{selected.size}</span> selected

@@ -3,6 +3,7 @@ import type {
   Parameter, DirectoryFinding, BackupFinding, OpenRedirectFinding,
   NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, DashboardStats, AttackPath,
   NetworkService, IngramCamera, Asset,
+  BountyProgram, BountySyncState, BountyScopeEvent,
 } from '../types'
 
 const BASE = '/api'
@@ -82,9 +83,9 @@ export const targets = {
     req<Target>('/targets', { method: 'POST', body: JSON.stringify(data) }),
   networkServices: (id: string) => req<NetworkService[]>(`/targets/${id}/network-services`),
   assets: (id: string) => req<Asset[]>(`/targets/${id}/assets`),
-  addAsset: (id: string, value: string, name: string) =>
-    req<Asset>(`/targets/${id}/assets`, { method: 'POST', body: JSON.stringify({ value, name }) }),
-  updateAsset: (id: string, aid: string, data: { name?: string; value?: string }) =>
+  addAsset: (id: string, value: string, name: string, assetType?: string) =>
+    req<Asset>(`/targets/${id}/assets`, { method: 'POST', body: JSON.stringify({ value, name, asset_type: assetType }) }),
+  updateAsset: (id: string, aid: string, data: { name?: string; value?: string; asset_type?: string }) =>
     req<void>(`/targets/${id}/assets/${aid}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAsset: (id: string, aid: string) =>
     req<void>(`/targets/${id}/assets/${aid}`, { method: 'DELETE' }),
@@ -132,6 +133,28 @@ export const targets = {
     form.append('file', file)
     return req<{imported: number; total: number}>('/targets/import', { method: 'POST', headers: {}, body: form })
   },
+}
+
+export interface BountyProgramList {
+  programs: BountyProgram[]
+  total: number
+  page: number
+  limit: number
+}
+
+export const bounty = {
+  list: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : ''
+    return req<BountyProgramList>(`/bounty/programs${q}`)
+  },
+  get: (id: string) => req<BountyProgram>(`/bounty/programs/${id}`),
+  status: () => req<BountySyncState[]>('/bounty/status'),
+  sync: () => req<{ status: string }>('/bounty/sync', { method: 'POST' }),
+  createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number }) =>
+    req<{ id: string; url: string }>(`/bounty/programs/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
+  events: (targetId: string) => req<BountyScopeEvent[]>(`/targets/${targetId}/bounty-events`),
+  resolveEvent: (targetId: string, eventId: string, decision: 'approve' | 'reject') =>
+    req<{ status: string }>(`/targets/${targetId}/bounty-events/${eventId}`, { method: 'POST', body: JSON.stringify({ decision }) }),
 }
 
 export const findings = {
