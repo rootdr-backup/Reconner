@@ -32,15 +32,18 @@ func TestXSSVerifierRequiresRealExecution(t *testing.T) {
 		t.Fatalf("a reflection where NO real tag forms must NOT verify (nuclei FP class): %+v", res)
 	}
 
-	// Control: a genuinely raw reflection (no stripping) must still VERIFY, so the
-	// stricter confirm did not break real detection.
+	// Control: a genuinely raw reflection (no stripping) must remain a strong
+	// candidate; it may verify only when the browser observes execution.
 	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<div>results for " + r.URL.Query().Get("q") + "</div>"))
 	}))
 	defer raw.Close()
 	res2 := v.Verify(context.Background(), VulnerabilityCandidate{Type: "xss", URL: raw.URL + "/?q=x", Parameter: "q"})
-	if res2.Verdict != VerifyVerified {
-		t.Fatalf("a genuinely executable raw reflection must still VERIFY: %+v", res2)
+	if res2.Verdict != VerifyInconclusive && res2.Verdict != VerifyVerified {
+		t.Fatalf("a genuinely executable raw reflection must remain detected: %+v", res2)
+	}
+	if res2.Verdict == VerifyVerified && res2.Method != "xss-browser" {
+		t.Fatalf("browserless evidence must not verify XSS: %+v", res2)
 	}
 }

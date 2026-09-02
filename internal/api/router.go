@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/recon-platform/internal/auth"
+	"github.com/recon-platform/internal/bounty"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/scheduler"
@@ -24,6 +25,7 @@ type Handler struct {
 	logger  *logger.Logger
 	auth    *auth.Auth
 	updates *releaseChecker
+	bounty  *bounty.Service
 }
 
 func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) http.Handler {
@@ -32,6 +34,10 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 		log.Error("Failed to ensure admin user", "error", err)
 	}
 
+	catalog := bounty.NewService(db, log)
+	if sched != nil {
+		catalog = sched.BountyCatalog()
+	}
 	h := &Handler{
 		db:      db,
 		hub:     hub,
@@ -40,6 +46,7 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 		logger:  log,
 		auth:    authService,
 		updates: newReleaseChecker(),
+		bounty:  catalog,
 	}
 
 	r := mux.NewRouter()
@@ -172,6 +179,18 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 	api.HandleFunc("/system/update-check", h.requireAuth(h.handleUpdateCheck)).Methods("GET")
 	api.HandleFunc("/notifications", h.requireAuth(h.handleListNotifications)).Methods("GET")
 	api.HandleFunc("/notifications/read", h.requireAuth(h.handleMarkNotificationsRead)).Methods("POST")
+
+	// Public bug-bounty program catalog and Project import workflow. Provider
+	// sync uses only the public resources behind the official HackerOne,
+	// Bugcrowd, Intigriti and YesWeHack directories; an admin controls forced
+	// refreshes.
+	api.HandleFunc("/bounty/programs", h.requireAuth(h.handleListBountyPrograms)).Methods("GET")
+	api.HandleFunc("/bounty/programs/{programID}", h.requireAuth(h.handleGetBountyProgram)).Methods("GET")
+	api.HandleFunc("/bounty/programs/{programID}/projects", h.requireAuth(h.handleCreateProjectFromProgram)).Methods("POST")
+	api.HandleFunc("/bounty/status", h.requireAuth(h.handleBountySyncStatus)).Methods("GET")
+	api.HandleFunc("/bounty/sync", h.requireAdmin(h.handleSyncBountyCatalog)).Methods("POST")
+	api.HandleFunc("/targets/{id}/bounty-events", h.requireAuth(h.handleListBountyEvents)).Methods("GET")
+	api.HandleFunc("/targets/{id}/bounty-events/{eventID}", h.requireAuth(h.handleResolveBountyEvent)).Methods("POST")
 
 	// SPA fallback
 	r.PathPrefix("/").HandlerFunc(h.serveSPA(frontendDir))

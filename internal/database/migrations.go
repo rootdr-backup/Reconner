@@ -104,6 +104,19 @@ func RunMigrations(db *DB) error {
 		alterTasksAddEta,
 		alterTasksAddModuleEta,
 		alterParametersAddLocation,
+		createBountyProgramsTable,
+		createBountyProgramAssetsTable,
+		createBountySyncStateTable,
+		createProjectProgramsTable,
+		createBountyScopeEventsTable,
+		alterAssetsAddAssetType,
+		alterAssetsAddSource,
+		alterAssetsAddSourceID,
+		alterAssetsAddApprovalStatus,
+		alterAssetsAddMonitorEnabled,
+		alterAssetsAddMetadata,
+		alterAssetsAddUpdatedAt,
+		createBountyIndexes,
 	}
 
 	for i, m := range migrations {
@@ -117,8 +130,46 @@ func RunMigrations(db *DB) error {
 	if err := migrateParametersRequestIdentity(db); err != nil {
 		return fmt.Errorf("parameters request-identity migration failed: %w", err)
 	}
+	if err := migrateBrowserlessXSSConfirmations(db); err != nil {
+		return fmt.Errorf("XSS runtime-proof migration failed: %w", err)
+	}
 
 	return nil
+}
+
+// migrateBrowserlessXSSConfirmations repairs findings created by pre-1.3 builds
+// that treated raw executable-looking markup as proof of JavaScript execution.
+// Those observations remain valuable candidates, but only an xss-browser nonce
+// may remain CONFIRMED. The migration is idempotent and preserves an audit row.
+func migrateBrowserlessXSSConfirmations(db *DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	predicate := `type='xss' AND status='CONFIRMED' AND (
+		verification_method='dast-differential' OR
+		(verification_method='xss-context' AND COALESCE(confidence,0)<99) OR
+		detection_method LIKE '%/differential')`
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO candidate_transitions
+		(id,candidate_id,target_id,from_state,to_state,actor,method,reason,state_version)
+		SELECT 'xss-runtime-proof-v1:' || id,id,target_id,'CONFIRMED','INCONCLUSIVE',
+		'migration','runtime-proof-policy','browserless markup survival requires browser execution proof',COALESCE(state_version,0)+1
+		FROM candidates WHERE ` + predicate); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE vuln_findings SET status='candidate',lifecycle='INCONCLUSIVE',
+		confidence=MIN(COALESCE(confidence,85),85),priority=MIN(COALESCE(priority,0),85)
+		WHERE candidate_id IN (SELECT id FROM candidates WHERE ` + predicate + `)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE candidates SET status='INCONCLUSIVE',confidence=MIN(COALESCE(confidence,85),85),
+		verification_method='xss-runtime-required',
+		verification_reason='browserless markup survival requires browser execution proof',
+		state_version=COALESCE(state_version,0)+1 WHERE ` + predicate); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrateParametersRequestIdentity removes the legacy uniqueness constraint
@@ -206,6 +257,131 @@ CREATE TABLE IF NOT EXISTS assets (
 	UNIQUE(target_id, value),
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
 );`
+
+// Public HackerOne/Bugcrowd/Intigriti/YesWeHack programs are cached locally. The catalog is a
+// cache, never the authority for scan scope: imported assets are copied into a
+// project and new upstream scope entries stay pending until the operator
+// explicitly approves them.
+const createBountyProgramsTable = `
+CREATE TABLE IF NOT EXISTS bounty_programs (
+	id TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	external_id TEXT NOT NULL,
+	handle TEXT NOT NULL,
+	name TEXT NOT NULL,
+	url TEXT DEFAULT '',
+	logo_url TEXT DEFAULT '',
+	description TEXT DEFAULT '',
+	status TEXT DEFAULT 'unknown',
+	program_type TEXT DEFAULT 'vdp',
+	industry TEXT DEFAULT '',
+	offers_bounties INTEGER DEFAULT 0,
+	open_scope INTEGER DEFAULT 0,
+	safe_harbor TEXT DEFAULT '',
+	asset_count INTEGER DEFAULT 0,
+	in_scope_count INTEGER DEFAULT 0,
+	wildcard_count INTEGER DEFAULT 0,
+	scope_rank INTEGER DEFAULT 0,
+	min_reward_cents INTEGER DEFAULT 0,
+	max_reward_cents INTEGER DEFAULT 0,
+	currency TEXT DEFAULT 'USD',
+	started_at DATETIME,
+	published_at DATETIME,
+	provider_updated_at DATETIME,
+	last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	detail_synced_at DATETIME,
+	scope_hash TEXT DEFAULT '',
+	raw_json TEXT DEFAULT '{}',
+	UNIQUE(provider, external_id)
+);`
+
+const createBountyProgramAssetsTable = `
+CREATE TABLE IF NOT EXISTS bounty_program_assets (
+	id TEXT PRIMARY KEY,
+	program_id TEXT NOT NULL,
+	external_id TEXT NOT NULL,
+	identifier TEXT NOT NULL,
+	asset_type TEXT DEFAULT 'other',
+	category TEXT DEFAULT 'other',
+	is_wildcard INTEGER DEFAULT 0,
+	in_scope INTEGER DEFAULT 1,
+	eligible_submission INTEGER DEFAULT 1,
+	eligible_bounty INTEGER DEFAULT 0,
+	max_severity TEXT DEFAULT '',
+	instruction TEXT DEFAULT '',
+	reward_json TEXT DEFAULT '{}',
+	metadata TEXT DEFAULT '{}',
+	active INTEGER DEFAULT 1,
+	provider_created_at DATETIME,
+	provider_updated_at DATETIME,
+	first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	raw_hash TEXT DEFAULT '',
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
+	UNIQUE(program_id, external_id)
+);`
+
+const createBountySyncStateTable = `
+CREATE TABLE IF NOT EXISTS bounty_sync_state (
+	provider TEXT PRIMARY KEY,
+	status TEXT DEFAULT 'never',
+	last_started_at DATETIME,
+	last_completed_at DATETIME,
+	next_sync_at DATETIME,
+	program_count INTEGER DEFAULT 0,
+	asset_count INTEGER DEFAULT 0,
+	last_error TEXT DEFAULT '',
+	failure_count INTEGER DEFAULT 0,
+	etag TEXT DEFAULT ''
+);`
+
+const createProjectProgramsTable = `
+CREATE TABLE IF NOT EXISTS project_programs (
+	target_id TEXT NOT NULL,
+	program_id TEXT NOT NULL,
+	auto_sync INTEGER DEFAULT 1,
+	last_scope_hash TEXT DEFAULT '',
+	last_checked_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (target_id, program_id),
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE
+);`
+
+const createBountyScopeEventsTable = `
+CREATE TABLE IF NOT EXISTS bounty_scope_events (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	program_id TEXT NOT NULL,
+	program_asset_id TEXT,
+	event_type TEXT NOT NULL,
+	identifier TEXT NOT NULL,
+	old_json TEXT DEFAULT '{}',
+	new_json TEXT DEFAULT '{}',
+	status TEXT DEFAULT 'pending',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	resolved_at DATETIME,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
+	FOREIGN KEY (program_asset_id) REFERENCES bounty_program_assets(id) ON DELETE SET NULL
+);`
+
+const alterAssetsAddAssetType = `ALTER TABLE assets ADD COLUMN asset_type TEXT DEFAULT 'domain';`
+const alterAssetsAddSource = `ALTER TABLE assets ADD COLUMN source TEXT DEFAULT 'manual';`
+const alterAssetsAddSourceID = `ALTER TABLE assets ADD COLUMN source_id TEXT DEFAULT '';`
+const alterAssetsAddApprovalStatus = `ALTER TABLE assets ADD COLUMN approval_status TEXT DEFAULT 'approved';`
+const alterAssetsAddMonitorEnabled = `ALTER TABLE assets ADD COLUMN monitor_enabled INTEGER DEFAULT 1;`
+const alterAssetsAddMetadata = `ALTER TABLE assets ADD COLUMN metadata TEXT DEFAULT '{}';`
+const alterAssetsAddUpdatedAt = `ALTER TABLE assets ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;`
+
+const createBountyIndexes = `
+CREATE INDEX IF NOT EXISTS idx_bounty_programs_filter ON bounty_programs(provider, status, offers_bounties, wildcard_count, asset_count);
+CREATE INDEX IF NOT EXISTS idx_bounty_programs_started ON bounty_programs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bounty_assets_program_scope ON bounty_program_assets(program_id, active, in_scope, eligible_submission);
+CREATE INDEX IF NOT EXISTS idx_project_programs_program ON project_programs(program_id, auto_sync);
+CREATE INDEX IF NOT EXISTS idx_bounty_events_pending ON bounty_scope_events(target_id, status, detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(target_id, source, source_id, approval_status);
+`
 
 // scope_override pins a task to ONE asset's value (empty = scan the whole target).
 const alterTasksAddScopeOverride = `ALTER TABLE tasks ADD COLUMN scope_override TEXT DEFAULT '';`

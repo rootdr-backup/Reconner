@@ -37,6 +37,9 @@ workflow built for triage—not another folder full of uncorrelated text files.
   testing for authorized network engagements.
 - **Designed for long scans:** resumable tasks, persistent data, monitoring,
   live logs, reports and resource-aware scheduling.
+- **Program-aware projects:** browse public HackerOne, Bugcrowd, Intigriti and
+  YesWeHack programs, filter their declared scope, import only selected assets
+  and review scope changes before Reconner expands a scan.
 - **Works on phones:** the operations dashboard, navigation, scan activity and
   update center adapt to mobile screens and touch input.
 
@@ -158,6 +161,39 @@ Heavy XSS, SQLi and external verification stages are coordinated per target.
 Requests also share a bounded per-host gate so independently scheduled modules
 do not multiply into accidental WAF pressure. Different targets can still make
 progress in parallel within the configured CPU and memory budget.
+
+## Bug bounty catalog and Projects
+
+The **Bounty programs** menu normalizes public HackerOne, Bugcrowd, Intigriti
+and YesWeHack programs into one local catalog. It supports search and server-side pagination plus
+filters for provider, live status, bounty/VDP, declared in-scope asset count,
+wildcards, asset type, reward, industry, Safe Harbor and start/update order.
+The cache refreshes every six hours; an administrator can also request a
+background refresh from the dashboard. Provider indexes are cached first;
+structured scope is fetched lazily when a program is opened/imported, while
+programs linked to monitored Projects refresh every six hours. This keeps memory,
+bandwidth and provider load bounded. A provider outage leaves the last good
+catalog available and retries with backoff.
+
+Opening a program loads its current structured scope. Select the assets you want
+and create a Project, or create a Project manually and mix domains, wildcards,
+exact URLs/pages, JavaScript files, APIs, IPs and CIDRs. Exact page and JS assets
+are seeded directly into their relevant analysis pipeline instead of being
+reduced to a hostname.
+
+Program scope remains controlled by the operator:
+
+- newly published upstream assets become pending scope events and are never
+  scanned before explicit approval;
+- removed, private or submission-ineligible assets are suspended immediately,
+  while their findings and history remain intact;
+- modified scope instructions or eligibility generate a review event and a
+  dashboard notification;
+- monitoring records normalized page/HTTP/security/JavaScript diffs, then
+  schedules only the relevant verification modules when something changes.
+
+The catalog is a convenience cache, not legal authorization. Always verify the
+official program brief, exclusions and rules of engagement before scanning.
 
 ## Web reconnaissance and DAST
 

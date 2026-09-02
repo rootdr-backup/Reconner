@@ -547,14 +547,18 @@ func (v *XSSContextVerifier) CanVerify(c VulnerabilityCandidate) bool {
 	return c.Type == "xss" && (c.Subtype == "" || c.Subtype == "reflected")
 }
 
-// Verify first runs the fast, deterministic browserless analysis; if that does
-// not already PROVE the XSS, it escalates to a real headless browser (when one is
-// available) that renders the page and confirms actual payload execution. The
-// browser pass is what catches modern client-rendered / SPA reflections and
-// JS-context execution the browserless parser cannot prove.
+// Verify first runs fast browserless candidate analysis, then requires a real
+// headless browser to confirm actual payload execution. Reflection or even a live
+// executable-looking element is never sufficient for a confirmed XSS.
 func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidate) VerifyResult {
 	res := v.verifyBrowserless(ctx, c)
-	if res.Verdict == VerifyVerified {
+	// A deterministic rejection (for example, a percent-encoded payload inside
+	// an og:url attribute or a non-HTML response) cannot become reflected XSS by
+	// rendering the same response. Returning here also avoids paying the browser
+	// startup/navigation cost for inputs that have already been proven inert.
+	// Inconclusive results still escalate because SPAs may create a sink only
+	// after client-side JavaScript runs.
+	if res.Verdict == VerifyRejected {
 		return res
 	}
 	// Escalate everything the browserless pass did not prove — including the
@@ -571,11 +575,19 @@ func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidat
 			}
 		}
 		if pl, ok := b.ConfirmInsertion(ctx, ip, identityHeaders(v.identity)); ok {
+			preflight := strings.TrimSpace(res.Evidence)
+			if preflight == "" {
+				preflight = strings.TrimSpace(res.Reason)
+			}
+			evidence := "reflected XSS PROVEN in a real headless browser: the injected JavaScript changed document.title to a random nonce after the page rendered. Reflection alone cannot produce this proof. This works for client-rendered and SPA pages; the reported PoC is the alert(document.domain) equivalent. Executable payload: " + pl
+			if preflight != "" {
+				evidence += " | Browserless context preflight: " + preflight
+			}
 			return VerifyResult{
 				Verdict:    VerifyVerified,
 				Confidence: 99,
 				Method:     "xss-browser",
-				Evidence:   "reflected XSS PROVEN in a real headless browser: the injected JavaScript changed document.title to a random nonce after the page rendered. Reflection alone cannot produce this proof. This works for client-rendered and SPA pages; the reported PoC is the alert(document.domain) equivalent. Executable payload: " + pl,
+				Evidence:   evidence,
 			}
 		}
 	}
@@ -630,13 +642,14 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 			Method: "xss-context"}
 	}
 
-	// EXECUTION CONFIRM — the char-survival analysis above is necessary but NOT
+	// EXECUTION CANDIDATE — the char-survival analysis above is necessary but NOT
 	// sufficient: surviving '<' '>' can still be neutralised by the surrounding
 	// markup, so "reflected" is not "executable". This second stage injects a
 	// BENIGN marker ELEMENT with the context-appropriate breakout and requires it
 	// to materialise as a GENUINE start tag in an HTML-rendered response — the same
-	// browserless, deterministic proof the active DAST engine uses. Only THEN is
-	// the XSS verified. This is what kills the dominant reflected-XSS false
+	// browserless, deterministic evidence the active DAST engine uses. It still
+	// needs the Chromium nonce before verification. This kills the dominant
+	// reflected-XSS false
 	// positive (a nuclei/dalfox reflection hit that never actually forms a tag): a
 	// payload that does not become a live element is rejected, so a real finding
 	// means the marker element truly sits in the page and would execute.
@@ -652,17 +665,16 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 	confR := sendInjectedResponse(ctx, dastClient, ip, payload, auth)
 	if browserRendersResponse(confR.Status, confR.ContentType, confR.Body, confR.NoSniff) &&
 		htmlTagInjected(confR.Body, dastElement) && !strings.Contains(baseR.Body, needle) {
-		// HTML injection is not yet JavaScript execution. Require one exact
-		// executing vector to survive as live markup under an inline-permitting CSP;
-		// otherwise leave it for the Chromium phase rather than over-confirming.
+		// HTML injection is not JavaScript execution. Preserve the strongest exact
+		// vector as candidate evidence, but leave confirmation to Chromium.
 		for _, p := range buildExecPayloads(a) {
 			execR := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
 			if browserRendersResponse(execR.Status, execR.ContentType, execR.Body, execR.NoSniff) &&
 				cspAllowsInlineScript(execR.CSP) && execPayloadSurvived(execR.Body, p) &&
 				!execPayloadSurvived(baseR.Body, p) {
-				ev := "reflected XSS PROVEN in " + a.Context + " context: the context-specific breakout formed live executable markup and the exact handler/script survived unencoded. Executable payload: " +
+				ev := "reflected HTML injection candidate in " + a.Context + " context: the context-specific breakout formed executable-looking markup and the exact handler/script survived unencoded, but runtime execution has not been observed. Candidate payload: " +
 					p.Payload + " | context-agnostic polyglot: " + xssPolyglot
-				return VerifyResult{Verdict: VerifyVerified, Confidence: 95, Evidence: ev, Method: "xss-context"}
+				return VerifyResult{Verdict: VerifyInconclusive, Confidence: 85, Reason: ev, Evidence: ev, Method: "xss-context-runtime-required"}
 			}
 		}
 		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context",

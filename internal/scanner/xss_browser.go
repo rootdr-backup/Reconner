@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -130,14 +131,14 @@ func sweepStaleBrowserProfiles() {
 // findChromePath locates a headless-capable Chromium/Chrome binary.
 func findChromePath() string {
 	if p := os.Getenv("RECONNER_CHROME"); p != "" {
-		if _, err := os.Stat(p); err == nil {
+		if browserBinaryWorks(p) {
 			return p
 		}
 	}
 	for _, name := range []string{
 		"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "headless-shell",
 	} {
-		if p, err := exec.LookPath(name); err == nil {
+		if p, err := exec.LookPath(name); err == nil && browserBinaryWorks(p) {
 			return p
 		}
 	}
@@ -154,11 +155,30 @@ func findChromePath() string {
 		"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 	} {
-		if _, err := os.Stat(p); err == nil {
+		if browserBinaryWorks(p) {
 			return p
 		}
 	}
 	return ""
+}
+
+// browserBinaryWorks rejects stale symlinks/wrappers that exist on disk but can
+// no longer launch their app bundle. Selecting one of those used to disable all
+// runtime XSS proof silently even when a valid Chrome binary appeared later in
+// the search list. Every Chromium-family binary supports --version and exits
+// quickly, making this a cheap one-time startup check.
+func browserBinaryWorks(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	return cmd.Run() == nil && ctx.Err() == nil
 }
 
 // ensureTab lazily starts the single shared browser + tab, rebuilding if it died.

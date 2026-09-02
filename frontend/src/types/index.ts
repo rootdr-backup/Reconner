@@ -19,7 +19,91 @@ export interface Asset {
   name: string
   value: string
   kind: string
+  asset_type: string
+  source: string
+  source_id: string
+  approval_status: 'approved' | 'pending' | 'suspended'
+  monitor_enabled: boolean
+  metadata: string
   created_at: string
+  updated_at: string
+}
+
+export interface BountyAsset {
+  id: string
+  program_id: string
+  external_id: string
+  identifier: string
+  asset_type: string
+  category: string
+  is_wildcard: boolean
+  in_scope: boolean
+  eligible_submission: boolean
+  eligible_bounty: boolean
+  max_severity: string
+  instruction: string
+  reward?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+  active: boolean
+  provider_created_at?: string | null
+  provider_updated_at?: string | null
+}
+
+export interface BountyProgram {
+  id: string
+  provider: 'hackerone' | 'bugcrowd' | 'intigriti' | 'yeswehack'
+  external_id: string
+  handle: string
+  name: string
+  url: string
+  logo_url: string
+  description: string
+  status: string
+  program_type: string
+  industry: string
+  offers_bounties: boolean
+  open_scope: boolean
+  safe_harbor: string
+  asset_count: number
+  in_scope_count: number
+  wildcard_count: number
+  scope_rank: number
+  min_reward_cents: number
+  max_reward_cents: number
+  currency: string
+  started_at: string | null
+  published_at: string | null
+  provider_updated_at: string | null
+  last_synced_at: string | null
+  detail_synced_at: string | null
+  details_loaded: boolean
+  assets?: BountyAsset[]
+}
+
+export interface BountySyncState {
+  provider: string
+  status: string
+  last_started_at: string | null
+  last_completed_at: string | null
+  next_sync_at: string | null
+  program_count: number
+  asset_count: number
+  last_error: string
+  failure_count: number
+}
+
+export interface BountyScopeEvent {
+  id: string
+  target_id: string
+  program_id: string
+  program_asset_id: string
+  event_type: 'added' | 'removed' | 'modified'
+  identifier: string
+  old_json: string
+  new_json: string
+  status: 'pending' | 'approved' | 'rejected'
+  detected_at: string
+  resolved_at: string | null
 }
 
 export interface Target {

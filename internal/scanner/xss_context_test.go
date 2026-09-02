@@ -55,14 +55,17 @@ func TestXSSVerifierExecutableVsEncoded(t *testing.T) {
 	ctx := context.Background()
 	v := NewXSSContextVerifier(nil)
 
-	// vulnerable: raw reflection in HTML text → VERIFIED
+	// vulnerable: raw reflection is retained, but only Chromium may VERIFY it.
 	vuln := reflectApp(false, func(s string) string { return "<div>" + s + "</div>" })
 	defer vuln.Close()
 	r := v.Verify(ctx, VulnerabilityCandidate{Type: "xss", URL: vuln.URL + "/?q=x", Parameter: "q"})
-	if r.Verdict != VerifyVerified {
-		t.Fatalf("raw HTML reflection must VERIFY: %+v", r)
+	if r.Verdict != VerifyInconclusive && r.Verdict != VerifyVerified {
+		t.Fatalf("raw HTML reflection must remain a candidate or browser-verify: %+v", r)
 	}
-	if !strings.Contains(r.Evidence, "html_text") {
+	if r.Verdict == VerifyVerified && r.Method != "xss-browser" {
+		t.Fatalf("only runtime browser proof may verify reflected XSS: %+v", r)
+	}
+	if !strings.Contains(r.Evidence+r.Reason, "html_text") {
 		t.Fatalf("evidence must name the context: %q", r.Evidence)
 	}
 
@@ -125,13 +128,38 @@ func TestXSSVerifierRejectsJSONReflection(t *testing.T) {
 		t.Fatalf("application/json reflection must be REJECTED even without nosniff: %+v", r2)
 	}
 
-	// Control: the SAME raw reflection served as text/html IS a real XSS → VERIFIED.
+	// Control: the SAME raw reflection served as text/html remains a strong
+	// candidate, or is verified when Chromium is available.
 	// Guards against the gate over-rejecting and masking genuine findings.
 	htmlSink := jsonReflectApp("text/html", true)
 	defer htmlSink.Close()
 	r3 := v.Verify(ctx, VulnerabilityCandidate{Type: "xss", URL: htmlSink.URL + "/?q=x", Parameter: "q"})
-	if r3.Verdict != VerifyVerified {
-		t.Fatalf("raw reflection in a text/html response must still VERIFY: %+v", r3)
+	if r3.Verdict != VerifyInconclusive && r3.Verdict != VerifyVerified {
+		t.Fatalf("raw HTML reflection must remain a candidate or browser-verify: %+v", r3)
+	}
+	if r3.Verdict == VerifyVerified && r3.Method != "xss-browser" {
+		t.Fatalf("only browser proof may verify HTML reflection: %+v", r3)
+	}
+}
+
+func TestXSSVerifierRejectsPercentEncodedOGURLReflection(t *testing.T) {
+	withLoopbackAllowed(t)
+	// Reproduces tirana-airport.com: the application publishes the requested URL
+	// in og:url, but keeps every query metacharacter percent-encoded. The marker
+	// text is visible in source; it never leaves the meta content attribute.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html><html><head><meta name="url" property="og:url" content="https://example.test/?`+
+			r.URL.Query().Encode()+`"></head><body><script src="/assets/app.js"></script></body></html>`)
+	}))
+	defer srv.Close()
+
+	v := NewXSSContextVerifier(nil)
+	res := v.Verify(context.Background(), VulnerabilityCandidate{
+		Type: "xss", Subtype: "reflected", URL: srv.URL + "/?userid=x", Parameter: "userid",
+	})
+	if res.Verdict != VerifyRejected {
+		t.Fatalf("percent-encoded og:url reflection must be rejected, not confirmed: %+v", res)
 	}
 }
 
@@ -219,8 +247,8 @@ func TestXSSVerifierReplaysPOSTFormInsertionPoint(t *testing.T) {
 		Type: "xss", Subtype: "reflected", URL: srv.URL, Method: "POST",
 		Parameter: "q", Location: "body",
 	})
-	if res.Verdict != VerifyVerified {
-		t.Fatalf("POST form reflection must use its real insertion point and verify: %+v", res)
+	if res.Verdict != VerifyInconclusive || res.Confidence < 85 {
+		t.Fatalf("POST form reflection must use its real insertion point and remain a strong runtime candidate: %+v", res)
 	}
 }
 

@@ -48,7 +48,7 @@ func addParam(db *database.DB, targetID, url, param string) {
 		VALUES (?,?,?,?, 'GET','')`, url+"|"+param, targetID, url, param)
 }
 
-func TestDASTConfirmsRawHTMLInjection(t *testing.T) {
+func TestDASTDetectsRawHTMLInjectionWithoutBrowserOverclaim(t *testing.T) {
 	db, tid := testDB(t)
 	defer db.Close()
 
@@ -66,14 +66,14 @@ func TestDASTConfirmsRawHTMLInjection(t *testing.T) {
 	}
 
 	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='xss' AND status='finding'`, tid).Scan(&n)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='xss' AND status IN ('candidate','finding')`, tid).Scan(&n)
 	if n == 0 {
-		t.Fatal("raw HTML reflection must be CONFIRMED as an xss finding")
+		t.Fatal("raw HTML reflection must be retained as an XSS candidate or browser-confirmed finding")
 	}
 	var status string
 	_ = db.QueryRow(`SELECT status FROM candidates WHERE target_id=? AND type='xss'`, tid).Scan(&status)
-	if status != CandConfirmed {
-		t.Fatalf("candidate must be CONFIRMED, got %q", status)
+	if status != CandInconclusive && status != CandConfirmed {
+		t.Fatalf("candidate must await runtime proof or be browser-confirmed, got %q", status)
 	}
 }
 

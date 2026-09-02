@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { targets as targetsApi, findings as findingsApi, tasks as tasksApi } from '../lib/api'
+import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi } from '../lib/api'
 import { useUIStore } from '../store/ui'
 import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
@@ -10,8 +10,11 @@ import { ws } from '../lib/websocket'
 import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
-  DirectoryFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset
+  DirectoryFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent
 } from '../types'
+
+const isScannableProjectAsset = (asset: Asset) =>
+  ['domain', 'wildcard', 'url', 'page', 'js', 'api', 'ip', 'cidr'].includes(asset.asset_type || 'domain')
 
 // Findings information architecture — a logical hierarchy instead of a flat row
 // of unrelated siblings. Assets = the discovered surface; Vulnerabilities = the
@@ -265,7 +268,10 @@ export default function TargetDetail() {
   const [assets, setAssets] = useState<Asset[]>([])
   const [scanAsset, setScanAsset] = useState<Asset | null>(null)
   const [newAsset, setNewAsset] = useState('')
+  const [newAssetType, setNewAssetType] = useState('auto')
   const [assetBusy, setAssetBusy] = useState(false)
+  const [scopeEvents, setScopeEvents] = useState<BountyScopeEvent[]>([])
+  const [eventBusy, setEventBusy] = useState<string | null>(null)
   const [evidence, setEvidence] = useState<{ id: string; url: string; type: string } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
@@ -284,6 +290,7 @@ export default function TargetDetail() {
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
+    bountyApi.events(id).then(e => setScopeEvents(e || [])).catch(() => {})
   }, [id])
 
   const loadAssets = () => { if (id) targetsApi.assets(id).then(a => setAssets(a || [])).catch(() => {}) }
@@ -291,9 +298,21 @@ export default function TargetDetail() {
     const v = newAsset.trim()
     if (!v || !id) return
     setAssetBusy(true)
-    try { await targetsApi.addAsset(id, v, ''); setNewAsset(''); loadAssets(); addToast('success', 'Asset added') }
+    try { await targetsApi.addAsset(id, v, '', newAssetType === 'auto' ? undefined : newAssetType); setNewAsset(''); loadAssets(); addToast('success', 'Asset added') }
     catch (e) { addToast('error', e instanceof Error ? e.message : 'Failed to add asset') }
     finally { setAssetBusy(false) }
+  }
+
+  const resolveScopeEvent = async (event: BountyScopeEvent, decision: 'approve' | 'reject') => {
+    if (!id) return
+    setEventBusy(event.id)
+    try {
+      await bountyApi.resolveEvent(id, event.id, decision)
+      setScopeEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: decision === 'approve' ? 'approved' : 'rejected' } : e))
+      loadAssets()
+      addToast('success', decision === 'approve' ? 'Scope change approved' : 'Scope change dismissed')
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not resolve scope change') }
+    finally { setEventBusy(null) }
   }
   const removeAsset = async (a: Asset) => {
     if (!id) return
@@ -506,7 +525,7 @@ export default function TargetDetail() {
     <div className={cn('space-y-5', isNetwork && 'flex flex-col')}>
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <button onClick={() => navigate('/targets')} className="text-text-muted hover:text-text-primary text-sm shrink-0">← Back</button>
+		  <button onClick={() => navigate('/targets')} className="text-text-muted hover:text-text-primary text-sm shrink-0">← Projects</button>
           <span className={cn('w-2.5 h-2.5 rounded-full shrink-0', dot[target.scan_status] || 'bg-text-muted')} />
           {/* A network target's "domain" is its whole scope — up to 65k IPs. Without
               truncation the h1 renders the entire list and shoves the action buttons
@@ -537,6 +556,23 @@ export default function TargetDetail() {
           <button onClick={() => setScanOpen(true)} className="btn-primary text-sm">Scan</button>
         </div>
       </div>
+
+	  {scopeEvents.some(e => e.status === 'pending') && (
+		<div className="card border-severity-medium/30 overflow-hidden">
+		  <div className="px-4 py-3 border-b border-border bg-severity-medium/[.06]">
+			<p className="text-sm font-semibold">Program scope changes need review</p>
+			<p className="mt-0.5 text-[11px] text-text-muted">Added assets stay unscanned until approved. Removed assets were suspended immediately.</p>
+		  </div>
+		  <div className="divide-y divide-white/[.05]">
+			{scopeEvents.filter(e => e.status === 'pending').map(e => (
+			  <div key={e.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3">
+				<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><Badge variant={e.event_type === 'removed' ? 'critical' : e.event_type === 'added' ? 'low' : 'medium'}>{e.event_type}</Badge><code className="text-[11px] break-all">{e.identifier}</code></div><p className="mt-1 text-[10px] text-text-muted">Detected {timeAgo(e.detected_at)}</p></div>
+				<div className="flex gap-2 self-end sm:self-auto"><Button size="sm" variant="ghost" disabled={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'reject')}>Dismiss</Button><Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>{e.event_type === 'removed' ? 'Keep suspended' : 'Approve asset'}</Button></div>
+			  </div>
+			))}
+		  </div>
+		</div>
+	  )}
 
       {target.scan_status === 'failed' && lastFailedTask?.error && (
         <div className="px-4 py-2.5 rounded-lg bg-severity-critical/10 border border-severity-critical/30 text-xs text-severity-critical flex items-center gap-3">
@@ -574,10 +610,13 @@ export default function TargetDetail() {
           </p>
           <span className="text-[10px] text-text-muted">{assets.length}</span>
         </div>
-        <div className="flex flex-col sm:flex-row gap-2 mb-3">
+		<div className="flex flex-col sm:flex-row gap-2 mb-3">
+		  <select value={newAssetType} onChange={e => setNewAssetType(e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary sm:w-32">
+			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP'],['cidr','CIDR'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+		  </select>
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}
-            placeholder="add asset — domain, IP, CIDR, range, or a mix (space/comma separated)"
+			placeholder="domain, full URL/page, .js file, IP or CIDR"
             className="flex-1 bg-surface-alt border border-border rounded px-2 py-1.5 text-xs font-mono" />
           <Button size="sm" variant="secondary" loading={assetBusy} onClick={addAsset}>Add</Button>
         </div>
@@ -587,13 +626,16 @@ export default function TargetDetail() {
           <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
             {assets.map(a => (
               <div key={a.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05] flex-wrap sm:flex-nowrap">
-                <span className={cn('text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0',
+				<span className={cn('text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0',
                   a.kind === 'network' ? 'bg-series-3/15 text-series-3' : a.kind === 'mixed' ? 'bg-severity-low/15 text-severity-low' : 'bg-accent-muted text-accent-hover')}>{a.kind}</span>
+				<span className="text-[9px] px-1.5 py-0.5 rounded bg-white/[.05] text-text-muted uppercase shrink-0">{a.asset_type || 'domain'}</span>
+				{a.approval_status !== 'approved' && <Badge variant={a.approval_status === 'suspended' ? 'critical' : 'medium'}>{a.approval_status}</Badge>}
                 <div className="min-w-0 flex-1">
                   {a.name && <p className="text-xs font-medium truncate">{a.name}</p>}
                   <p className="text-[11px] font-mono text-text-secondary truncate" title={a.value}>{a.value}</p>
                 </div>
-                <Button size="sm" variant="primary" onClick={() => setScanAsset(a)}>Scan</Button>
+                <Button size="sm" variant="primary" disabled={a.approval_status !== 'approved' || !isScannableProjectAsset(a)}
+                  title={!isScannableProjectAsset(a) ? 'Reference-only asset type' : undefined} onClick={() => setScanAsset(a)}>Scan</Button>
                 <button onClick={() => renameAsset(a)} title="Rename" className="p-1 rounded text-text-muted hover:text-accent hover:bg-accent/10">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                 </button>
