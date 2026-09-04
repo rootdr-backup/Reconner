@@ -3,10 +3,9 @@
 </p>
 
 <p align="center">
-  <strong>Self-hosted attack-surface intelligence and verification-first DAST for authorized bug bounty.</strong><br>
-  Recon, web and network scanning, live evidence, and continuous monitoring in one responsive dashboard.
+  <strong>Self-hosted bug-bounty platform — verification-first recon &amp; DAST.</strong><br>
+  Web and network scanning, live evidence, and continuous monitoring. Your data stays on your machine.
 </p>
-
 <p align="center">
   <a href="https://github.com/rootdr-backup/Reconner/actions/workflows/docker-image.yml"><img src="https://github.com/rootdr-backup/Reconner/actions/workflows/docker-image.yml/badge.svg" alt="Docker build"></a>
   <a href="https://github.com/rootdr-backup/Reconner/releases/latest"><img src="https://img.shields.io/github/v/release/rootdr-backup/Reconner?display_name=tag&sort=semver" alt="Latest release"></a>
