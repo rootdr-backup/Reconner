@@ -130,10 +130,10 @@ Reconner follows semantic versioning:
 - **Major** (`2.0.0`): changes that require operator migration or break behavior.
 
 `VERSION` is the source of truth. The Docker build injects the version, commit
-and build date into the binary and OCI image. `reconner version` prints that
-identity. A `v<version>` tag is accepted only when it matches `VERSION`; CI
-builds and publishes the image first, then creates the GitHub Release. This
-prevents users from seeing an update before its image exists.
+and build date into the service and OCI image; that identity is exposed in the
+dashboard's update center. A `v<version>` tag is accepted only when it matches
+`VERSION`; CI builds and publishes the image first, then creates the GitHub
+Release. This prevents users from seeing an update before its image exists.
 
 ## Detection pipeline
 
@@ -269,22 +269,32 @@ caps, Nuclei surface limits, SQLi timing/sqlmap options, passive intelligence
 API keys and update-check settings. Environment-provided secrets override file
 values where supported; never commit `.env` or a populated config file.
 
-## CLI
+Bug-bounty programs that require an identifying User-Agent or program header can
+set deployment-wide defaults in `config.json`:
 
-The same engine is available without the dashboard:
-
-```bash
-reconner scan example.com
-reconner scan example.com --quick
-reconner scan example.com --single
-reconner scan example.com --modules subdomain_enum,http_probe,nuclei,xss,sqli
-reconner report example.com --html --md --pdf
-reconner list
-reconner modules
-reconner version
+```json
+{
+  "scan_user_agent": "Mozilla/5.0 researcher-id ywh-public",
+  "scan_headers": {
+    "X-Bug-Bounty": "program-token"
+  }
+}
 ```
 
-Use `reconner --help` for the complete command reference.
+`RECON_SCAN_USER_AGENT` overrides the global User-Agent from the environment.
+Both values can also be set per project beside its scope fields; project values
+win over global defaults. Custom identity headers are sent only to approved
+project hosts and are not forwarded to passive data providers or third-party
+browser resources. When no override is configured, existing module/tool
+User-Agent behavior is preserved.
+
+## Web application
+
+Reconner is operated through its authenticated web interface. Target and asset
+management, scan planning, live logs, finding triage, reports, monitoring, user
+administration and system settings all use the same persistent service runtime.
+The `reconner` executable starts that service directly and does not expose a
+separate command-line scanning or maintenance interface.
 
 ## Development
 

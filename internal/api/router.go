@@ -28,7 +28,11 @@ type Handler struct {
 	bounty  *bounty.Service
 }
 
-func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) http.Handler {
+// NewHandler builds the single API runtime used by both the HTTP router and the
+// raw OOB listener. Keeping one handler instance ensures every inbound callback
+// uses the same database, scheduler, authentication service, and catalog as the
+// web application.
+func NewHandler(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) *Handler {
 	authService := auth.New(db, cfg)
 	if err := authService.EnsureAdminUser(); err != nil {
 		log.Error("Failed to ensure admin user", "error", err)
@@ -38,7 +42,7 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 	if sched != nil {
 		catalog = sched.BountyCatalog()
 	}
-	h := &Handler{
+	return &Handler{
 		db:      db,
 		hub:     hub,
 		sched:   sched,
@@ -48,12 +52,21 @@ func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, 
 		updates: newReleaseChecker(),
 		bounty:  catalog,
 	}
+}
+
+func NewRouter(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler, cfg *config.Config, log *logger.Logger) http.Handler {
+	return NewHandler(db, hub, sched, cfg, log).Router()
+}
+
+// Router wires the web dashboard, authenticated API, reports, WebSocket stream,
+// and public callback endpoints around this handler.
+func (h *Handler) Router() http.Handler {
 
 	r := mux.NewRouter()
 
 	// Static files
 	frontendDir := filepath.Join(".", "frontend", "dist")
-	r.HandleFunc("/ws", h.requireAuth(hub.ServeWS))
+	r.HandleFunc("/ws", h.requireAuth(h.hub.ServeWS))
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(frontendDir, "assets")))))
 	r.HandleFunc("/screenshots/{id}", h.requireAuth(h.serveScreenshot))
 

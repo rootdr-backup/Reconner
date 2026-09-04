@@ -29,6 +29,7 @@ func RunMigrations(db *DB) error {
 		createScreenshotsTable,
 		createMonitoringChangesTable,
 		createNotificationsTable,
+		createNotificationReadsTable,
 		alterHTTPServicesAddHash,
 		alterTargetsAddMonitoring,
 		alterTargetsAddMonitorInterval,
@@ -37,6 +38,8 @@ func RunMigrations(db *DB) error {
 		alterParametersAddMethod,
 		alterParametersAddContentType,
 		alterTargetsAddAuthHeaders,
+		alterTargetsAddScanUserAgent,
+		alterTargetsAddScanHeaders,
 		alterVulnFindingsAddConfidence,
 		alterVulnFindingsAddPriority,
 		createBlindXSSProbesTable,
@@ -1015,6 +1018,19 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at DESC);`
 
+// Notification read state is user-specific. The legacy notifications.is_read
+// column remains as a compatibility fallback for rows created before this table.
+const createNotificationReadsTable = `
+CREATE TABLE IF NOT EXISTS notification_reads (
+	notification_id TEXT NOT NULL,
+	user_id INTEGER NOT NULL,
+	read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (notification_id, user_id),
+	FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_notification_reads_user ON notification_reads(user_id, notification_id);`
+
 const createVulnFindingsTable = `
 CREATE TABLE IF NOT EXISTS vuln_findings (
 	id TEXT PRIMARY KEY,
@@ -1069,6 +1085,14 @@ ALTER TABLE parameters ADD COLUMN location TEXT DEFAULT 'query';
 
 const alterTargetsAddAuthHeaders = `
 ALTER TABLE targets ADD COLUMN auth_headers TEXT DEFAULT '';
+`
+
+const alterTargetsAddScanUserAgent = `
+ALTER TABLE targets ADD COLUMN scan_user_agent TEXT DEFAULT '';
+`
+
+const alterTargetsAddScanHeaders = `
+ALTER TABLE targets ADD COLUMN scan_headers TEXT DEFAULT '{}';
 `
 
 const alterVulnFindingsAddConfidence = `
@@ -1205,8 +1229,8 @@ const alterOpenRedirectAddProvenance = `
 ALTER TABLE open_redirect_findings ADD COLUMN provenance TEXT DEFAULT '';
 `
 
-// scope='single' restricts URL/endpoint gathering to the EXACT host (used by the
-// CLI's --single mode); 'full' (default) allows the whole domain + subdomains.
+// scope='single' restricts URL/endpoint gathering to the exact host; 'full'
+// (default) allows the whole domain and its subdomains.
 const alterTargetsAddScope = `
 ALTER TABLE targets ADD COLUMN scope TEXT DEFAULT 'full';
 `

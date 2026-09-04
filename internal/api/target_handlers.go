@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -16,7 +17,111 @@ import (
 	"github.com/recon-platform/internal/scanner"
 	"github.com/recon-platform/internal/scheduler"
 	"github.com/recon-platform/internal/secret"
+	"golang.org/x/net/http/httpguts"
 )
+
+func normalizeScanIdentity(userAgent string, headers map[string]string) (string, map[string]string, string, error) {
+	userAgent = strings.TrimSpace(userAgent)
+	if len(userAgent) > 512 || strings.ContainsAny(userAgent, "\r\n") {
+		return "", nil, "", fmt.Errorf("scan User-Agent must be one line and at most 512 characters")
+	}
+	clean := make(map[string]string, len(headers))
+	for rawName, rawValue := range headers {
+		name, value := http.CanonicalHeaderKey(strings.TrimSpace(rawName)), strings.TrimSpace(rawValue)
+		if name == "" || value == "" || len(name) > 128 || len(value) > 4096 ||
+			!httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return "", nil, "", fmt.Errorf("scan headers must have valid single-line names and values")
+		}
+		switch strings.ToLower(name) {
+		case "host", "content-length", "connection", "transfer-encoding", "proxy-authorization", "proxy-authenticate", "proxy-connection", "keep-alive", "te", "trailer", "upgrade", "user-agent":
+			return "", nil, "", fmt.Errorf("header %q is reserved; use the dedicated User-Agent field when applicable", name)
+		}
+		if _, duplicate := clean[name]; duplicate {
+			return "", nil, "", fmt.Errorf("scan header %q is duplicated with different casing", name)
+		}
+		clean[name] = value
+	}
+	if len(clean) > 64 {
+		return "", nil, "", fmt.Errorf("at most 64 scan headers are allowed")
+	}
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("invalid scan headers")
+	}
+	return userAgent, clean, string(raw), nil
+}
+
+func normalizeScopeValues(scope string) ([]string, error) {
+	seen := map[string]bool{}
+	values := make([]string, 0)
+	var tokens []string
+	for _, line := range strings.FieldsFunc(scope, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		line = strings.TrimSpace(line)
+		// A complete URL may legitimately contain commas/semicolons in its path or
+		// query. The UI documents one asset per line, so preserve such a line whole.
+		if strings.HasPrefix(strings.ToLower(line), "http://") || strings.HasPrefix(strings.ToLower(line), "https://") {
+			tokens = append(tokens, line)
+			continue
+		}
+		tokens = append(tokens, strings.FieldsFunc(line, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\t' || r == ' '
+		})...)
+	}
+	for _, token := range tokens {
+		value, err := normalizeAssetValue(token)
+		if err != nil {
+			return nil, fmt.Errorf("invalid asset %q: %w", strings.TrimSpace(token), err)
+		}
+		if !seen[value] {
+			seen[value] = true
+			values = append(values, value)
+		}
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("at least one valid asset is required")
+	}
+	return values, nil
+}
+
+func reconcileManualAssetsTx(tx *sql.Tx, targetID string, values []string) error {
+	desired := make(map[string]bool, len(values))
+	for _, value := range values {
+		desired[value] = true
+		kind, _, _ := detectAssetKind(value)
+		assetType := normalizeManualAssetType("", value, kind)
+		if _, err := tx.Exec(`INSERT INTO assets (id,target_id,name,value,kind,asset_type,source,approval_status,monitor_enabled,updated_at)
+			VALUES (?,?, '',?,?,?,'manual','approved',1,CURRENT_TIMESTAMP)
+			ON CONFLICT(target_id,value) DO NOTHING`, uuid.New().String(), targetID, value, kind, assetType); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(`SELECT id,value FROM assets WHERE target_id=? AND COALESCE(source,'manual')='manual'`, targetID)
+	if err != nil {
+		return err
+	}
+	var remove []string
+	for rows.Next() {
+		var id, value string
+		if err := rows.Scan(&id, &value); err != nil {
+			rows.Close()
+			return err
+		}
+		if !desired[value] {
+			remove = append(remove, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, id := range remove {
+		if _, err := tx.Exec(`DELETE FROM assets WHERE id=? AND target_id=?`, id, targetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -25,8 +130,9 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	tag := q.Get("tag")
 	status := q.Get("status")
 
-	query := `SELECT id, domain, COALESCE(kind,'web'), description, tags, priority, notes, status, scan_status, enabled_modules,
-		last_scan_at, created_at, updated_at, subdomain_count, alive_host_count, finding_count,
+	query := `SELECT id, domain, COALESCE(kind,'web'), COALESCE(description,''), COALESCE(tags,'[]'),
+		COALESCE(priority,'medium'), COALESCE(notes,''), COALESCE(status,'idle'), COALESCE(scan_status,'idle'), COALESCE(enabled_modules,'[]'),
+		last_scan_at, created_at, updated_at, COALESCE(subdomain_count,0), COALESCE(alive_host_count,0), COALESCE(finding_count,0),
 		COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,'')
 		FROM targets WHERE 1=1`
 	args := []any{}
@@ -42,9 +148,9 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		args = append(args, kind)
 	}
 	if search != "" {
-		query += " AND (domain LIKE ? OR description LIKE ? OR notes LIKE ?)"
+		query += " AND (domain LIKE ? OR COALESCE(name,'') LIKE ? OR description LIKE ? OR notes LIKE ? OR tags LIKE ?)"
 		like := "%" + search + "%"
-		args = append(args, like, like, like)
+		args = append(args, like, like, like, like, like)
 	}
 	if priority != "" {
 		query += " AND priority = ?"
@@ -55,8 +161,8 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		args = append(args, status)
 	}
 	if tag != "" {
-		query += " AND tags LIKE ?"
-		args = append(args, "%"+tag+"%")
+		query += " AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) WHERE value = ?)"
+		args = append(args, tag)
 	}
 
 	query += " ORDER BY created_at DESC"
@@ -81,13 +187,13 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			&t.SubdomainCount, &t.AliveHostCount, &t.FindingCount,
 			&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope)
 		if err != nil {
-			continue
+			h.writeError(w, http.StatusInternalServerError, "failed to decode targets")
+			return
 		}
 
 		t.Tags = models.JSONToStringSlice(tagsJSON)
 		t.EnabledModules = models.JSONToStringSlice(modulesJSON)
 		t.MonitorEnabled = monitorEnabled == 1
-
 		if lastScan != nil && *lastScan != "" {
 			parsed, err := time.Parse("2006-01-02T15:04:05Z", *lastScan)
 			if err == nil {
@@ -97,20 +203,26 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 
 		targets = append(targets, t)
 	}
+	if err := rows.Err(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to read targets")
+		return
+	}
 
 	h.writeSuccess(w, targets)
 }
 
 func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Domain       string   `json:"domain"`
-		Name         string   `json:"name"` // friendly label for the target
-		Description  string   `json:"description"`
-		Tags         []string `json:"tags"`
-		Priority     string   `json:"priority"`
-		Notes        string   `json:"notes"`
-		Kind         string   `json:"kind"`          // web | network (auto-detected if empty)
-		ExcludeScope string   `json:"exclude_scope"` // out-of-scope hosts/IPs/CIDRs/URLs
+		Domain        string            `json:"domain"`
+		Name          string            `json:"name"` // friendly label for the target
+		Description   string            `json:"description"`
+		Tags          []string          `json:"tags"`
+		Priority      string            `json:"priority"`
+		Notes         string            `json:"notes"`
+		Kind          string            `json:"kind"`          // web | network (auto-detected if empty)
+		ExcludeScope  string            `json:"exclude_scope"` // out-of-scope hosts/IPs/CIDRs/URLs
+		ScanUserAgent string            `json:"scan_user_agent"`
+		ScanHeaders   map[string]string `json:"scan_headers"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -123,11 +235,17 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "domain/scope is required")
 		return
 	}
+	scopeValues, err := normalizeScopeValues(raw)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	normalizedScope := strings.Join(scopeValues, ",")
 
 	// Unified scope: a single target may mix web hosts and network IP/CIDR/ranges.
 	// Auto-detect the kind from the scope composition (explicit req.Kind still wins,
 	// for backward compatibility): web-only, network-only, or "mixed" (both).
-	webHosts, netScope := scanner.SplitScope(raw)
+	webHosts, netScope := scanner.SplitScope(normalizedScope)
 	kind := strings.ToLower(strings.TrimSpace(req.Kind))
 	if kind == "" {
 		switch {
@@ -140,19 +258,10 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var domain string
-	if kind == "network" || kind == "mixed" {
-		// Validate the network portion up front; store the scope verbatim (no
-		// http-strip/lowercase mangling that would corrupt a CIDR/range).
-		domain = raw
-	} else if len(webHosts) > 1 {
-		domain = strings.Join(webHosts, ",") // multi-host web target (normalized)
-	} else {
-		domain = strings.ToLower(raw)
-		domain = strings.TrimPrefix(domain, "https://")
-		domain = strings.TrimPrefix(domain, "http://")
-		domain = strings.TrimSuffix(domain, "/")
-	}
+	// Preserve endpoint paths and query strings. Managed assets are authoritative,
+	// and collapsing https://host/path into the invalid host/path form silently
+	// lost the exact endpoint on subsequent edits and exports.
+	domain := normalizedScope
 
 	if req.Priority == "" {
 		req.Priority = "medium"
@@ -161,10 +270,21 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New().String()
 	tagsJSON := models.StringSliceToJSON(req.Tags)
 
-	_, err := h.db.Exec(`
-		INSERT INTO targets (id, domain, description, tags, priority, notes, kind, name, exclude_scope, owner_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, domain, req.Description, tagsJSON, req.Priority, req.Notes, kind, strings.TrimSpace(req.Name), strings.TrimSpace(req.ExcludeScope), h.currentUserID(r))
+	scanUserAgent, scanHeaders, scanHeadersJSON, err := normalizeScanIdentity(req.ScanUserAgent, req.ScanHeaders)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to create target")
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(), `
+		INSERT INTO targets (id, domain, description, tags, priority, notes, kind, name, exclude_scope, owner_id, scan_user_agent, scan_headers)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, domain, req.Description, tagsJSON, req.Priority, req.Notes, kind, strings.TrimSpace(req.Name), strings.TrimSpace(req.ExcludeScope), h.currentUserID(r), scanUserAgent, scanHeadersJSON)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			h.writeError(w, http.StatusConflict, "target already exists")
@@ -173,22 +293,28 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "failed to create target")
 		return
 	}
-
-	// Seed one managed asset per scope token so a multi-host target starts with an
-	// asset list you can scan/edit/remove individually.
-	h.seedAssetsFromScope(id, raw)
+	if err := reconcileManualAssetsTx(tx, id, scopeValues); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to create managed assets")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to create target")
+		return
+	}
 
 	target := &models.Target{
-		ID:          id,
-		Domain:      domain,
-		Name:        strings.TrimSpace(req.Name),
-		Kind:        kind,
-		Description: req.Description,
-		Tags:        req.Tags,
-		Priority:    req.Priority,
-		Notes:       req.Notes,
-		Status:      "idle",
-		ScanStatus:  "idle",
+		ID:            id,
+		Domain:        domain,
+		Name:          strings.TrimSpace(req.Name),
+		Kind:          kind,
+		Description:   req.Description,
+		Tags:          req.Tags,
+		Priority:      req.Priority,
+		Notes:         req.Notes,
+		Status:        "idle",
+		ScanStatus:    "idle",
+		ScanUserAgent: scanUserAgent,
+		ScanHeaders:   scanHeaders,
 	}
 
 	h.hub.Broadcast("target_created", target)
@@ -242,19 +368,21 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 
 	var t models.Target
 	var lastScan, monitorLastRun *string
-	var tagsJSON, modulesJSON string
+	var tagsJSON, modulesJSON, scanHeadersJSON string
 	var monitorEnabled int
 
 	err := h.db.QueryRowContext(r.Context(), `
-		SELECT id, domain, COALESCE(kind,'web'), description, tags, priority, notes, status, scan_status, enabled_modules,
-			last_scan_at, created_at, updated_at, subdomain_count, alive_host_count, finding_count,
-			COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,''), monitor_last_run
+		SELECT id, domain, COALESCE(kind,'web'), COALESCE(description,''), COALESCE(tags,'[]'),
+			COALESCE(priority,'medium'), COALESCE(notes,''), COALESCE(status,'idle'), COALESCE(scan_status,'idle'), COALESCE(enabled_modules,'[]'),
+			last_scan_at, created_at, updated_at, COALESCE(subdomain_count,0), COALESCE(alive_host_count,0), COALESCE(finding_count,0),
+			COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,''), monitor_last_run,
+			COALESCE(scan_user_agent,''), COALESCE(scan_headers,'{}')
 		FROM targets WHERE id = ?
 	`, id).Scan(&t.ID, &t.Domain, &t.Kind, &t.Description, &tagsJSON, &t.Priority,
 		&t.Notes, &t.Status, &t.ScanStatus, &modulesJSON,
 		&lastScan, &t.CreatedAt, &t.UpdatedAt,
 		&t.SubdomainCount, &t.AliveHostCount, &t.FindingCount,
-		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun)
+		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun, &t.ScanUserAgent, &scanHeadersJSON)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "target not found")
 		return
@@ -263,6 +391,8 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 	t.Tags = models.JSONToStringSlice(tagsJSON)
 	t.EnabledModules = models.JSONToStringSlice(modulesJSON)
 	t.MonitorEnabled = monitorEnabled == 1
+	t.ScanHeaders = map[string]string{}
+	_ = json.Unmarshal([]byte(scanHeadersJSON), &t.ScanHeaders)
 	if lastScan != nil {
 		parsed, _ := time.Parse("2006-01-02T15:04:05Z", *lastScan)
 		t.LastScanAt = &parsed
@@ -279,14 +409,16 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 
 	var req struct {
-		Domain         string   `json:"domain"` // when non-empty, re-scopes the target (kind re-detected)
-		Name           string   `json:"name"`
-		Description    string   `json:"description"`
-		Tags           []string `json:"tags"`
-		Priority       string   `json:"priority"`
-		Notes          string   `json:"notes"`
-		ExcludeScope   string   `json:"exclude_scope"`
-		EnabledModules []string `json:"enabled_modules"`
+		Domain         *string            `json:"domain"` // when present, re-scopes the target (kind re-detected)
+		Name           *string            `json:"name"`
+		Description    *string            `json:"description"`
+		Tags           *[]string          `json:"tags"`
+		Priority       *string            `json:"priority"`
+		Notes          *string            `json:"notes"`
+		ExcludeScope   *string            `json:"exclude_scope"`
+		EnabledModules *[]string          `json:"enabled_modules"`
+		ScanUserAgent  *string            `json:"scan_user_agent"`
+		ScanHeaders    *map[string]string `json:"scan_headers"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -294,28 +426,76 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tagsJSON := models.StringSliceToJSON(req.Tags)
-	modulesJSON := models.StringSliceToJSON(req.EnabledModules)
-
-	// Editable metadata (always applied).
-	_, err := h.db.Exec(`
-		UPDATE targets SET
-			name = ?, description = ?, tags = ?, priority = ?, notes = ?,
-			exclude_scope = ?, enabled_modules = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, strings.TrimSpace(req.Name), req.Description, tagsJSON, req.Priority, req.Notes,
-		strings.TrimSpace(req.ExcludeScope), modulesJSON, id)
+	// This endpoint is consumed as Partial<Target>. Load the current row first so
+	// omitted fields stay untouched; the old zero-value decoding silently erased
+	// enabled_modules (and, for API clients, metadata/identity) on unrelated edits.
+	var name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON string
+	err := h.db.QueryRowContext(r.Context(), `SELECT COALESCE(name,''),COALESCE(description,''),COALESCE(tags,'[]'),
+		COALESCE(priority,'medium'),COALESCE(notes,''),COALESCE(exclude_scope,''),COALESCE(enabled_modules,'[]'),
+		COALESCE(scan_user_agent,''),COALESCE(scan_headers,'{}') FROM targets WHERE id=?`, id).
+		Scan(&name, &description, &tagsJSON, &priority, &notes, &excludeScope, &modulesJSON, &scanUserAgent, &scanHeadersJSON)
+	if err == sql.ErrNoRows {
+		h.writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "failed to update target")
+		h.writeError(w, http.StatusInternalServerError, "failed to load target")
+		return
+	}
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+	}
+	if req.Description != nil {
+		description = *req.Description
+	}
+	if req.Tags != nil {
+		tagsJSON = models.StringSliceToJSON(*req.Tags)
+	}
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+	if req.Notes != nil {
+		notes = *req.Notes
+	}
+	if req.ExcludeScope != nil {
+		excludeScope = strings.TrimSpace(*req.ExcludeScope)
+	}
+	if req.EnabledModules != nil {
+		modulesJSON = models.StringSliceToJSON(*req.EnabledModules)
+	}
+	var scanHeaders map[string]string
+	if json.Unmarshal([]byte(scanHeadersJSON), &scanHeaders) != nil || scanHeaders == nil {
+		scanHeaders = map[string]string{}
+	}
+	if req.ScanUserAgent != nil {
+		scanUserAgent = *req.ScanUserAgent
+	}
+	if req.ScanHeaders != nil {
+		scanHeaders = *req.ScanHeaders
+	}
+	scanUserAgent, _, scanHeadersJSON, err = normalizeScanIdentity(scanUserAgent, scanHeaders)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Re-scoping: when a new scope is supplied, re-split it, re-detect the kind
-	// (web / network / mixed), validate the network portion, and store it — so a
-	// target's scope can be grown, shrunk, or retyped after creation.
-	if raw := strings.TrimSpace(req.Domain); raw != "" {
-		webHosts, netScope := scanner.SplitScope(raw)
-		var kind, domain string
+	rawScope := ""
+	if req.Domain != nil {
+		rawScope = strings.TrimSpace(*req.Domain)
+		if rawScope == "" {
+			h.writeError(w, http.StatusBadRequest, "domain/scope cannot be empty")
+			return
+		}
+	}
+	var scopeValues []string
+	var kind, domain string
+	if rawScope != "" {
+		scopeValues, err = normalizeScopeValues(rawScope)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		webHosts, netScope := scanner.SplitScope(strings.Join(scopeValues, ","))
 		switch {
 		case len(webHosts) > 0 && netScope != "":
 			kind = "mixed"
@@ -324,14 +504,37 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		default:
 			kind = "web"
 		}
-		if kind == "web" && len(webHosts) == 1 {
-			domain = webHosts[0]
-		} else if kind == "web" {
+		if kind == "web" {
 			domain = strings.Join(webHosts, ",")
 		} else {
-			domain = raw
+			domain = strings.Join(scopeValues, ",")
 		}
-		if _, err := h.db.Exec(`UPDATE targets SET domain = ?, kind = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to update target")
+		return
+	}
+	defer tx.Rollback()
+	// Metadata, compliance identity and managed asset changes are one transaction;
+	// a uniqueness conflict can no longer leave a half-updated project.
+	res, err := tx.ExecContext(r.Context(), `
+		UPDATE targets SET
+			name = ?, description = ?, tags = ?, priority = ?, notes = ?,
+			exclude_scope = ?, enabled_modules = ?, scan_user_agent = ?, scan_headers = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON, id)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to update target")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if rawScope != "" {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE targets SET domain = ?, kind = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			domain, kind, id); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				h.writeError(w, http.StatusConflict, "another target already uses that scope")
@@ -340,6 +543,14 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusInternalServerError, "failed to update scope")
 			return
 		}
+		if err := reconcileManualAssetsTx(tx, id, scopeValues); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "failed to reconcile managed assets")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to update target")
+		return
 	}
 
 	h.hub.Broadcast("target_updated", map[string]string{"id": id})
@@ -350,30 +561,56 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 // every row that belongs to it. Shared by the single- and bulk-delete handlers so
 // both paths clean up identically (no orphaned evidence/objects on older DBs).
 func (h *Handler) deleteTargetByID(id string) error {
+	var exists int
+	if err := h.db.QueryRow(`SELECT 1 FROM targets WHERE id=?`, id).Scan(&exists); err != nil {
+		return err
+	}
 	// Cancel any running/pending scan for this target FIRST, so its goroutine
 	// stops immediately instead of finishing in the background (and pinging
 	// Telegram an hour later). Then delete — the FK cascade removes all related
 	// rows (subdomains, http_services, findings, tasks, logs, screenshots…).
-	h.sched.CancelTasksForTarget(id)
+	if h.sched != nil {
+		h.sched.CancelTasksForTarget(id)
+	}
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
 	// The v3/v4 tables (evidence, http_interactions, objects) were created without
 	// a FK, so the cascade won't reach them — delete explicitly to avoid orphans.
 	// (actions/object_relationships/workflow_variables DO cascade, but deleting
 	// them here too is harmless and keeps behaviour uniform on older DBs.)
 	for _, t := range []string{"evidence", "http_interactions", "objects", "actions", "object_relationships", "workflow_variables"} {
-		_, _ = h.db.Exec("DELETE FROM "+t+" WHERE target_id = ?", id)
+		if _, err := tx.Exec("DELETE FROM "+t+" WHERE target_id = ?", id); err != nil {
+			return err
+		}
 	}
 
-	if _, err := h.db.Exec("DELETE FROM targets WHERE id = ?", id); err != nil {
+	res, err := tx.Exec("DELETE FROM targets WHERE id = ?", id)
+	if err != nil {
 		return err
 	}
-	h.hub.Broadcast("target_deleted", map[string]string{"id": id})
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if h.hub != nil {
+		h.hub.Broadcast("target_deleted", map[string]string{"id": id})
+	}
 	return nil
 }
 
 func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if err := h.deleteTargetByID(id); err != nil {
+		if err == sql.ErrNoRows {
+			h.writeError(w, http.StatusNotFound, "target not found")
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, "failed to delete target")
 		return
 	}
@@ -442,13 +679,22 @@ func (h *Handler) handleUpdateMonitor(w http.ResponseWriter, r *http.Request) {
 		enabled = 1
 	}
 
-	_, err := h.db.Exec(
-		`UPDATE targets SET monitor_enabled=?, monitor_interval_hours=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		enabled, req.IntervalHours, id,
+	res, err := h.db.Exec(
+		`UPDATE targets SET monitor_last_run=CASE
+			WHEN ?=1 AND COALESCE(monitor_enabled,0)=0 THEN NULL ELSE monitor_last_run END,
+			monitor_enabled=?, monitor_interval_hours=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		enabled, enabled, req.IntervalHours, id,
 	)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to update monitor settings")
 		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if h.hub != nil {
+		h.hub.Broadcast("target_updated", map[string]string{"id": id})
 	}
 	h.writeSuccess(w, map[string]any{"monitor_enabled": req.Enabled, "monitor_interval_hours": req.IntervalHours})
 }
@@ -673,11 +919,12 @@ func (h *Handler) handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := scanner.ReplaySpec{Method: req.Method, URL: req.URL, Body: req.Body, ContentType: req.ContentType}
-	ids := scanner.LoadIdentities(r.Context(), h.db, targetID, secret.New(h.cfg.SessionSecret))
+	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	ids := scanner.LoadIdentities(scanCtx, h.db, targetID, secret.New(h.cfg.SessionSecret))
 	if req.IdentityID != "" && req.IdentityID != "all" {
 		for i := range ids {
 			if ids[i].ID == req.IdentityID {
-				res := scanner.Replay(r.Context(), spec, &ids[i])
+				res := scanner.Replay(scanCtx, spec, &ids[i])
 				h.writeSuccess(w, map[string]any{"results": []scanner.ReplayResult{res}})
 				return
 			}
@@ -685,7 +932,7 @@ func (h *Handler) handleReplay(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusNotFound, "identity not found")
 		return
 	}
-	results, comparison := scanner.ReplayAcrossIdentities(r.Context(), spec, ids)
+	results, comparison := scanner.ReplayAcrossIdentities(scanCtx, spec, ids)
 	h.writeSuccess(w, map[string]any{"results": results, "comparison": comparison})
 }
 
@@ -813,8 +1060,9 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, "a workflow step url is out of target scope")
 		return
 	}
-	ids := scanner.LoadIdentities(r.Context(), h.db, targetID, secret.New(h.cfg.SessionSecret))
-	res := h.sched.AuthzEngine().RunWorkflow(r.Context(), targetID, ids, req.Steps, req.Seed)
+	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	ids := scanner.LoadIdentities(scanCtx, h.db, targetID, secret.New(h.cfg.SessionSecret))
+	res := h.sched.AuthzEngine().RunWorkflow(scanCtx, targetID, ids, req.Steps, req.Seed)
 	h.writeSuccess(w, res)
 }
 
@@ -843,8 +1091,9 @@ func (h *Handler) handleVerifyWrite(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, "url out of target scope")
 		return
 	}
-	ids := scanner.LoadIdentities(r.Context(), h.db, targetID, secret.New(h.cfg.SessionSecret))
-	res := h.sched.AuthzEngine().VerifyWrite(r.Context(), targetID, ids, scanner.WriteVerifySpec{
+	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	ids := scanner.LoadIdentities(scanCtx, h.db, targetID, secret.New(h.cfg.SessionSecret))
+	res := h.sched.AuthzEngine().VerifyWrite(scanCtx, targetID, ids, scanner.WriteVerifySpec{
 		OwnerLabel: req.OwnerLabel, AttackerLabel: req.AttackerLabel,
 		ObjectType: req.ObjectType, ObjectID: req.ObjectID, ReadURL: req.ReadURL,
 		WriteMethod: req.WriteMethod, WriteURL: req.WriteURL, WriteBody: req.WriteBody,
@@ -1032,7 +1281,8 @@ func (h *Handler) handleListActions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleValidateIdentity(w http.ResponseWriter, r *http.Request) {
 	targetID := mux.Vars(r)["id"]
 	iid := mux.Vars(r)["iid"]
-	ids := scanner.LoadIdentities(r.Context(), h.db, targetID, secret.New(h.cfg.SessionSecret))
+	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	ids := scanner.LoadIdentities(scanCtx, h.db, targetID, secret.New(h.cfg.SessionSecret))
 	var target *scanner.Identity
 	for i := range ids {
 		if ids[i].ID == iid {
@@ -1044,7 +1294,7 @@ func (h *Handler) handleValidateIdentity(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusNotFound, "identity not found")
 		return
 	}
-	status := scanner.ValidateSession(r.Context(), *target)
+	status := scanner.ValidateSession(scanCtx, *target)
 	_, _ = h.db.Exec(`UPDATE identities SET status=?, last_verified_at=CURRENT_TIMESTAMP WHERE id=?`, status, iid)
 	h.writeSuccess(w, map[string]string{"status": status})
 }
@@ -1245,28 +1495,44 @@ func (h *Handler) handleImportTargets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	created := 0
-	for _, domain := range domains {
-		domain = strings.TrimPrefix(domain, "https://")
-		domain = strings.TrimPrefix(domain, "http://")
-		domain = strings.TrimSuffix(domain, "/")
-		domain = strings.ToLower(strings.TrimSpace(domain))
-		if domain == "" {
+	created, invalid, duplicates := 0, 0, 0
+	for _, rawScope := range domains {
+		values, normalizeErr := normalizeScopeValues(rawScope)
+		if normalizeErr != nil {
+			invalid++
 			continue
 		}
-
+		domain := strings.Join(values, ",")
 		id := uuid.New().String()
-		_, err := h.db.Exec(`
-			INSERT OR IGNORE INTO targets (id, domain, priority, owner_id) VALUES (?, ?, 'medium', ?)
-		`, id, domain, h.currentUserID(r))
-		if err == nil {
-			created++
+		tx, beginErr := h.db.BeginTx(r.Context(), nil)
+		if beginErr != nil {
+			invalid++
+			continue
 		}
+		res, insertErr := tx.ExecContext(r.Context(), `INSERT OR IGNORE INTO targets (id, domain, priority, kind, owner_id) VALUES (?, ?, 'medium', 'web', ?)`, id, domain, h.currentUserID(r))
+		if insertErr != nil {
+			tx.Rollback()
+			invalid++
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			tx.Rollback()
+			duplicates++
+			continue
+		}
+		if err := reconcileManualAssetsTx(tx, id, values); err != nil || tx.Commit() != nil {
+			tx.Rollback()
+			invalid++
+			continue
+		}
+		created++
 	}
 
 	h.writeSuccess(w, map[string]any{
-		"imported": created,
-		"total":    len(domains),
+		"imported":   created,
+		"total":      len(domains),
+		"invalid":    invalid,
+		"duplicates": duplicates,
 	})
 }
 

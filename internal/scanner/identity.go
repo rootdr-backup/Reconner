@@ -60,7 +60,7 @@ type IdentityResponse struct {
 // target (in- or out-of-scope). Both halves of the boundary — hostname scope
 // (URLInScope, enforced by callers) and DNS/IP (this transport) — are explicit.
 var identityHTTPClient = &http.Client{
-	Transport: guardedCredentialTransport,
+	Transport: identityRoundTripper{base: guardedCredentialTransport},
 	Timeout:   15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse // never follow — no creds to any redirect target

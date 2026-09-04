@@ -79,7 +79,7 @@ export const targets = {
     return req<Target[]>(`/targets${q}`)
   },
   get: (id: string) => req<Target>(`/targets/${id}`),
-  create: (data: {domain: string; name?: string; description?: string; tags?: string[]; priority?: string; notes?: string; kind?: string; exclude_scope?: string}) =>
+  create: (data: {domain: string; name?: string; description?: string; tags?: string[]; priority?: string; notes?: string; kind?: string; exclude_scope?: string; scan_user_agent?: string; scan_headers?: Record<string, string>}) =>
     req<Target>('/targets', { method: 'POST', body: JSON.stringify(data) }),
   networkServices: (id: string) => req<NetworkService[]>(`/targets/${id}/network-services`),
   assets: (id: string) => req<Asset[]>(`/targets/${id}/assets`),
@@ -131,7 +131,7 @@ export const targets = {
   importFile: (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return req<{imported: number; total: number}>('/targets/import', { method: 'POST', headers: {}, body: form })
+    return req<{ imported: number; total: number; invalid: number; duplicates: number }>('/targets/import', { method: 'POST', headers: {}, body: form })
   },
 }
 

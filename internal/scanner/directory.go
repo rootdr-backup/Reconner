@@ -347,6 +347,7 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		"-i", "200,204,301,302,307,401,403,405,500",
 		"--timeout", "6", "--full-url", "-t", "60", "--max-time", "120",
 	}
+	args = append(args, ToolRequestIdentityArgs(ctx, "dirsearch")...)
 	err := s.exec.RunWithCallback(dctx, targetID, callback, "dirsearch", args...)
 	if err != nil && strings.Contains(err.Error(), "no such file or directory") {
 		// venv shebang/interpreter broken → fall back to python -m
@@ -384,6 +385,8 @@ func humanSizeToBytes(s string) int {
 
 func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string, logFn LogFunc) {
 	// feroxbuster output: STATUS METHOD SIZE WORDS LINES URL
+	args := []string{"-u", svcURL, "-q", "-t", "20", "--timeout", "8", "-x", "php,asp,aspx,jsp,html,txt,bak,zip", "--no-state"}
+	args = append(args, ToolRequestIdentityArgs(ctx, "feroxbuster")...)
 	err := s.exec.RunWithCallback(ctx, targetID, func(line string) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ">") {
@@ -408,7 +411,7 @@ func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string
 		if foundURL != "" {
 			s.storeDirFinding(targetID, foundURL, statusCode, 0, "")
 		}
-	}, "feroxbuster", "-u", svcURL, "-q", "-t", "20", "--timeout", "8", "-x", "php,asp,aspx,jsp,html,txt,bak,zip", "--no-state")
+	}, "feroxbuster", args...)
 	if err != nil && ctx.Err() == nil {
 		logFn("warn", "dir_discovery", fmt.Sprintf("feroxbuster error for %s: %v", svcURL, err))
 	}

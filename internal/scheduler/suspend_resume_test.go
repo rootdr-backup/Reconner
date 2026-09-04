@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +29,48 @@ func newTestScheduler(t *testing.T) *Scheduler {
 	return New(db, hub, &config.Config{}, logger.New("error"))
 }
 
+func TestSuspendActiveForShutdownCancelsLiveTask(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, scan_status) VALUES ('tgt-live','example.com','pending')`); err != nil {
+		t.Fatalf("insert target: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO tasks (id, target_id, type, status, priority, modules, total)
+		VALUES ('task-live','tgt-live','full_scan','pending',2,'[]',0)`); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.cancelMap["task-live"] = cancel
+	s.running["task-live"] = true
+	s.taskTargets["task-live"] = "tgt-live"
+	s.mu.Unlock()
+
+	n, err := s.SuspendActiveForShutdown()
+	if err != nil || n != 1 {
+		t.Fatalf("SuspendActiveForShutdown = (%d,%v), want (1,nil)", n, err)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("live task context was not cancelled")
+	}
+
+	var taskStatus, targetStatus string
+	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id='task-live'`).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT scan_status FROM targets WHERE id='tgt-live'`).Scan(&targetStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != InterruptedStatus || targetStatus != "paused" {
+		t.Fatalf("parked state task=%q target=%q, want interrupted/paused", taskStatus, targetStatus)
+	}
+	if _, err := s.CreateTask("tgt-live", []string{ModuleHTTPProbe}, 1); err == nil {
+		t.Fatal("scheduler accepted a new task after shutdown admission closed")
+	}
+}
+
 // A scan that is running when the service stops must be parked as 'interrupted'
 // and then, on the next startup, resumed for ONLY the modules it hadn't finished.
 func TestSuspendThenResumeInterrupted(t *testing.T) {
@@ -46,7 +89,7 @@ func TestSuspendThenResumeInterrupted(t *testing.T) {
 	}
 
 	// Stop: park active scans.
-	n, err := SuspendActive(s.db)
+	n, err := suspendActive(s.db)
 	if err != nil || n != 1 {
 		t.Fatalf("SuspendActive = (%d,%v), want (1,nil)", n, err)
 	}

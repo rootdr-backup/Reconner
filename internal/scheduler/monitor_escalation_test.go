@@ -1,8 +1,11 @@
 package scheduler
 
 import (
+	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/recon-platform/internal/models"
 )
 
 // A watch pass that discovers new subdomains must enqueue a heavier escalation
@@ -43,6 +46,66 @@ func TestEscalateIfChanged(t *testing.T) {
 		if !found {
 			t.Errorf("escalation modules %q missing %q", modules, want)
 		}
+	}
+}
+
+func TestScheduledMonitorIsSnapshotFirstAndDeduplicated(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets(id,domain,monitor_enabled,monitor_interval_hours)
+		VALUES('watch-target','example.com',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	s.runDueMonitors()
+	var modulesJSON string
+	if err := s.db.QueryRow(`SELECT modules FROM tasks WHERE target_id='watch-target' AND type=?`, monitorWatchType).Scan(&modulesJSON); err != nil {
+		t.Fatal(err)
+	}
+	modules := models.JSONToStringSlice(modulesJSON)
+	position := func(want string) int {
+		for i, m := range modules {
+			if m == want {
+				return i
+			}
+		}
+		return -1
+	}
+	if position(ModuleMonitor) < 0 || position(ModuleHTTPProbe) < 0 || position(ModuleMonitor) > position(ModuleHTTPProbe) {
+		t.Fatalf("watch must snapshot before HTTP refresh, got %v", modules)
+	}
+	var last sql.NullTime
+	if err := s.db.QueryRow(`SELECT monitor_last_run FROM targets WHERE id='watch-target'`).Scan(&last); err != nil {
+		t.Fatal(err)
+	}
+	if last.Valid {
+		t.Fatal("enqueue time was incorrectly recorded as a successful monitor run")
+	}
+
+	// Re-running the due check while this task is pending must not create a twin.
+	s.runDueMonitors()
+	if got := countTasks(t, s, monitorWatchType); got != 1 {
+		t.Fatalf("due scheduler created %d duplicate watch tasks, want 1", got)
+	}
+}
+
+func TestTargetStatusDoesNotGoIdleWhileSiblingTaskRuns(t *testing.T) {
+	s := newTestScheduler(t)
+	_, _ = s.db.Exec(`INSERT INTO targets(id,domain,scan_status) VALUES('t-status','example.com','running')`)
+	_, _ = s.db.Exec(`INSERT INTO tasks(id,target_id,type,status) VALUES
+		('done','t-status','full_scan','finished'),('live','t-status','full_scan','running')`)
+
+	s.refreshTargetScanStatus("t-status", "idle", true)
+	var status string
+	_ = s.db.QueryRow(`SELECT scan_status FROM targets WHERE id='t-status'`).Scan(&status)
+	if status != "running" {
+		t.Fatalf("finishing one task hid its running sibling: status=%q", status)
+	}
+
+	_, _ = s.db.Exec(`UPDATE tasks SET status='failed' WHERE id='live'`)
+	s.refreshTargetScanStatus("t-status", "failed", true)
+	_ = s.db.QueryRow(`SELECT scan_status FROM targets WHERE id='t-status'`).Scan(&status)
+	if status != "failed" {
+		t.Fatalf("last failed task must remain visible for resume UI: status=%q", status)
 	}
 }
 

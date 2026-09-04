@@ -454,6 +454,8 @@ func (s *VulnScanner) runDalfox(ctx context.Context, targetID string, items []ur
 			// become a finding.
 			var hitPayload string
 			hit := false
+			dalfoxArgs := []string{"url", testURL, "--silence", "--no-spinner", "--timeout", "10"}
+			dalfoxArgs = append(dalfoxArgs, ToolRequestIdentityArgs(ctx, "dalfox")...)
 			_ = s.exec.RunWithCallback(ctx, targetID, func(line string) {
 				line = strings.TrimSpace(line)
 				if line == "" {
@@ -470,7 +472,7 @@ func (s *VulnScanner) runDalfox(ctx context.Context, targetID string, items []ur
 						hitPayload = p
 					}
 				}
-			}, "dalfox", "url", testURL, "--silence", "--no-spinner", "--timeout", "10")
+			}, "dalfox", dalfoxArgs...)
 
 			if !hit {
 				return

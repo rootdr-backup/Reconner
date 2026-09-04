@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -212,27 +213,17 @@ func isExternalResource(u, pageHost string) bool {
 	if h == "" || pageHost == "" {
 		return h != ""
 	}
-	h = strings.ToLower(strings.TrimPrefix(h, "www."))
-	pageHost = strings.ToLower(strings.TrimPrefix(pageHost, "www."))
-	return h != pageHost && !strings.HasSuffix(h, "."+pageHost)
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	pageHost = strings.ToLower(strings.TrimSuffix(pageHost, "."))
+	return h != pageHost
 }
 
 func hostOf(rawURL string) string {
-	i := strings.Index(rawURL, "://")
-	if i < 0 {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
 		return ""
 	}
-	rest := rawURL[i+3:]
-	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
-		rest = rest[:j]
-	}
-	if k := strings.Index(rest, "@"); k >= 0 {
-		rest = rest[k+1:]
-	}
-	if k := strings.Index(rest, ":"); k >= 0 {
-		rest = rest[:k]
-	}
-	return rest
+	return strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
 }
 
 func (s securitySnapshot) toJSON() string {
@@ -274,6 +265,15 @@ func diffSecuritySnapshots(old, cur securitySnapshot) []securityChange {
 			out = append(out, securityChange{"removed", a})
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].action != out[j].action {
+			return out[i].action < out[j].action
+		}
+		if out[i].attr.Kind != out[j].attr.Kind {
+			return out[i].attr.Kind < out[j].attr.Kind
+		}
+		return out[i].attr.Value < out[j].attr.Value
+	})
 	return out
 }
 

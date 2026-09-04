@@ -68,8 +68,8 @@ else
   echo "    (Retrieve the admin password with: grep admin_password ${CFG})"
 fi
 
-# The server serves the dashboard from ./frontend/dist relative to the working
+# The service serves the dashboard from ./frontend/dist relative to the working
 # directory, so run from the install dir where the built dist was copied.
 cd /opt/reconner
 echo "==> Starting Reconner on port ${PORT} ..."
-exec reconner serve
+exec reconner

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,10 +92,11 @@ func (s *SmugglingScanner) testHost(ctx context.Context, targetID, rawURL string
 		}
 	}
 	hostport := net.JoinHostPort(host, port)
+	identityHeaders := rawRequestIdentityHeaders(ctx)
 
 	// Baseline: a well-formed request must be reasonably fast, else the host is
 	// just slow and any "delay" is meaningless.
-	baseElapsed, baseOK, err := s.sendRaw(ctx, scheme, host, hostport, baselineRequest(host))
+	baseElapsed, baseOK, err := s.sendRaw(ctx, scheme, host, hostport, baselineRequest(host, identityHeaders))
 	if err != nil || !baseOK || baseElapsed > smugSlowBaseline {
 		return false
 	}
@@ -104,15 +106,15 @@ func (s *SmugglingScanner) testHost(ctx context.Context, targetID, rawURL string
 		name string
 		raw  string
 	}{
-		{"CL.TE", clteProbe(host)},
-		{"TE.CL", teclProbe(host)},
+		{"CL.TE", clteProbe(host, identityHeaders)},
+		{"TE.CL", teclProbe(host, identityHeaders)},
 	} {
 		if ctx.Err() != nil {
 			return false
 		}
 		if s.probeTimesOut(ctx, scheme, host, hostport, probe.raw) {
 			// Re-confirm: baseline still fast AND probe still blocks.
-			b2, ok2, _ := s.sendRaw(ctx, scheme, host, hostport, baselineRequest(host))
+			b2, ok2, _ := s.sendRaw(ctx, scheme, host, hostport, baselineRequest(host, identityHeaders))
 			if !ok2 || b2 > smugSlowBaseline {
 				continue
 			}
@@ -178,11 +180,33 @@ func (s *SmugglingScanner) sendRaw(ctx context.Context, scheme, host, hostport, 
 	return elapsed, true, nil
 }
 
-func baselineRequest(host string) string {
+func rawRequestIdentityHeaders(ctx context.Context) string {
+	headers := RequestIdentityHeaders(ctx, map[string]string{"Accept": "*/*"})
+	if headerValue(headers, "User-Agent") == "" {
+		headers["User-Agent"] = "Mozilla/5.0 (compatible; ReconBot/1.0)"
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	var block strings.Builder
+	for _, name := range names {
+		value := headers[name]
+		if validScanHeader(name, value) {
+			block.WriteString(name)
+			block.WriteString(": ")
+			block.WriteString(value)
+			block.WriteString("\r\n")
+		}
+	}
+	return block.String()
+}
+
+func baselineRequest(host, identityHeaders string) string {
 	return "GET / HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
-		"User-Agent: Mozilla/5.0 (compatible; ReconBot/1.0)\r\n" +
-		"Accept: */*\r\n" +
+		identityHeaders +
 		"Connection: close\r\n\r\n"
 }
 
@@ -192,10 +216,10 @@ func baselineRequest(host string) string {
 // terminating "0\r\n\r\n"; a back-end using Transfer-Encoding then blocks waiting
 // for the chunk terminator that never arrives → delay. Using a valid body is
 // what keeps this from false-positiving on ordinary TE servers.
-func clteProbe(host string) string {
+func clteProbe(host, identityHeaders string) string {
 	return "POST / HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
-		"User-Agent: Mozilla/5.0 (compatible; ReconBot/1.0)\r\n" +
+		identityHeaders +
 		"Content-Length: 4\r\n" +
 		"Transfer-Encoding: chunked\r\n\r\n" +
 		"1\r\nA\r\n0\r\n\r\n"
@@ -204,10 +228,10 @@ func clteProbe(host string) string {
 // TE.CL: front-end uses Transfer-Encoding, back-end uses Content-Length. The
 // front-end sees the "0" terminating chunk and forwards "0\r\n\r\n"; the back-end
 // (CL=6) waits for 6 bytes it never receives → delay.
-func teclProbe(host string) string {
+func teclProbe(host, identityHeaders string) string {
 	return "POST / HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
-		"User-Agent: Mozilla/5.0 (compatible; ReconBot/1.0)\r\n" +
+		identityHeaders +
 		"Content-Length: 6\r\n" +
 		"Transfer-Encoding: chunked\r\n\r\n" +
 		"0\r\n\r\nX"

@@ -106,6 +106,14 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 		logFn("info", "headless_crawl", "Headless browser failed to start — skipping rendered crawl.")
 		return nil
 	}
+	headerActions, stopHeaders := scopedBrowserHeaderSession(browserCtx, browserCtx, ctx, seeds, nil)
+	defer stopHeaders()
+	if len(headerActions) > 0 {
+		if err := chromedp.Run(browserCtx, headerActions...); err != nil {
+			logFn("warn", "headless_crawl", "Could not configure scoped request identity; skipping rendered crawl.")
+			return nil
+		}
+	}
 
 	type qi struct {
 		url   string

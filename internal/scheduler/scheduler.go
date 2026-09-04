@@ -206,10 +206,15 @@ type Scheduler struct {
 	cancelMap map[string]context.CancelFunc
 	mu        sync.RWMutex
 	running   map[string]bool
+	// taskTargets mirrors running so admission can enforce MaxScansPerTarget
+	// without racing on a database status transition that has not committed yet.
+	taskTargets map[string]string
 	// throttleLog dedupes the cooldown warning so a loaded box logs it once, not
 	// every 2s drain tick.
 	throttleLog atomic.Bool
 	stopCh      chan struct{}
+	stopOnce    sync.Once
+	stopping    bool
 	wg          sync.WaitGroup
 
 	pauseMu    sync.Mutex
@@ -222,18 +227,19 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	exec := tools.NewExecutor(cfg, log)
 
 	s := &Scheduler{
-		db:         db,
-		hub:        hub,
-		cfg:        cfg,
-		logger:     log,
-		executor:   exec,
-		queue:      make(chan string, 100),
-		cancelMap:  make(map[string]context.CancelFunc),
-		skipCancel: make(map[string]context.CancelFunc),
-		skipReq:    make(map[string]bool),
-		running:    make(map[string]bool),
-		stopCh:     make(chan struct{}),
-		paused:     make(map[string]bool),
+		db:          db,
+		hub:         hub,
+		cfg:         cfg,
+		logger:      log,
+		executor:    exec,
+		queue:       make(chan string, 100),
+		cancelMap:   make(map[string]context.CancelFunc),
+		skipCancel:  make(map[string]context.CancelFunc),
+		skipReq:     make(map[string]bool),
+		running:     make(map[string]bool),
+		taskTargets: make(map[string]string),
+		stopCh:      make(chan struct{}),
+		paused:      make(map[string]bool),
 	}
 
 	// Wrapped broadcast: fan out to websocket clients AND route high-signal
@@ -277,7 +283,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.raceScanner = scanner.NewRaceScanner(db, exec, cfg, log, bc)
 	s.smugglingScanner = scanner.NewSmugglingScanner(db, exec, cfg, log, bc)
 	s.verifyScanner = scanner.NewVerifyScanner(db, exec, cfg, log, bc)
-	s.monitorScanner = scanner.NewMonitorScanner(db, exec, cfg, log)
+	s.monitorScanner = scanner.NewMonitorScanner(db, exec, cfg, log, bc)
 	s.bountyCatalog = bounty.NewService(db, log)
 
 	return s
@@ -345,7 +351,7 @@ func (s *Scheduler) SetNotifier(n Notifier) {
 func (s *Scheduler) Start() {
 	// Clean up zombie tasks from a previous run SYNCHRONOUSLY, before the queue
 	// starts — otherwise it races with any task created right after Start() and
-	// wrongly cancels it (the CLI's "scan cancelled (0s)" bug).
+	// wrongly cancels it (the historical "scan cancelled (0s)" bug).
 	s.recoverPendingTasks()
 
 	s.wg.Add(1)
@@ -364,8 +370,29 @@ func (s *Scheduler) Start() {
 }
 
 func (s *Scheduler) Stop() {
-	close(s.stopCh)
+	cancels := s.stopScheduling()
+	// Stop must never wait for a scanner that still has an active context. During
+	// graceful shutdown those rows have already been parked as interrupted; on an
+	// ordinary stop this simply cancels the in-memory work before waiting.
+	for _, cancel := range cancels {
+		cancel()
+	}
 	s.wg.Wait()
+}
+
+// stopScheduling atomically closes admission before returning the live task
+// cancels. Closing stopCh alone leaves a race where processQueue has already
+// selected a pending item and starts it during shutdown.
+func (s *Scheduler) stopScheduling() []context.CancelFunc {
+	s.mu.Lock()
+	s.stopping = true
+	cancels := make([]context.CancelFunc, 0, len(s.cancelMap))
+	for _, cancel := range s.cancelMap {
+		cancels = append(cancels, cancel)
+	}
+	s.mu.Unlock()
+	s.stopOnce.Do(func() { close(s.stopCh) })
+	return cancels
 }
 
 func (s *Scheduler) recoverPendingTasks() {
@@ -431,14 +458,11 @@ func (s *Scheduler) recoverPendingTasks() {
 const InterruptedStatus = "interrupted"
 
 // SuspendActive flips every currently-active (running or paused) task to the
-// 'interrupted' state and returns how many were affected. It is called both by
-// the serve process's graceful-shutdown handler (on SIGTERM/SIGINT) and by the
-// `reconner suspend-scans` CLI that deploy.sh runs while the service is stopped —
-// so an in-progress scan is safely parked across a restart/upgrade instead of
-// being lost or left as an uncancellable zombie. Idempotent (a second call finds
-// nothing still running). Package-level so the CLI can call it with just a DB
-// handle, without spinning up a full scheduler.
-func SuspendActive(db *database.DB) (int, error) {
+// 'interrupted' state and returns how many were affected. It is called by the
+// service's graceful shutdown path, so an in-progress scan is safely parked
+// across a restart/upgrade instead of being lost or left as an uncancellable
+// zombie. Idempotent (a second call finds nothing still running).
+func suspendActive(db *database.DB) (int, error) {
 	res, err := db.Exec(`UPDATE tasks SET status=?, updated_at=CURRENT_TIMESTAMP
 		WHERE status IN ('running','paused')`, InterruptedStatus)
 	if err != nil {
@@ -452,16 +476,47 @@ func SuspendActive(db *database.DB) (int, error) {
 	return int(n), nil
 }
 
-// SuspendActiveForShutdown parks all active scans as 'interrupted' during the
-// serve process's graceful shutdown, so the next startup can resume them.
-func (s *Scheduler) SuspendActiveForShutdown() (int, error) { return SuspendActive(s.db) }
+// SuspendActiveForShutdown parks all active scans and then cancels their live
+// contexts. executeTask detects the persisted interrupted state and does not
+// overwrite it with cancelled while unwinding.
+func (s *Scheduler) SuspendActiveForShutdown() (int, error) {
+	// Block new admission first, then park even an in-memory admitted task whose
+	// database row has not made its pending→running transition yet.
+	cancels := s.stopScheduling()
+	s.mu.RLock()
+	admitted := make([]string, 0, len(s.cancelMap))
+	for id := range s.cancelMap {
+		admitted = append(admitted, id)
+	}
+	s.mu.RUnlock()
+	n := 0
+	for _, id := range admitted {
+		res, updateErr := s.db.Exec(`UPDATE tasks SET status=?,updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND status IN ('pending','running','paused')`, InterruptedStatus, id)
+		if updateErr != nil {
+			return n, updateErr
+		}
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			n += int(affected)
+		}
+	}
+	remaining, err := suspendActive(s.db)
+	if err != nil {
+		return n, err
+	}
+	n += remaining
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return n, nil
+}
 
 // ResumeInterrupted re-queues every task parked as 'interrupted' (see
 // SuspendActive) for the modules it had NOT yet completed, then retires the
 // original row. Called once at serve startup so scans that were running when the
 // service was stopped pick up automatically where they left off. Returns how many
 // scans were resumed. Runs ONLY in the long-lived serve process (it enqueues onto
-// the worker pool) — never from a short-lived CLI boot.
+// the worker pool) during service startup.
 func (s *Scheduler) ResumeInterrupted() int {
 	rows, err := s.db.Query(`SELECT id FROM tasks WHERE status=?`, InterruptedStatus)
 	if err != nil {
@@ -515,6 +570,14 @@ func (s *Scheduler) CreateTaskTyped(targetID string, modules []string, priority 
 }
 
 func (s *Scheduler) createTask(targetID string, modules []string, priority int, typeTag, scopeOverride string) (*models.Task, error) {
+	// Hold admission read-locked through persistence/enqueue so graceful shutdown
+	// cannot begin between the stopping check and creation of a new pending row.
+	s.mu.RLock()
+	if s.stopping {
+		s.mu.RUnlock()
+		return nil, fmt.Errorf("scheduler is stopping")
+	}
+	defer s.mu.RUnlock()
 	if len(modules) == 0 {
 		modules = AllModules
 	}
@@ -529,7 +592,13 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	// list is what actually executes. (No-op for the full default set and for
 	// network-only scans, which the planner passes through unchanged.)
 	objective := modules
-	modules = PlanModules(modules)
+	// A watch pass is deliberately snapshot-first: ModuleMonitor must compare
+	// against the PREVIOUS HTTP/JS baseline before http_probe/js_analysis refresh
+	// those rows. The generic capability planner sorts probes before detectors,
+	// which erased status/title/JS changes and made monitoring miss real drift.
+	if typeTag != monitorWatchType {
+		modules = PlanModules(modules)
+	}
 
 	task := &models.Task{
 		ID:       uuid.New().String(),
@@ -557,13 +626,12 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 		return nil, fmt.Errorf("create task: %w", err)
 	}
 
-	// Non-blocking enqueue: never let a full queue block the HTTP handler (that
-	// was the cause of "unable to add target / can't cancel" under load). If the
-	// buffer is momentarily full, hand off to a goroutine so the request returns.
+	// Non-blocking enqueue: never let a full queue block the HTTP handler. A task
+	// that does not fit remains pending and the two-second database drain picks it
+	// up; spawning a blocked sender here leaked goroutines during shutdown.
 	select {
 	case s.queue <- task.ID:
 	default:
-		go func(tid string) { s.queue <- tid }(task.ID)
 	}
 	s.hub.Broadcast("task_created", task)
 	return task, nil
@@ -634,6 +702,8 @@ func shortID(id string) string {
 }
 
 func (s *Scheduler) CancelTask(taskID string) error {
+	var targetID string
+	_ = s.db.QueryRow(`SELECT target_id FROM tasks WHERE id=?`, taskID).Scan(&targetID)
 	s.mu.Lock()
 	cancel, ok := s.cancelMap[taskID]
 	// Free the concurrency slot RIGHT NOW. The scan goroutine's own defer also
@@ -642,6 +712,7 @@ func (s *Scheduler) CancelTask(taskID string) error {
 	// wedged. This is the fix for "I stopped/deleted it but scans stayed stuck."
 	delete(s.cancelMap, taskID)
 	delete(s.running, taskID)
+	delete(s.taskTargets, taskID)
 	s.mu.Unlock()
 
 	if ok {
@@ -657,6 +728,9 @@ func (s *Scheduler) CancelTask(taskID string) error {
 	}
 
 	s.hub.Broadcast("task_cancelled", map[string]string{"task_id": taskID})
+	if targetID != "" {
+		s.refreshTargetScanStatus(targetID, "idle", false)
+	}
 	return nil
 }
 
@@ -688,6 +762,7 @@ func (s *Scheduler) CancelTasksForTarget(targetID string) {
 		}
 		delete(s.cancelMap, id)
 		delete(s.running, id)
+		delete(s.taskTargets, id)
 	}
 	s.mu.Unlock()
 
@@ -698,6 +773,7 @@ func (s *Scheduler) CancelTasksForTarget(targetID string) {
 	if len(ids) > 0 {
 		s.logger.Info("Cancelled running tasks for deleted target", "target", targetID, "count", len(ids))
 	}
+	s.refreshTargetScanStatus(targetID, "idle", false)
 }
 
 // runningTaskForTarget returns the id of the most recent running/paused task for
@@ -944,35 +1020,55 @@ func (s *Scheduler) drainPendingTasks() {
 }
 
 func (s *Scheduler) tryStartTask(taskID string) {
-	s.mu.RLock()
-	runningCount := len(s.running)
-	s.mu.RUnlock()
+	var targetID, status string
+	if err := s.db.QueryRow(`SELECT target_id,status FROM tasks WHERE id=?`, taskID).Scan(&targetID, &status); err != nil || status != "pending" {
+		return
+	}
 
 	// Smart admission: the ceiling isn't a fixed number — it drops when the box is
 	// under memory/CPU pressure (cooldown) and rises back toward the configured
 	// max when things calm down. Because drainPendingTasks re-runs every 2s using
 	// this same dynamic ceiling, throttled tasks auto-resume once load lightens.
-	if runningCount >= s.effectiveMaxConcurrent(runningCount) {
+	s.mu.Lock()
+	if s.stopping || s.running[taskID] {
+		s.mu.Unlock()
 		return
 	}
-
-	s.mu.Lock()
-	if s.running[taskID] {
+	runningCount := len(s.running)
+	if runningCount >= s.effectiveMaxConcurrent(runningCount) {
+		s.mu.Unlock()
+		return
+	}
+	maxPerTarget := 1
+	if s.cfg != nil && s.cfg.Limits.MaxScansPerTarget > 0 {
+		maxPerTarget = s.cfg.Limits.MaxScansPerTarget
+	}
+	perTarget := 0
+	for id := range s.running {
+		if s.taskTargets[id] == targetID {
+			perTarget++
+		}
+	}
+	if perTarget >= maxPerTarget {
 		s.mu.Unlock()
 		return
 	}
 	s.running[taskID] = true
+	s.taskTargets[taskID] = targetID
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelMap[taskID] = cancel
+	// Register before releasing the admission lock so Stop cannot begin Wait
+	// between publishing the task and incrementing the WaitGroup.
+	s.wg.Add(1)
 	s.mu.Unlock()
 
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() {
 			s.mu.Lock()
 			delete(s.running, taskID)
 			delete(s.cancelMap, taskID)
+			delete(s.taskTargets, taskID)
 			s.mu.Unlock()
 		}()
 		s.executeTask(ctx, taskID)
@@ -1109,15 +1205,18 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			VALUES (?, ?, ?, 'seed', CURRENT_TIMESTAMP)
 			ON CONFLICT(target_id, subdomain) DO NOTHING`, uuid.New().String(), targetID, host)
 	}
-	// Per-asset scan: confine every DB-reading module to the override host(s).
+	// Managed assets are authoritative for BOTH full-target and per-asset scans.
+	// Confining every DB-reading module here prevents stale services belonging to
+	// a deleted/suspended asset from being crawled, fuzzed, monitored or reported.
+	scopeHosts := seeded
 	if scopeOverride != "" {
-		scopeHosts := webHosts
-		if len(scopeHosts) == 0 && webPrimary != "" {
-			scopeHosts = []string{webPrimary}
-		}
-		if len(scopeHosts) > 0 {
-			ctx = scanner.WithHostScope(ctx, scopeHosts)
-		}
+		scopeHosts = webHosts
+	}
+	if len(scopeHosts) == 0 && webPrimary != "" {
+		scopeHosts = []string{webPrimary}
+	}
+	if len(scopeHosts) > 0 {
+		ctx = scanner.WithHostScope(ctx, scopeHosts)
 	}
 	sentModules := models.JSONToStringSlice(modulesJSON)
 	var modules []string
@@ -1175,13 +1274,20 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// contention it can hit SQLITE_BUSY; if we swallowed the error the task would
 	// keep running in memory while the DB (and UI) still showed 'pending' forever.
 	// Retry briefly so the transition is durable.
+	started := false
 	for attempt := 0; attempt < 5; attempt++ {
-		if _, err := s.db.Exec(`
+		if res, err := s.db.Exec(`
 			UPDATE tasks SET status = 'running', started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`, taskID); err == nil {
-			break
+			WHERE id = ? AND status = 'pending'`, taskID); err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				started = true
+			}
+			break // zero rows means shutdown/cancel won the transition; do not run.
 		}
 		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+	if !started {
+		return
 	}
 
 	_, _ = s.db.Exec(`
@@ -1189,7 +1295,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	`, targetID)
 
 	s.hub.Broadcast("task_started", map[string]string{"task_id": taskID, "target_id": targetID})
-	if s.notifier != nil {
+	backgroundWatch := taskType == monitorWatchType || taskType == monitorEscalationType
+	if s.notifier != nil && !backgroundWatch {
 		s.notifier.NotifyScanStarted(target.Domain)
 	}
 
@@ -1399,6 +1506,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		finalStatus = "failed"
 		finalError = taskErr.Error()
 	}
+	var persistedStatus string
+	_ = s.db.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&persistedStatus)
+	if persistedStatus == InterruptedStatus {
+		finalStatus = InterruptedStatus
+		finalError = ""
+	}
 
 	// Only a clean finish means "100% done" — on failure/cancel keep the real
 	// last-reached module index (lastProgress) instead of stamping progress=total,
@@ -1407,17 +1520,25 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if finalStatus == "finished" {
 		finalProgress = len(modules)
 	}
-	_, _ = s.db.Exec(`
-		UPDATE tasks SET
-			status = ?, error = ?, progress = ?, current_module = '',
-			finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, finalStatus, finalError, finalProgress, taskID)
+	if finalStatus == InterruptedStatus {
+		_, _ = s.db.Exec(`UPDATE tasks SET error='',updated_at=CURRENT_TIMESTAMP WHERE id=?`, taskID)
+	} else {
+		_, _ = s.db.Exec(`
+			UPDATE tasks SET
+				status = ?, error = ?, progress = ?, current_module = '',
+				finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+		`, finalStatus, finalError, finalProgress, taskID)
+	}
 
-	_, _ = s.db.Exec(`
-		UPDATE targets SET scan_status = 'idle', last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, targetID)
+	if taskType == monitorWatchType && finalStatus == "finished" {
+		_, _ = s.db.Exec(`UPDATE targets SET monitor_last_run=CURRENT_TIMESTAMP WHERE id=?`, targetID)
+	}
+	terminalTargetStatus := "idle"
+	if finalStatus == "failed" {
+		terminalTargetStatus = "failed"
+	}
+	s.refreshTargetScanStatus(targetID, terminalTargetStatus, finalStatus != InterruptedStatus)
 
 	s.hub.Broadcast("task_finished", map[string]string{
 		"task_id":   taskID,
@@ -1427,8 +1548,16 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 	logFn("info", "scheduler", fmt.Sprintf("Task %s completed with status: %s", taskID, finalStatus))
 
-	if s.notifier != nil && finalStatus != "cancelled" {
+	if s.notifier != nil && (finalStatus == "finished" || finalStatus == "failed") && !backgroundWatch {
 		go s.notifyScanDone(targetID, target.Domain, finalStatus, startedAt)
+	}
+	if taskType == monitorWatchType && finalStatus == "failed" {
+		// Persist a durable warning, but let due scheduling retry after its short
+		// failure backoff instead of pretending the watch succeeded.
+		_, _ = s.db.Exec(`INSERT INTO notifications(id,target_id,type,title,body,url,severity,is_read)
+			VALUES(?,?,'monitor_failed','Monitoring pass failed',?,?,'medium',0)`,
+			uuid.NewString(), targetID, finalError, "/targets/"+targetID)
+		s.hub.Broadcast("notification_created", map[string]any{"target_id": targetID, "type": "monitor_failed", "severity": "medium"})
 	}
 
 	// Periodic-watch escalation: when a scheduled watch pass finishes and it turned
@@ -1440,6 +1569,23 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if taskType == monitorWatchType && finalStatus == "finished" {
 		s.escalateIfChanged(targetID, target.Domain, knownSubdomains, startedAt)
 	}
+}
+
+// refreshTargetScanStatus keeps the project status truthful when more than one
+// task exists for a target. A finishing/cancelled task must not overwrite a
+// still-running sibling with "idle". It also preserves "failed" for the last
+// task so the UI can show the reason and its Resume action.
+func (s *Scheduler) refreshTargetScanStatus(targetID, terminal string, touchLastScan bool) {
+	lastScan := ""
+	if touchLastScan {
+		lastScan = ", last_scan_at=CURRENT_TIMESTAMP"
+	}
+	_, _ = s.db.Exec(`UPDATE targets SET scan_status=CASE
+		WHEN EXISTS(SELECT 1 FROM tasks WHERE target_id=? AND status='running') THEN 'running'
+		WHEN EXISTS(SELECT 1 FROM tasks WHERE target_id=? AND status IN ('paused','interrupted')) THEN 'paused'
+		WHEN EXISTS(SELECT 1 FROM tasks WHERE target_id=? AND status='pending') THEN 'pending'
+		ELSE ? END`+lastScan+`, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		targetID, targetID, targetID, terminal, targetID)
 }
 
 // loadProjectWebSeeds keeps a target-level scan aligned with the editable
@@ -1628,7 +1774,10 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 		add(ModuleHTTPProbe, ModuleTakeover, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei)
 	}
 	if types["js_change"] {
-		add(ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleDOMXSS, ModuleExposure)
+		// Keep automatic monitoring follow-up observational: refresh the changed
+		// JavaScript and its endpoints without introducing a new injection pass.
+		// The retired ModuleDOMXSS was a no-op and should not occupy a task slot.
+		add(ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleExposure)
 	}
 	if types["page_change"] || types["http_change"] || types["status_change"] {
 		add(ModuleHTTPProbe, ModuleHeadlessCrawl, ModuleJSAnalysis, ModuleParamDiscovery, ModuleBackupDiscovery, ModuleNuclei)
@@ -1641,7 +1790,7 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 	if len(modules) == 0 {
 		add(ModuleHTTPProbe, ModuleBackupDiscovery, ModuleNuclei)
 	}
-	preferred := []string{ModuleHTTPProbe, ModuleHeadlessCrawl, ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleDOMXSS, ModuleTakeover, ModuleExposure, ModuleCORS, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei}
+	preferred := []string{ModuleHTTPProbe, ModuleHeadlessCrawl, ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleTakeover, ModuleExposure, ModuleCORS, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei}
 	esc := make([]string, 0, len(modules))
 	for _, m := range preferred {
 		if modules[m] {
@@ -1659,6 +1808,7 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 // it fails ONLY that module — the scan and the server keep running instead of
 // the whole process crashing and taking every concurrent scan down with it.
 func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain string, logFn scanner.LogFunc) (err error) {
+	ctx = scanner.WithTargetRequestIdentity(ctx, s.db, s.cfg, targetID)
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("module %q panicked: %v", module, r)
@@ -1964,7 +2114,10 @@ func (s *Scheduler) notifyScanDone(targetID, domain, status string, startedAt ti
 func (s *Scheduler) monitoringScheduler() {
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Minute)
+	// Run once at startup, then use a cheap one-minute due check so enabling a
+	// monitor does not wait up to 30 minutes before its first baseline.
+	s.runDueMonitors()
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -2014,9 +2167,15 @@ func (s *Scheduler) runDueMonitors() {
 		WHERE monitor_enabled = 1
 		AND (
 			monitor_last_run IS NULL
-			OR datetime(monitor_last_run, '+' || monitor_interval_hours || ' hours') <= datetime('now')
+			OR datetime(monitor_last_run, '+' || MAX(1,COALESCE(monitor_interval_hours,12)) || ' hours') <= datetime('now')
 		)
-	`)
+		AND NOT EXISTS (
+			SELECT 1 FROM tasks mt WHERE mt.target_id=targets.id AND mt.type=? AND (
+				mt.status IN ('pending','running','paused','interrupted')
+				OR mt.created_at >= datetime('now','-30 minutes')
+			)
+		)
+	`, monitorWatchType)
 	if err != nil {
 		return
 	}
@@ -2035,6 +2194,9 @@ func (s *Scheduler) runDueMonitors() {
 		// escalateIfChanged when this pass actually turns something up.
 		monitorModules := []string{
 			ModuleSubdomainEnum,
+			// Snapshot BEFORE refresh. Otherwise http_probe/js_analysis overwrite
+			// the old status/title/hash and real changes become false negatives.
+			ModuleMonitor,
 			ModuleHTTPProbe,
 			ModuleTakeover,
 			// CORS is cheap (a few header probes per endpoint) and its config
@@ -2043,13 +2205,11 @@ func (s *Scheduler) runDueMonitors() {
 			// Backup/config-file discovery every cycle — a freshly-leaked .env or
 			// db.sql.bak is exactly the kind of thing a periodic watch should catch.
 			ModuleBackupDiscovery,
-			ModuleMonitor,
 		}
 		if _, err := s.CreateTaskTyped(id, monitorModules, 3, monitorWatchType); err != nil {
 			s.logger.Error("Failed to create watch task", "target", domain, "error", err)
 			continue
 		}
-		_, _ = s.db.Exec(`UPDATE targets SET monitor_last_run = CURRENT_TIMESTAMP WHERE id = ?`, id)
 	}
 }
 

@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -559,13 +558,8 @@ func (b *browserXSSConfirmer) DOMReflectsInsertion(parent context.Context, ip in
 	}
 	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range auth {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{ip.URL}, auth)
+	defer stopHeaders()
 	var dom string
 	if method == "POST" {
 		parsed, err := url.Parse(ip.URL)
@@ -574,10 +568,12 @@ func (b *browserXSSConfirmer) DOMReflectsInsertion(parent context.Context, ip in
 			actionJSON, _ := json.Marshal(ip.URL)
 			valuesJSON, _ := json.Marshal(browserFormValues(ip, canary))
 			script := fmt.Sprintf(`(()=>{const a=%s,v=%s,f=document.createElement('form');f.method='POST';f.action=a;for(const [k,vs] of Object.entries(v)){for(const x of vs){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=x;f.appendChild(i)}}document.body.appendChild(f);f.submit()})()`, actionJSON, valuesJSON)
-			_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(origin), chromedp.Evaluate(script, nil), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+			actions := append(headerActions, chromedp.Navigate(origin), chromedp.Evaluate(script, nil), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+			_ = chromedp.Run(ctx, actions...)
 		}
 	} else if req, err := buildInjectedRequest(ctx, ip, canary, auth); err == nil {
-		_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(req.URL.String()), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+		actions := append(headerActions, chromedp.Navigate(req.URL.String()), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+		_ = chromedp.Run(ctx, actions...)
 	}
 	reflected := strings.Contains(dom, canary)
 	storeDOMReflection(key, reflected)
@@ -597,16 +593,11 @@ func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, raw
 	}
 	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{rawURL}, headers)
+	defer stopHeaders()
 	var dom string
-	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(rawURL),
-		chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+	actions := append(headerActions, chromedp.Navigate(rawURL), chromedp.Sleep(800*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+	_ = chromedp.Run(ctx, actions...)
 	return strings.Contains(dom, canary)
 }
 
@@ -722,17 +713,11 @@ func (b *browserXSSConfirmer) fireWindowName(parent context.Context, pageURL, pa
 	}
 	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
+	defer stopHeaders()
 	payloadJSON, _ := json.Marshal(payload)
-	if err := chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set),
-		chromedp.Navigate("about:blank"), chromedp.Evaluate(`window.name=`+string(payloadJSON), nil),
-		chromedp.Navigate(pageURL)); err != nil {
+	actions := append(headerActions, chromedp.Navigate("about:blank"), chromedp.Evaluate(`window.name=`+string(payloadJSON), nil), chromedp.Navigate(pageURL))
+	if err := chromedp.Run(ctx, actions...); err != nil {
 		return false
 	}
 	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
@@ -755,14 +740,10 @@ func (b *browserXSSConfirmer) firePostMessage(parent context.Context, pageURL, p
 	}
 	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
-	if err := chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(pageURL)); err != nil {
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
+	defer stopHeaders()
+	actions := append(headerActions, chromedp.Navigate(pageURL))
+	if err := chromedp.Run(ctx, actions...); err != nil {
 		return false
 	}
 	src := b.scriptLoaderPage() + "/post-message?payload=" + url.QueryEscape(payload)
@@ -796,15 +777,10 @@ func (b *browserXSSConfirmer) fireWithHeaders(parent context.Context, rawURL str
 
 	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
 	defer cancel()
-
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
-	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(rawURL))
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{rawURL}, headers)
+	defer stopHeaders()
+	actions := append(headerActions, chromedp.Navigate(rawURL))
+	_ = chromedp.Run(ctx, actions...)
 	title := b.waitForExecution(ctx, nonce)
 	return strings.TrimSpace(title) == nonce
 }
@@ -822,23 +798,16 @@ func (b *browserXSSConfirmer) fireScriptResource(parent context.Context, resourc
 	}
 	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{resourceURL}, headers)
+	defer stopHeaders()
 	resourceJSON, _ := json.Marshal(resourceURL)
 	loader := `(()=>{const s=document.createElement('script');s.src=` + string(resourceJSON) + `;document.head.appendChild(s)})()`
 	loaderURL := b.scriptLoaderPage()
 	if loaderURL == "" {
 		return false
 	}
-	if err := chromedp.Run(ctx,
-		network.Enable(), network.SetExtraHTTPHeaders(set),
-		chromedp.Navigate(loaderURL),
-		chromedp.Evaluate(loader, nil)); err != nil {
+	actions := append(headerActions, chromedp.Navigate(loaderURL), chromedp.Evaluate(loader, nil))
+	if err := chromedp.Run(ctx, actions...); err != nil {
 		return false
 	}
 	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
@@ -857,13 +826,8 @@ func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, va
 	}
 	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
 	defer cancel()
-	set := network.Headers{}
-	for k, v := range headers {
-		if !strings.EqualFold(k, "content-type") && v != "" {
-			set[k] = v
-		}
-	}
-	defer func() { _ = chromedp.Run(tab, network.SetExtraHTTPHeaders(network.Headers{})) }()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{action}, headers)
+	defer stopHeaders()
 	parsed, err := url.Parse(action)
 	if err != nil {
 		return false
@@ -872,7 +836,8 @@ func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, va
 	actionJSON, _ := json.Marshal(action)
 	valuesJSON, _ := json.Marshal(values)
 	script := fmt.Sprintf(`(()=>{const a=%s,v=%s,f=document.createElement('form');f.method='POST';f.action=a;for(const [k,vs] of Object.entries(v)){for(const x of vs){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=x;f.appendChild(i)}}document.body.appendChild(f);f.submit()})()`, actionJSON, valuesJSON)
-	_ = chromedp.Run(ctx, network.Enable(), network.SetExtraHTTPHeaders(set), chromedp.Navigate(origin), chromedp.Evaluate(script, nil))
+	actions := append(headerActions, chromedp.Navigate(origin), chromedp.Evaluate(script, nil))
+	_ = chromedp.Run(ctx, actions...)
 	title := b.waitForExecution(ctx, nonce)
 	return strings.TrimSpace(title) == nonce
 }

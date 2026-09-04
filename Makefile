@@ -2,7 +2,7 @@
 #
 # Quick start:
 #   make            # build the frontend + the `reconner` binary
-#   ./reconner serve
+#   ./reconner       # start the web application
 #
 # Individual targets are below. Nothing here needs sudo —
 # Docker is the recommended way to get the full tool-chain.
@@ -37,7 +37,7 @@ frontend:
 
 ## Run the server (dashboard on http://localhost:8080 by default).
 run: build
-	./$(BINARY) serve
+	./$(BINARY)
 
 ## Run the Go test suite.
 test:

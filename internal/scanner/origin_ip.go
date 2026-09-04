@@ -188,18 +188,18 @@ func (s *OriginIPScanner) probeOrigin(ctx context.Context, ip, domain string) (b
 		if scheme == "https" {
 			client = &http.Client{
 				Timeout: 8 * time.Second,
-				Transport: &http.Transport{
+				Transport: identityRoundTripper{base: &http.Transport{
 					TLSClientConfig:   &tls.Config{InsecureSkipVerify: true, ServerName: domain},
 					DisableKeepAlives: true,
 					DialContext:       (&net.Dialer{Timeout: 6 * time.Second}).DialContext,
-				},
+				}},
 				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			}
 			urlStr = "https://" + net.JoinHostPort(ip, "443") + "/"
 		} else {
 			client = &http.Client{
 				Timeout:       8 * time.Second,
-				Transport:     &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: 6 * time.Second}).DialContext},
+				Transport:     identityRoundTripper{base: &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: 6 * time.Second}).DialContext}},
 				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			}
 			urlStr = "http://" + net.JoinHostPort(ip, "80") + "/"

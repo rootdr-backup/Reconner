@@ -407,6 +407,7 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 	if s.cfg.NucleiDAST {
 		args = append(args, "-dast")
 	}
+	args = append(args, ToolRequestIdentityArgs(ctx, "nuclei")...)
 
 	// FIX: feed targets via real stdin. Previously RunWithCallback never set
 	// cmd.Stdin, so `-l /dev/stdin` read EOF and nuclei scanned nothing.

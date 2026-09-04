@@ -181,19 +181,11 @@ func (c *Client) writePump() {
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write([]byte("\n"))
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
+			// Every browser message event must contain exactly one JSON document.
+			// Joining queued JSON values with newlines into one WebSocket frame made
+			// JSON.parse fail whenever events arrived in a burst, silently dropping
+			// live task/monitor updates in the dashboard.
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 

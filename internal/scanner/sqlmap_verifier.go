@@ -46,7 +46,7 @@ func (v *SQLmapVerifier) Verify(ctx context.Context, c VulnerabilityCandidate) V
 	if !URLInScope(v.targetDomain, v.origins, c.URL) {
 		return VerifyResult{Verdict: VerifyRejected, Reason: "candidate URL out of scope", Method: "sqlmap"}
 	}
-	args := buildSQLmapArgsWithShape(c, v.authHeaders, v.requestSiblings(ctx, c), v.requestSiblingTypes(ctx, c))
+	args := buildSQLmapArgsWithShape(c, RequestIdentityHeaders(ctx, v.authHeaders), v.requestSiblings(ctx, c), v.requestSiblingTypes(ctx, c))
 	res, err := v.exec.Run(ctx, "sqlmap", args...)
 	if err != nil && res == nil {
 		return VerifyResult{Verdict: VerifyInconclusive, Reason: "sqlmap failed to run: " + err.Error(), Method: "sqlmap"}

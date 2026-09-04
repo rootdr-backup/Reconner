@@ -9,7 +9,7 @@ Build and run the whole thing as a normal user — no root required:
 
 ```bash
 make            # builds the frontend bundle and the `reconner` binary
-./reconner serve
+./reconner       # starts the web application
 ```
 
 For local development:

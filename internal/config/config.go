@@ -50,6 +50,10 @@ type Config struct {
 	AdminUsername   string `json:"admin_username"`
 	AdminPassword   string `json:"admin_password"`
 	LogLevel        string `json:"log_level"`
+	// ScanUserAgent and ScanHeaders identify authorised bug-bounty traffic.
+	// Per-target values override these deployment-wide defaults.
+	ScanUserAgent string            `json:"scan_user_agent"`
+	ScanHeaders   map[string]string `json:"scan_headers"`
 
 	// UpdateCheckEnabled turns the in-app "new version available" checker on/off.
 	// GitHubRepo is the "owner/name" the checker queries for the latest release.
@@ -283,7 +287,7 @@ type Config struct {
 	// one password against all users). 0 ⇒ built-in default (5s). Raise it to stay
 	// well under a domain's lockout observation window.
 	// OOBRawPort is the TCP port the watchtower's raw out-of-band listener binds
-	// (in `reconner serve`) to catch NON-HTTP callbacks — specifically the
+	// while the service is running to catch NON-HTTP callbacks — specifically the
 	// LDAP/JNDI connection a Log4Shell (CVE-2021-44228) payload makes back to us.
 	// The initial-access engine injects ${jndi:ldap://<public-host>:<port>/<token>}
 	// and a hit here proves blind RCE, correlated by token. 0 ⇒ the canonical JNDI
@@ -458,36 +462,40 @@ func defaultConfig() *Config {
 	}
 
 	return &Config{
-		Host:                        "127.0.0.1", // safe default: local-only. Set to 0.0.0.0 to expose (behind a firewall/VPN only).
-		Port:                        8080,
-		DatabasePath:                filepath.Join(dataDir, "recon.db"),
-		DataDir:                     dataDir,
-		ToolsDir:                    filepath.Join(dataDir, "tools"),
-		ScreenshotsDir:              filepath.Join(dataDir, "screenshots"),
-		WordlistsDir:                filepath.Join(dataDir, "wordlists"),
-		NucleiTemplates:             filepath.Join(dataDir, "nuclei-templates"),
-		SessionSecret:               "change-me-in-production-32-bytes!",
-		AdminUsername:               "admin",
-		AdminPassword:               DefaultAdminPassword,
-		UpdateCheckEnabled:          true,
-		GitHubRepo:                  "rootdr-backup/reconner",
-		LogLevel:                    "info",
-		CSRFSecret:                  "change-me-csrf-secret-32-bytes!!",
-		EnableSQLmap:                true, // prove SQLi candidates with sqlmap by default (scope-guarded)
-		SQLiTimeBased:               true, // statistical time-based SQLi (linear-scaling proof)
-		NucleiVerify:                true, // route nuclei sqli/xss/redirect hits through the verifier
-		NucleiExtraTargets:          true, // scan discovered parameterized URLs, not just site roots
-		NucleiDAST:                  true, // run nuclei's fuzzing-templates (XSS/SQLi/SSRF/LFI/SSTI) against params — was off, so nuclei did no active injection
-		NucleiMaxSurfaces:           8000, // cap canonical nuclei surfaces per target (post-dedup safety bound)
-		NucleiMaxPerHost:            2000, // cap canonical surfaces contributed by any single host
-		ScanWatchdogHours:           24,   // base watchdog floor; scheduler adds adaptive headroom for large targets
-		EnableDAST:                  true,                        // native context-aware DAST (XSS/SQLi) over all insertion points
-		AIModel:                     "claude-opus-4-8",           // latest Opus; used only when AIEnabled and a key is set
-		AIMaxIterations:             40,                          // hard cap on the agent loop
-		AuthzMode:                   "balanced",                  // two-identity BOLA: deep auth crawl + read/write differential
-		AuthzDestructive:            false,                       // cross-user DELETE stays opt-in
-		Workers:                     workers,                     // auto-scaled to host CPU (floors = previous fixed defaults)
-		Limits:                      limits,                      // auto-scaled to host CPU/RAM
+		Host:               "127.0.0.1", // safe default: local-only. Set to 0.0.0.0 to expose (behind a firewall/VPN only).
+		Port:               8080,
+		DatabasePath:       filepath.Join(dataDir, "recon.db"),
+		DataDir:            dataDir,
+		ToolsDir:           filepath.Join(dataDir, "tools"),
+		ScreenshotsDir:     filepath.Join(dataDir, "screenshots"),
+		WordlistsDir:       filepath.Join(dataDir, "wordlists"),
+		NucleiTemplates:    filepath.Join(dataDir, "nuclei-templates"),
+		SessionSecret:      "change-me-in-production-32-bytes!",
+		AdminUsername:      "admin",
+		AdminPassword:      DefaultAdminPassword,
+		UpdateCheckEnabled: true,
+		GitHubRepo:         "rootdr-backup/reconner",
+		LogLevel:           "info",
+		// Empty preserves each scanner/tool's existing default identity. Operators
+		// can set a deployment-wide value or override it per target.
+		ScanUserAgent:      "",
+		ScanHeaders:        map[string]string{},
+		CSRFSecret:         "change-me-csrf-secret-32-bytes!!",
+		EnableSQLmap:       true,              // prove SQLi candidates with sqlmap by default (scope-guarded)
+		SQLiTimeBased:      true,              // statistical time-based SQLi (linear-scaling proof)
+		NucleiVerify:       true,              // route nuclei sqli/xss/redirect hits through the verifier
+		NucleiExtraTargets: true,              // scan discovered parameterized URLs, not just site roots
+		NucleiDAST:         true,              // run nuclei's fuzzing-templates (XSS/SQLi/SSRF/LFI/SSTI) against params — was off, so nuclei did no active injection
+		NucleiMaxSurfaces:  8000,              // cap canonical nuclei surfaces per target (post-dedup safety bound)
+		NucleiMaxPerHost:   2000,              // cap canonical surfaces contributed by any single host
+		ScanWatchdogHours:  24,                // base watchdog floor; scheduler adds adaptive headroom for large targets
+		EnableDAST:         true,              // native context-aware DAST (XSS/SQLi) over all insertion points
+		AIModel:            "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
+		AIMaxIterations:    40,                // hard cap on the agent loop
+		AuthzMode:          "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
+		AuthzDestructive:   false,             // cross-user DELETE stays opt-in
+		Workers:            workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
+		Limits:             limits,            // auto-scaled to host CPU/RAM
 	}
 }
 
@@ -528,6 +536,9 @@ func Load() (*Config, error) {
 // whose source lives in a PUBLIC repo (never commit an API key). An env var wins
 // over the file when set.
 func (c *Config) applyEnvOverrides() {
+	if v := os.Getenv("RECON_SCAN_USER_AGENT"); v != "" {
+		c.ScanUserAgent = v
+	}
 	if v := os.Getenv("RECON_SECURITYTRAILS_KEY"); v != "" {
 		c.SecurityTrailsAPIKey = v
 	}

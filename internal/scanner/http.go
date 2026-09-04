@@ -132,7 +132,7 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		"-tech-detect",
 		"-status-code",
 		"-content-length",
-		"-follow-redirects",
+		"-follow-host-redirects", // never forward program headers to another host
 		"-timeout", "10",
 		"-threads", fmt.Sprintf("%d", s.cfg.Workers.HTTPProbing),
 		"-retries", "1",
@@ -142,6 +142,7 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	if s.cfg.Limits.HTTPRateLimit > 0 {
 		args = append(args, "-rate-limit", fmt.Sprintf("%d", s.cfg.Limits.HTTPRateLimit))
 	}
+	args = append(args, ToolRequestIdentityArgs(ctx, "httpx")...)
 
 	if s.exec.IsToolAvailable("httpx") {
 		var mu sync.Mutex
@@ -367,14 +368,16 @@ func (s *HTTPScanner) ProbeURL(ctx context.Context, targetID, url string) error 
 	if !s.exec.IsToolAvailable("httpx") {
 		return nil
 	}
-	_, err := s.exec.Run(ctx, "httpx",
+	args := []string{
 		"-u", url,
 		"-silent",
 		"-json",
 		"-title",
 		"-web-server",
 		"-tech-detect",
-	)
+	}
+	args = append(args, ToolRequestIdentityArgs(ctx, "httpx")...)
+	_, err := s.exec.Run(ctx, "httpx", args...)
 	return err
 }
 
@@ -387,15 +390,7 @@ func (s *HTTPScanner) RunWithInput(ctx context.Context, taskID string, input str
 		return nil
 	}
 
-	return s.exec.RunWithInputCallback(ctx, strings.NewReader(input), taskID, func(line string) {
-		var out httpxOutput
-		if err := json.Unmarshal([]byte(line), &out); err != nil {
-			return
-		}
-		if err := s.storeHTTPService(taskID, out); err != nil {
-			s.logger.Error("Failed to store HTTP service from input run", "error", err)
-		}
-	}, "httpx",
+	args := []string{
 		"-l", "/dev/stdin",
 		"-silent",
 		"-json",
@@ -404,7 +399,17 @@ func (s *HTTPScanner) RunWithInput(ctx context.Context, taskID string, input str
 		"-tech-detect",
 		"-status-code",
 		"-content-length",
-		"-follow-redirects",
+		"-follow-host-redirects", // never forward program headers to another host
 		"-timeout", "10",
-	)
+	}
+	args = append(args, ToolRequestIdentityArgs(ctx, "httpx")...)
+	return s.exec.RunWithInputCallback(ctx, strings.NewReader(input), taskID, func(line string) {
+		var out httpxOutput
+		if err := json.Unmarshal([]byte(line), &out); err != nil {
+			return
+		}
+		if err := s.storeHTTPService(taskID, out); err != nil {
+			s.logger.Error("Failed to store HTTP service from input run", "error", err)
+		}
+	}, "httpx", args...)
 }

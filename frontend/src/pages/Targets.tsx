@@ -5,6 +5,7 @@ import { Button, Input, Modal, Spinner, Empty, Badge } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { useUIStore } from '../store/ui'
 import { timeAgo, cn } from '../lib/utils'
+import { ws } from '../lib/websocket'
 import type { Target } from '../types'
 
 // filterKind splits the unified target list back into its Web and Network
@@ -17,26 +18,34 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
   const [targets, setTargets] = useState<Target[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [priorityFilter, setPriorityFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [scanTarget, setScanTarget] = useState<Target | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Target | null>(null)
   const [deleting, setDeleting] = useState(false)
-  const [form, setForm] = useState({ domain: '', name: '', description: '', tags: '', priority: 'medium', notes: '', exclude: '' })
+  const [form, setForm] = useState({ domain: '', name: '', description: '', tags: '', priority: 'medium', notes: '', exclude: '', scanUserAgent: '', scanHeaders: '' })
   const [editTarget, setEditTarget] = useState<Target | null>(null)
   const [sortBy, setSortBy] = useState('findings')
   const [submitting, setSubmitting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const loadSeq = useRef(0)
   // Multi-select state for bulk actions (checkbox per card + select-all).
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [selectMode, setSelectMode] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
 
-  const load = async (q?: string) => {
+  const load = async (q = search, background = false) => {
+    const seq = ++loadSeq.current
+    if (!background) setLoading(true)
     try {
       const p: Record<string, string> = {}
       if (q) p.search = q
+      if (priorityFilter) p.priority = priorityFilter
+      if (statusFilter) p.status = statusFilter
       const list = await targetsApi.list(p) || []
+      if (seq !== loadSeq.current) return
       setTargets(list)
       // Drop any selected ids that no longer exist after a reload.
       setSelected(prev => {
@@ -44,7 +53,11 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
         for (const t of list) if (prev.has(t.id)) next.add(t.id)
         return next
       })
-    } catch { /**/ } finally { setLoading(false) }
+    } catch (e) {
+      if (seq === loadSeq.current) addToast('error', e instanceof Error ? e.message : 'Could not load projects')
+    } finally {
+      if (seq === loadSeq.current) setLoading(false)
+    }
   }
 
   useEffect(() => { setSelected(new Set()); setSelectMode(false) }, [])
@@ -83,49 +96,89 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     } finally { setBulkDeleting(false) }
   }
 
-  useEffect(() => { setLoading(true); load() }, [])
   useEffect(() => {
     const t = setTimeout(() => load(search), 300)
     return () => clearTimeout(t)
-  }, [search])
+  }, [search, priorityFilter, statusFilter])
 
-  const emptyForm = { domain: '', name: '', description: '', tags: '', priority: 'medium', notes: '', exclude: '' }
+  // Keep counts and statuses fresh while scans or monitor passes run. Event
+  // bursts are coalesced into one background request so the grid never flickers.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const refresh = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => { void load(search, true) }, 250)
+    }
+    const offs = ['target_created', 'target_updated', 'target_deleted', 'task_started', 'task_finished']
+      .map(event => ws.on(event, refresh))
+    return () => {
+      if (timer) clearTimeout(timer)
+      offs.forEach(off => off())
+    }
+  }, [search, priorityFilter, statusFilter])
 
-  const openEdit = (t: Target) => {
-    setForm({
-      domain: t.domain, name: t.name || '', description: t.description || '',
-      tags: (t.tags || []).join(', '), priority: t.priority || 'medium',
-      notes: t.notes || '', exclude: t.exclude_scope || '',
-    })
-    setEditTarget(t)
+  const emptyForm = { domain: '', name: '', description: '', tags: '', priority: 'medium', notes: '', exclude: '', scanUserAgent: '', scanHeaders: '' }
+
+  const openEdit = async (summary: Target) => {
+    try {
+      // Compliance headers may contain a private program token, so the list API
+      // deliberately omits them. Fetch only the selected target's full record.
+      const t = await targetsApi.get(summary.id)
+      setForm({
+        domain: t.domain, name: t.name || '', description: t.description || '',
+        tags: (t.tags || []).join(', '), priority: t.priority || 'medium',
+        notes: t.notes || '', exclude: t.exclude_scope || '',
+        scanUserAgent: t.scan_user_agent || '',
+        scanHeaders: Object.entries(t.scan_headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
+      })
+      setEditTarget(t)
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not load project settings')
+    }
   }
 
   const handleSubmit = async () => {
     if (!form.domain.trim()) return
+    const scanHeaders: Record<string, string> = {}
+    for (const rawLine of form.scanHeaders.split('\n')) {
+      const line = rawLine.trim()
+      if (!line || line.startsWith('#')) continue
+      const colon = line.indexOf(':')
+      if (colon < 1 || !line.slice(colon + 1).trim()) {
+        addToast('error', `Invalid header line: ${line}`)
+        return
+      }
+      scanHeaders[line.slice(0, colon).trim()] = line.slice(colon + 1).trim()
+    }
     setSubmitting(true)
     const payload = {
-      domain: form.domain.trim(),
       name: form.name.trim(),
       description: form.description,
       tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
       priority: form.priority,
       notes: form.notes,
       exclude_scope: form.exclude.trim(),
+      scan_user_agent: form.scanUserAgent.trim(),
+      scan_headers: scanHeaders,
     }
     try {
       if (editTarget) {
-        await targetsApi.update(editTarget.id, payload)
+        const next = form.domain.trim()
+        await targetsApi.update(editTarget.id, {
+          ...payload,
+          ...(next !== editTarget.domain ? { domain: next } : {}),
+        })
         addToast('success', `${form.name.trim() || form.domain.trim()} updated`)
         setEditTarget(null)
       } else {
-        await targetsApi.create(payload)
+        await targetsApi.create({ ...payload, domain: form.domain.trim() })
         const hostCount = form.domain.split(/[\s,;]+/).filter(Boolean).length
         const addedLabel = form.name.trim() || (hostCount > 1 ? `${hostCount} targets` : form.domain.trim())
         addToast('success', `${addedLabel} added`)
         setCreateOpen(false)
       }
       setForm(emptyForm)
-      load()
+      load(search)
     } catch (e: unknown) {
       addToast('error', e instanceof Error ? e.message : 'Failed')
     } finally { setSubmitting(false) }
@@ -138,7 +191,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       await targetsApi.delete(deleteTarget.id)
       addToast('success', `${deleteTarget.domain} deleted`)
       setDeleteTarget(null)
-      load()
+      load(search)
     } catch {
       addToast('error', 'Failed to delete target')
     } finally { setDeleting(false) }
@@ -149,32 +202,38 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     if (!file) return
     try {
       const res = await targetsApi.importFile(file)
-      addToast('success', `Imported ${res.imported} of ${res.total}`)
-      load()
+      const skipped = (res.invalid || 0) + (res.duplicates || 0)
+      addToast(skipped ? 'info' : 'success', `Imported ${res.imported} of ${res.total}${skipped ? ` · ${res.invalid || 0} invalid · ${res.duplicates || 0} duplicate` : ''}`)
+      load(search)
     } catch { addToast('error', 'Import failed') }
     if (fileRef.current) fileRef.current.value = ''
   }
 
   const dot: Record<string, string> = {
     idle: 'bg-text-muted',
+    pending: 'bg-series-3 animate-pulse',
     running: 'bg-accent animate-pulse',
+    paused: 'bg-severity-medium',
     finished: 'bg-severity-low',
     failed: 'bg-severity-critical',
   }
 
   const prioRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 }
   const sortedTargets = [...kindTargets].sort((a, b) => {
+    const byName = () => (a.name || a.domain).localeCompare(b.name || b.domain) || a.id.localeCompare(b.id)
+    let result = 0
     switch (sortBy) {
-      case 'findings':   return (b.finding_count || 0) - (a.finding_count || 0)
-      case 'subdomains': return (b.subdomain_count || 0) - (a.subdomain_count || 0)
-      case 'alive':      return (b.alive_host_count || 0) - (a.alive_host_count || 0)
-      case 'name':       return (a.name || a.domain).localeCompare(b.name || b.domain)
-      case 'priority':   return (prioRank[b.priority] || 0) - (prioRank[a.priority] || 0)
-      case 'status':     return (a.scan_status || '').localeCompare(b.scan_status || '')
-      case 'last_scan':  return (b.last_scan_at || '').localeCompare(a.last_scan_at || '')
+      case 'findings':   result = (b.finding_count || 0) - (a.finding_count || 0); break
+      case 'subdomains': result = (b.subdomain_count || 0) - (a.subdomain_count || 0); break
+      case 'alive':      result = (b.alive_host_count || 0) - (a.alive_host_count || 0); break
+      case 'name':       return byName()
+      case 'priority':   result = (prioRank[b.priority] || 0) - (prioRank[a.priority] || 0); break
+      case 'status':     result = (a.scan_status || '').localeCompare(b.scan_status || ''); break
+      case 'last_scan':  result = (b.last_scan_at || '').localeCompare(a.last_scan_at || ''); break
       case 'created':
-      default:           return (b.created_at || '').localeCompare(a.created_at || '')
+      default:           result = (b.created_at || '').localeCompare(a.created_at || '')
     }
+    return result || byName()
   })
 
   return (
@@ -202,6 +261,17 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
 
       <div className="flex items-center gap-3 flex-wrap">
         <Input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} className="sm:max-w-xs" />
+        <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} aria-label="Filter by priority"
+          className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary">
+          <option value="" className="bg-surface-3">All priorities</option>
+          {['critical', 'high', 'medium', 'low'].map(p => <option key={p} value={p} className="bg-surface-3 capitalize">{p}</option>)}
+        </select>
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} aria-label="Filter by scan status"
+          className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary">
+          <option value="" className="bg-surface-3">All statuses</option>
+          {['running', 'pending', 'paused', 'failed', 'idle'].map(s => <option key={s} value={s} className="bg-surface-3 capitalize">{s}</option>)}
+        </select>
+        {(search || priorityFilter || statusFilter) && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={() => { setSearch(''); setPriorityFilter(''); setStatusFilter('') }}>Clear filters</button>}
         <label className="flex items-center gap-1.5 text-xs text-text-muted">
           Sort
           <select value={sortBy} onChange={e => setSortBy(e.target.value)}
@@ -342,6 +412,20 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
               Excluded hosts/IPs/CIDRs/URLs are dropped before probing — nothing excluded is ever scanned or reported. Supports
               <span className="font-mono"> *.wildcards</span> and CIDRs.
             </p>
+          </div>
+          <div className="rounded-lg border border-border bg-surface-alt/40 p-3 space-y-3">
+            <div>
+              <p className="text-xs font-semibold">Bug-bounty request identity</p>
+              <p className="mt-0.5 text-[10px] text-text-muted">Applied only to this project's approved hosts, including monitoring and supported external tools.</p>
+            </div>
+            <Input label="User-Agent override" placeholder="Mozilla/5.0 … researcher-id / ywh-public"
+              value={form.scanUserAgent} onChange={e => setForm({ ...form, scanUserAgent: e.target.value })} />
+            <div>
+              <label className="label">Custom HTTP headers — one per line</label>
+              <textarea className="input resize-none font-mono text-xs" rows={3}
+                placeholder={"X-Bug-Bounty: researcher@example.com\nbb-client: BookBeatApp\nbb-device: api ywh"}
+                value={form.scanHeaders} onChange={e => setForm({ ...form, scanHeaders: e.target.value })} />
+            </div>
           </div>
           <Input label="Description" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           <Input label="Tags (comma separated)" placeholder="bug-bounty, prod" value={form.tags} onChange={e => setForm({ ...form, tags: e.target.value })} />

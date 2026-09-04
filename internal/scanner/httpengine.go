@@ -14,7 +14,7 @@ import (
 // one transport with a large idle-connection pool lets keep-alive reuse those
 // connections, cutting CPU and latency dramatically without touching detection
 // logic.
-var sharedHTTPTransport = &http.Transport{
+var baseHTTPTransport = &http.Transport{
 	Proxy: http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
 		Timeout:   10 * time.Second,
@@ -38,6 +38,11 @@ var sharedHTTPTransport = &http.Transport{
 		MinVersion:         tls.VersionTLS10,
 	},
 }
+
+// All target-facing clients use this wrapper. It applies the effective
+// per-target/global bounty-program identity at the last possible point, so even
+// requests created by less common scanners cannot silently omit it.
+var sharedHTTPTransport http.RoundTripper = identityRoundTripper{base: baseHTTPTransport}
 
 // newPooledClient returns an http.Client backed by the shared pooled transport.
 // followRedirects=false makes it stop at the first response (what most active

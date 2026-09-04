@@ -1083,6 +1083,7 @@ func (s *SQLiScanner) fetchWithHeaderAuth(ctx context.Context, target, header, p
 		req.Header.Set("Cookie", replaceCookieValue(req.Header.Get("Cookie"), parameter, injection))
 	case "User-Agent":
 		req.Header.Set("User-Agent", injection)
+		req = SkipRequestIdentity(req)
 	case "X-Forwarded-For":
 		// Wrap so the on-the-wire value matches the evidence string in headerChecks.
 		req.Header.Set("X-Forwarded-For", "127.0.0.1,"+injection)

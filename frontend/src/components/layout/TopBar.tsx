@@ -51,10 +51,31 @@ function GlobalSearch() {
   const [open, setOpen] = useState(false)
   const [all, setAll] = useState<Target[]>([])
   const boxRef = useRef<HTMLDivElement | null>(null)
+  const loadedRef = useRef(false)
+  const loadSeqRef = useRef(0)
   const debounced = useDebouncedValue(q, 200)
 
+  const refreshTargets = () => {
+    const seq = ++loadSeqRef.current
+    targetsApi.list().then(next => {
+      if (seq === loadSeqRef.current) setAll(next || [])
+    }).catch(() => {
+      if (seq === loadSeqRef.current) loadedRef.current = false
+    })
+  }
+
   // Lazy-load the target list the first time the box is focused.
-  const loadOnce = () => { if (all.length === 0) targetsApi.list().then(setAll).catch(() => {}) }
+  const loadOnce = () => {
+    if (loadedRef.current) return
+    loadedRef.current = true
+    refreshTargets()
+  }
+
+  useEffect(() => {
+    const refresh = () => { if (loadedRef.current) refreshTargets() }
+    const offs = ['target_created', 'target_updated', 'target_deleted'].map(event => ws.on(event, refresh))
+    return () => offs.forEach(off => off())
+  }, [])
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => { if (open && boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false) }
@@ -121,7 +142,15 @@ export const TopBar = () => {
     }
     load()
     const t = setInterval(load, 60 * 1000) // poll every minute
-    return () => { alive = false; clearInterval(t) }
+    // Monitoring persists its notification before emitting this event. Task
+    // completion is a fallback for older/new-subdomain producers that only
+    // persist a bell row. This removes the previous one-minute blind spot.
+    const offs = [
+      ws.on('notification_created', load),
+      ws.on('task_finished', load),
+      ws.on('bounty_catalog_sync', load),
+    ]
+    return () => { alive = false; clearInterval(t); offs.forEach(off => off()) }
   }, [])
 
   // Close the dropdown on an outside click.
@@ -135,13 +164,19 @@ export const TopBar = () => {
 
   const markAllRead = async () => {
     try { await notifApi.markRead() } catch { /* ignore */ }
-    setItems(items.map(n => ({ ...n, is_read: true })))
+    setItems(current => current.map(n => ({ ...n, is_read: true })))
     setUnread(0)
   }
 
   const openNotif = (n: Notification) => {
     setOpen(false)
+    if (!n.is_read) {
+      setItems(current => current.map(item => item.id === n.id ? { ...item, is_read: true } : item))
+      setUnread(current => Math.max(0, current - 1))
+      void notifApi.markRead([n.id]).catch(() => {})
+    }
     if (n.target_id) navigate(`/targets/${n.target_id}`)
+    else if (n.url.startsWith('/') && !n.url.startsWith('//')) navigate(n.url)
   }
 
   return (

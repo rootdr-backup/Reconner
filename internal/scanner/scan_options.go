@@ -149,6 +149,10 @@ func WithHostScope(ctx context.Context, hosts []string) context.Context {
 	set := map[string]bool{}
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
+		h = strings.TrimPrefix(h, "*.")
+		if u, err := url.Parse(h); err == nil && u.Hostname() != "" {
+			h = u.Hostname()
+		}
 		h = strings.TrimSuffix(h, ".")
 		if h == "" {
 			continue
@@ -182,7 +186,12 @@ func hostInScope(ctx context.Context, host string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	return set[host]
+	for allowed := range set {
+		if host == allowed || (net.ParseIP(host) == nil && net.ParseIP(allowed) == nil && strings.HasSuffix(host, "."+allowed)) {
+			return true
+		}
+	}
+	return false
 }
 
 // urlHostInScope extracts the host from rawURL and checks hostInScope.

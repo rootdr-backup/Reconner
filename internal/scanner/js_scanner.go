@@ -181,12 +181,14 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 				// -ct 30: stop crawling a host after 30s; -depth 2; -timeout 8.
 				hostCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				defer cancel()
+				args := []string{"-u", u, "-jc", "-silent", "-depth", "2", "-ct", "30", "-timeout", "8", "-kf", "all"}
+				args = append(args, ToolRequestIdentityArgs(hostCtx, "katana")...)
 				_ = s.exec.RunWithCallback(hostCtx, targetID, func(line string) {
 					line = strings.TrimSpace(line)
 					if isJSURL(line) {
 						addInScope(line, &jsMu, jsFiles)
 					}
-				}, "katana", "-u", u, "-jc", "-silent", "-depth", "2", "-ct", "30", "-timeout", "8", "-kf", "all")
+				}, "katana", args...)
 			}(svcURL)
 		}
 		wg.Wait()
@@ -207,7 +209,9 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 				defer func() { <-sem }()
 				hostCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
-				result, err := s.exec.Run(hostCtx, "hakrawler", "-url", u, "-js", "-insecure")
+				args := []string{"-url", u, "-js", "-insecure"}
+				args = append(args, ToolRequestIdentityArgs(hostCtx, "hakrawler")...)
+				result, err := s.exec.Run(hostCtx, "hakrawler", args...)
 				if err != nil {
 					return
 				}

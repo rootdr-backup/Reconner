@@ -398,11 +398,11 @@ type vhostMatch struct {
 
 var vhostPlainClient = &http.Client{
 	Timeout: 7 * time.Second,
-	Transport: &http.Transport{
+	Transport: identityRoundTripper{base: &http.Transport{
 		MaxIdleConns:        128,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     30 * time.Second,
-	},
+	}},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
@@ -450,7 +450,7 @@ func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool)
 			return dialer.DialContext(dialCtx, network, targetAddr)
 		},
 	}
-	client := &http.Client{Timeout: 7 * time.Second, Transport: transport,
+	client := &http.Client{Timeout: 7 * time.Second, Transport: identityRoundTripper{base: transport},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer transport.CloseIdleConnections()
 	// Put the candidate in the URL as well as Request.Host. The custom dialer

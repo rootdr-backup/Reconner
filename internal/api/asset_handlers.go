@@ -1,8 +1,12 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -11,6 +15,49 @@ import (
 	"github.com/recon-platform/internal/scanner"
 	"github.com/recon-platform/internal/scheduler"
 )
+
+func normalizeAssetValue(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", fmt.Errorf("asset value is required")
+	}
+	if strings.Contains(v, "://") {
+		if strings.ContainsAny(v, "\r\n\t ") {
+			return "", fmt.Errorf("asset URLs cannot contain unescaped whitespace")
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return "", fmt.Errorf("asset URL must use http or https and include a host")
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
+		host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort(host, port)
+		} else if strings.Contains(host, ":") {
+			u.Host = "[" + host + "]"
+		} else {
+			u.Host = host
+		}
+		u.Fragment = "" // fragments are browser-local and never reach the scanner.
+		return u.String(), nil
+	}
+	if strings.ContainsAny(v, "\r\n\t ,;") {
+		return "", fmt.Errorf("add one asset at a time")
+	}
+	v = strings.ToLower(strings.TrimSuffix(v, "/"))
+	if ip := net.ParseIP(strings.Trim(v, "[]")); ip != nil {
+		return ip.String(), nil
+	}
+	if _, network, err := net.ParseCIDR(v); err == nil {
+		return network.String(), nil
+	}
+	if strings.ContainsAny(v, "/?#") && !strings.HasPrefix(v, "*.") {
+		// A path/query without a scheme is ambiguous and was previously mangled
+		// into a fake hostname. Require an explicit URL instead.
+		return "", fmt.Errorf("paths and queries require an http:// or https:// URL")
+	}
+	return v, nil
+}
 
 // detectAssetKind classifies an asset value into web | network | mixed using the
 // same Public-Suffix-aware splitter the scanner uses, so the scan menu can ask
@@ -63,7 +110,11 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "asset value is required")
 		return
 	}
-	value := strings.TrimSpace(req.Value)
+	value, err := normalizeAssetValue(req.Value)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	kind, _, _ := detectAssetKind(value)
 	assetType := normalizeManualAssetType(req.AssetType, value, kind)
 	aid := uuid.New().String()
@@ -110,24 +161,60 @@ func normalizeManualAssetType(explicit, value, kind string) string {
 func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 	id, aid := mux.Vars(r)["id"], mux.Vars(r)["aid"]
 	var req struct {
-		Name      string `json:"name"`
-		Value     string `json:"value"`
-		AssetType string `json:"asset_type"`
+		Name      *string `json:"name"`
+		Value     *string `json:"value"`
+		AssetType *string `json:"asset_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	// Always update the name; re-scope (and re-detect kind) when a new value is given.
-	if _, err := h.db.Exec(`UPDATE assets SET name=? WHERE id=? AND target_id=?`,
-		strings.TrimSpace(req.Name), aid, id); err != nil {
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to update asset")
 		return
 	}
-	if v := strings.TrimSpace(req.Value); v != "" {
-		kind, _, _ := detectAssetKind(v)
-		assetType := normalizeManualAssetType(req.AssetType, v, kind)
-		if _, err := h.db.Exec(`UPDATE assets SET value=?, kind=?, asset_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`, v, kind, assetType, aid, id); err != nil {
+	defer tx.Rollback()
+	var existing, name, assetType string
+	if err := tx.QueryRowContext(r.Context(), `SELECT value,COALESCE(name,''),COALESCE(asset_type,'domain') FROM assets WHERE id=? AND target_id=?`, aid, id).
+		Scan(&existing, &name, &assetType); err != nil {
+		if err == sql.ErrNoRows {
+			h.writeError(w, http.StatusNotFound, "asset not found")
+		} else {
+			h.writeError(w, http.StatusInternalServerError, "failed to update asset")
+		}
+		return
+	}
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+	}
+	value, kind := existing, ""
+	valueChanged := false
+	if req.Value != nil {
+		raw := strings.TrimSpace(*req.Value)
+		if raw == "" {
+			h.writeError(w, http.StatusBadRequest, "asset value cannot be empty")
+			return
+		}
+		v, normalizeErr := normalizeAssetValue(raw)
+		if normalizeErr != nil {
+			h.writeError(w, http.StatusBadRequest, normalizeErr.Error())
+			return
+		}
+		value, valueChanged = v, v != existing
+	}
+	kind, _, _ = detectAssetKind(value)
+	if req.AssetType != nil {
+		assetType = *req.AssetType
+	}
+	assetType = normalizeManualAssetType(assetType, value, kind)
+
+	// All fields commit together. Previously a conflicting value returned 409
+	// after the name had already changed, and omitted fields were erased.
+	if valueChanged {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE assets SET value=?, kind=?, asset_type=?,
+			metadata=json_remove(COALESCE(NULLIF(metadata,''),'{}'),'$.monitor_hash','$.monitor_size','$.monitor_status','$.monitor_title','$.monitor_url','$.monitor_security_snapshot','$.monitor_checked_at'),
+			name=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`, value, kind, assetType, name, aid, id); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				h.writeError(w, http.StatusConflict, "another asset already uses that value")
 				return
@@ -135,6 +222,14 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusInternalServerError, "failed to update asset value")
 			return
 		}
+	} else if _, err := tx.ExecContext(r.Context(), `UPDATE assets SET name=?,kind=?,asset_type=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`,
+		name, kind, assetType, aid, id); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to update asset")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to update asset")
+		return
 	}
 	h.hub.Broadcast("target_updated", map[string]string{"id": id})
 	h.writeSuccess(w, map[string]string{"message": "updated"})
@@ -142,8 +237,35 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleDeleteAsset(w http.ResponseWriter, r *http.Request) {
 	id, aid := mux.Vars(r)["id"], mux.Vars(r)["aid"]
-	if _, err := h.db.Exec(`DELETE FROM assets WHERE id=? AND target_id=?`, aid, id); err != nil {
+	var approval, assetType string
+	if err := h.db.QueryRowContext(r.Context(), `SELECT COALESCE(approval_status,'approved'),COALESCE(asset_type,'domain') FROM assets WHERE id=? AND target_id=?`, aid, id).Scan(&approval, &assetType); err != nil {
+		if err == sql.ErrNoRows {
+			h.writeError(w, http.StatusNotFound, "asset not found")
+		} else {
+			h.writeError(w, http.StatusInternalServerError, "failed to load asset")
+		}
+		return
+	}
+	scannableType := map[string]bool{"domain": true, "wildcard": true, "url": true, "page": true, "js": true, "api": true, "ip": true, "cidr": true}
+	if approval == "approved" && scannableType[assetType] {
+		var remaining int
+		if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM assets WHERE target_id=? AND id<>? AND COALESCE(approval_status,'approved')='approved'
+			AND COALESCE(asset_type,'domain') IN ('domain','wildcard','url','page','js','api','ip','cidr')`, id, aid).Scan(&remaining); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "failed to validate project scope")
+			return
+		}
+		if remaining == 0 {
+			h.writeError(w, http.StatusConflict, "a project must keep at least one approved scannable asset; delete the project instead")
+			return
+		}
+	}
+	res, err := h.db.ExecContext(r.Context(), `DELETE FROM assets WHERE id=? AND target_id=?`, aid, id)
+	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to delete asset")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.writeError(w, http.StatusNotFound, "asset not found")
 		return
 	}
 	h.hub.Broadcast("target_updated", map[string]string{"id": id})
@@ -199,8 +321,8 @@ func (h *Handler) seedAssetsFromScope(targetID, scope string) {
 	for _, tok := range strings.FieldsFunc(scope, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r' || r == ';'
 	}) {
-		tok = strings.TrimSpace(tok)
-		if tok == "" || seen[tok] {
+		tok, err := normalizeAssetValue(tok)
+		if err != nil || tok == "" || seen[tok] {
 			continue
 		}
 		seen[tok] = true

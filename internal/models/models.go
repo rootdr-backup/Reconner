@@ -6,27 +6,29 @@ import (
 )
 
 type Target struct {
-	ID                   string     `json:"id" db:"id"`
-	Domain               string     `json:"domain" db:"domain"`
-	Name                 string     `json:"name" db:"name"` // user-supplied friendly name (falls back to domain when empty)
-	Kind                 string     `json:"kind" db:"kind"`
-	Description          string     `json:"description" db:"description"`
-	Tags                 []string   `json:"tags"`
-	Priority             string     `json:"priority" db:"priority"`
-	Notes                string     `json:"notes" db:"notes"`
-	ExcludeScope         string     `json:"exclude_scope" db:"exclude_scope"`
-	Status               string     `json:"status" db:"status"`
-	ScanStatus           string     `json:"scan_status" db:"scan_status"`
-	EnabledModules       []string   `json:"enabled_modules"`
-	LastScanAt           *time.Time `json:"last_scan_at" db:"last_scan_at"`
-	CreatedAt            time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at" db:"updated_at"`
-	SubdomainCount       int        `json:"subdomain_count" db:"subdomain_count"`
-	AliveHostCount       int        `json:"alive_host_count" db:"alive_host_count"`
-	FindingCount         int        `json:"finding_count" db:"finding_count"`
-	MonitorEnabled       bool       `json:"monitor_enabled" db:"monitor_enabled"`
-	MonitorIntervalHours int        `json:"monitor_interval_hours" db:"monitor_interval_hours"`
-	MonitorLastRun       *time.Time `json:"monitor_last_run" db:"monitor_last_run"`
+	ID                   string            `json:"id" db:"id"`
+	Domain               string            `json:"domain" db:"domain"`
+	Name                 string            `json:"name" db:"name"` // user-supplied friendly name (falls back to domain when empty)
+	Kind                 string            `json:"kind" db:"kind"`
+	Description          string            `json:"description" db:"description"`
+	Tags                 []string          `json:"tags"`
+	Priority             string            `json:"priority" db:"priority"`
+	Notes                string            `json:"notes" db:"notes"`
+	ExcludeScope         string            `json:"exclude_scope" db:"exclude_scope"`
+	Status               string            `json:"status" db:"status"`
+	ScanStatus           string            `json:"scan_status" db:"scan_status"`
+	EnabledModules       []string          `json:"enabled_modules"`
+	LastScanAt           *time.Time        `json:"last_scan_at" db:"last_scan_at"`
+	CreatedAt            time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt            time.Time         `json:"updated_at" db:"updated_at"`
+	SubdomainCount       int               `json:"subdomain_count" db:"subdomain_count"`
+	AliveHostCount       int               `json:"alive_host_count" db:"alive_host_count"`
+	FindingCount         int               `json:"finding_count" db:"finding_count"`
+	MonitorEnabled       bool              `json:"monitor_enabled" db:"monitor_enabled"`
+	MonitorIntervalHours int               `json:"monitor_interval_hours" db:"monitor_interval_hours"`
+	MonitorLastRun       *time.Time        `json:"monitor_last_run" db:"monitor_last_run"`
+	ScanUserAgent        string            `json:"scan_user_agent" db:"scan_user_agent"`
+	ScanHeaders          map[string]string `json:"scan_headers" db:"scan_headers"`
 }
 
 // Asset is one individually-scannable entry of a target (a domain, IP, CIDR, or

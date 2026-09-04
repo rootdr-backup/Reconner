@@ -82,7 +82,7 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	allURLs := make(map[string]bool)
 	var urlMu sync.Mutex
 
-	// Single-scope targets (CLI --single) restrict gathering to the EXACT host,
+	// Single-scope targets restrict gathering to the EXACT host,
 	// so wayback/gau don't drag in URLs from other subdomains.
 	var scope string
 	_ = s.db.QueryRow(`SELECT COALESCE(scope,'full') FROM targets WHERE id=?`, targetID).Scan(&scope)
@@ -255,9 +255,11 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 				defer func() { <-sem }()
 				hostCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				defer cancel()
+				args := []string{"-u", u, "-silent", "-depth", "2", "-c", "10", "-ct", "30", "-timeout", "8", "-jc"}
+				args = append(args, ToolRequestIdentityArgs(hostCtx, "katana")...)
 				_ = s.exec.RunWithCallback(hostCtx, targetID, func(line string) {
 					addURL(line)
-				}, "katana", "-u", u, "-silent", "-depth", "2", "-c", "10", "-ct", "30", "-timeout", "8", "-jc")
+				}, "katana", args...)
 			}(targetURL)
 		}
 		wg.Wait()
@@ -279,7 +281,9 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 				defer func() { <-sem }()
 				hostCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
-				result, err := s.exec.Run(hostCtx, "hakrawler", "-url", u, "-depth", "2", "-insecure")
+				args := []string{"-url", u, "-depth", "2", "-insecure"}
+				args = append(args, ToolRequestIdentityArgs(hostCtx, "hakrawler")...)
+				result, err := s.exec.Run(hostCtx, "hakrawler", args...)
 				if err != nil {
 					return
 				}

@@ -11,7 +11,7 @@ and nmap — so there is nothing to `go install` on the host and no version drif
 |------|---------|
 | `Dockerfile` | Multi-stage build: frontend → tool-chain → Go binary (CGO/SQLite) → slim runtime. |
 | `docker-compose.yml` | Runs the image on port **8080**, persists data in a named volume. |
-| `docker/entrypoint.sh` | Writes `config.json` on first boot, then starts `reconner serve`. |
+| `docker/entrypoint.sh` | Writes `config.json` on first boot, then starts the `reconner` service. |
 | `.dockerignore` | Keeps the build context lean. |
 | `.env.example` | Copy to `.env` for host port + initial admin credentials. |
 | `.github/workflows/docker-image.yml` | Builds and pushes the image to `ghcr.io` on push/tag. |

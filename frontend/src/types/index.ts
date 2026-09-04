@@ -128,6 +128,8 @@ export interface Target {
   monitor_enabled: boolean
   monitor_interval_hours: number
   monitor_last_run: string | null
+  scan_user_agent?: string
+  scan_headers?: Record<string, string>
 }
 
 export interface Subdomain {
