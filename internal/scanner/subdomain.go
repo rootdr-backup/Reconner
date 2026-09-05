@@ -37,6 +37,9 @@ func NewSubdomainScanner(db *database.DB, exec *tools.Executor, cfg *config.Conf
 
 func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, logFn LogFunc) error {
 	logFn("info", "subdomain_enum", fmt.Sprintf("Starting subdomain enumeration for %s", domain))
+	// Seed the first scan from program/approved-asset metadata immediately. Later
+	// scans additionally reuse paths and parameter terms learned by web crawling.
+	buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
 
 	found := make(map[string]bool)
 	var legacyCandidates []string

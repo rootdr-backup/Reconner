@@ -493,7 +493,7 @@ func Test403BypassRequiresStableReplayAndSeparatesPathCandidates(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Forwarded-For") == "127.0.0.1" {
-			fmt.Fprint(w, `{"admin":true,"secret":"stable-private-object"}`)
+			fmt.Fprint(w, `{"admin":true,"feature":"audit_login_events","secret":"stable-private-object"}`)
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)

@@ -442,6 +442,7 @@ var verifyClient = newPooledClient(15*time.Second, false)
 // server-side-evaluated classes are near-certain; heuristic/passive ones lower.
 var baseConfidence = map[string]int{
 	"ssti":                     90,
+	"csti":                     99,
 	"lfi":                      90,
 	"ssrf":                     88,
 	"command_injection":        88,

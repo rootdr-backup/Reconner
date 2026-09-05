@@ -18,7 +18,7 @@ var moduleETASeconds = map[string]int{
 	"param_discovery": 240, "timemachine": 60, "param_reflection": 180, "paramfuzz": 120,
 	"dir_discovery": 180, "backup_discovery": 90, "open_redirect": 40, "nuclei": 600,
 	"xss": 300, "dast": 180, "vuln_scan": 60, "sqli": 300, "ssrf": 90, "lfi": 60,
-	"ssti": 60, "cmdi": 120, "nosqli": 60, "cache_poison": 40, "xxe": 60, "jwt": 30,
+	"ssti": 60, "csti": 45, "cmdi": 120, "nosqli": 60, "cache_poison": 40, "xxe": 60, "jwt": 30,
 	"oast": 60, "passive": 60, "takeover": 30, "exposure": 90, "intel": 60,
 	"origin_ip": 40, "shodan": 30, "race": 40, "smuggling": 40, "ato": 60,
 	"verify": 60, "monitor": 20,

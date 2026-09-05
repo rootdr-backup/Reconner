@@ -106,6 +106,11 @@ func (s *ParamFuzzScanner) Run(ctx context.Context, targetID string, logFn LogFu
 	// then brute-forced against every other URL, which is exactly how a hidden
 	// param on an unrelated handler gets found (the x8 "personal wordlist" idea).
 	extra := s.discoveredParamNames(ctx, targetID)
+	adaptive := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
+	if len(adaptive) > 100 {
+		adaptive = adaptive[:100]
+	}
+	extra = append(extra, adaptive...)
 	logFn("info", "paramfuzz", fmt.Sprintf("Fuzzing %d endpoints × (%d static + %d discovered) candidate params...",
 		len(endpoints), len(paramFuzzWords), len(extra)))
 

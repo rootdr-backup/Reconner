@@ -46,6 +46,7 @@ const (
 	ModuleSSRF            = "ssrf"
 	ModuleLFI             = "lfi"
 	ModuleSSTI            = "ssti"
+	ModuleCSTI            = "csti"
 	ModuleCmdi            = "cmdi"
 	ModulePassive         = "passive"
 	ModuleTakeover        = "takeover"
@@ -122,6 +123,7 @@ var AllModules = []string{
 	ModuleSSRF,
 	ModuleLFI,
 	ModuleSSTI,
+	ModuleCSTI,
 	ModuleCmdi,
 	ModulePassive,
 	ModuleTakeover,
@@ -178,6 +180,7 @@ type Scheduler struct {
 	ssrfScanner        *scanner.SSRFScanner
 	lfiScanner         *scanner.LFIScanner
 	sstiScanner        *scanner.SSTIScanner
+	cstiScanner        *scanner.CSTIScanner
 	cmdiScanner        *scanner.CmdiScanner
 	passiveScanner     *scanner.PassiveScanner
 	takeoverScanner    *scanner.TakeoverScanner
@@ -266,6 +269,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.ssrfScanner = scanner.NewSSRFScanner(db, exec, cfg, log, bc)
 	s.lfiScanner = scanner.NewLFIScanner(db, exec, cfg, log, bc)
 	s.sstiScanner = scanner.NewSSTIScanner(db, exec, cfg, log, bc)
+	s.cstiScanner = scanner.NewCSTIScanner(db, exec, cfg, log, bc)
 	s.cmdiScanner = scanner.NewCmdiScanner(db, exec, cfg, log, bc)
 	s.passiveScanner = scanner.NewPassiveScanner(db, exec, cfg, log, bc)
 	s.takeoverScanner = scanner.NewTakeoverScanner(db, exec, cfg, log, bc)
@@ -1342,7 +1346,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// Modules grouped by a parallel-GROUP id run concurrently within their group
 	// (when Limits.ParallelModules is on). Groups respect data dependencies:
 	//
-	//   group 1 — depend only on http_services, independent of each other
+	//   group 1 — JS and parameter discovery build the reusable target vocabulary
+	//   group 3 — directory + backup discovery consume that vocabulary together
 	//   group 2 — lighter active checks; all read the `parameters` table, which
 	//             group-1's param_discovery + the sequential param_reflection
 	//             have already populated by the time group 2 starts.
@@ -1361,8 +1366,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	parallelGroup := map[string]int{
 		ModuleJSAnalysis:      1,
 		ModuleParamDiscovery:  1,
-		ModuleDirDiscovery:    1,
-		ModuleBackupDiscovery: 1,
+		ModuleDirDiscovery:    3,
+		ModuleBackupDiscovery: 3,
 		ModuleNoSQLi:          2,
 		ModuleSSRF:            2,
 		ModuleLFI:             2,
@@ -1866,6 +1871,8 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.lfiScanner.Run(ctx, targetID, logFn)
 	case ModuleSSTI:
 		return s.sstiScanner.Run(ctx, targetID, logFn)
+	case ModuleCSTI:
+		return s.cstiScanner.Run(ctx, targetID, logFn)
 	case ModuleCmdi:
 		return s.cmdiScanner.Run(ctx, targetID, logFn)
 	case ModulePassive:

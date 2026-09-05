@@ -186,3 +186,30 @@ func generateBackupCandidates(domain string) []string {
 
 	return out
 }
+
+// generateAdaptiveBackupCandidates tests only the highest-ranked program words
+// with a small, high-signal extension set. This keeps the extra request budget
+// predictable while finding product-specific dumps such as billing.sql or
+// inventory.tar.gz that a generic list cannot name.
+func generateAdaptiveBackupCandidates(words []string, limit int) []string {
+	if len(words) > limit {
+		words = words[:limit]
+	}
+	exts := []string{".zip", ".sql", ".tar.gz", ".bak"}
+	out := make([]string, 0, len(words)*len(exts))
+	seen := map[string]bool{}
+	for _, raw := range words {
+		word := normalizeAdaptiveWord(raw)
+		if word == "" {
+			continue
+		}
+		for _, ext := range exts {
+			p := "/" + word + ext
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}

@@ -114,11 +114,13 @@ const REMEDIATION: Record<string, string> = {
   redirect: 'Use a server-side allowlist for redirect destinations and force same-origin; never reflect a raw user-supplied URL into Location.',
   lfi: 'Never pass user input to filesystem APIs; use a fixed allowlist of files/ids, canonicalize + confine paths to a base directory, and reject traversal sequences.',
   ssti: 'Never render user input as a template. Use logic-less templates or a sandboxed engine and pass data as bound variables, not template source.',
+  csti: 'Do not compile or interpolate user-controlled strings as client-side templates. Bind untrusted values as plain text and use framework escaping/sanitization.',
   cmdi: 'Avoid shelling out with user input; use native APIs or an argument array with no shell, and validate against a strict allowlist.',
   xxe: 'Disable external entity + DTD processing in the XML parser (FEATURE_SECURE_PROCESSING / disallow-doctype-decl).',
   jwt: 'Pin the accepted algorithm server-side (reject "none"/alg confusion), verify the signature with a strong secret/key, and validate iss/aud/exp.',
   crlf: 'Strip/encode CR and LF from any user input that reaches HTTP headers; use the framework header API rather than raw string concatenation.',
   cache_poison: 'Do not reflect unkeyed request inputs into cacheable responses; include all response-affecting inputs in the cache key or mark responses no-store.',
+  cache_poisoning: 'Do not reflect unkeyed request inputs into shared-cacheable responses; include every response-affecting input in the cache key or mark the response private/no-store.',
   takeover: 'Remove the dangling DNS record or reclaim the referenced third-party resource; monitor for dangling CNAMEs.',
 }
 function remediationFor(t: string): string {
@@ -130,7 +132,7 @@ function remediationFor(t: string): string {
 // assemble a one-click reproduction URL (parameter's value replaced by the
 // payload). XSS especially: clicking the link fires the payload in the browser.
 const GET_PARAM_VULNS = new Set([
-  'xss', 'sqli', 'lfi', 'ssti', 'cmdi', 'ssrf', 'open_redirect', 'redirect',
+  'xss', 'sqli', 'lfi', 'ssti', 'csti', 'cmdi', 'ssrf', 'open_redirect', 'redirect',
   'nosqli', 'idor', 'path_traversal', 'crlf', 'rfi', 'xxe',
 ])
 

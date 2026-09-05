@@ -31,10 +31,11 @@ type ListOptions struct {
 }
 
 type ListResult struct {
-	Programs []Program `json:"programs"`
-	Total    int       `json:"total"`
-	Page     int       `json:"page"`
-	Limit    int       `json:"limit"`
+	Programs    []Program         `json:"programs"`
+	Total       int               `json:"total"`
+	Page        int               `json:"page"`
+	Limit       int               `json:"limit"`
+	DetailIndex DetailIndexStatus `json:"detail_index"`
 }
 
 const programColumns = `p.id,p.provider,p.external_id,p.handle,p.name,p.url,p.logo_url,p.description,p.status,p.program_type,p.industry,
@@ -73,6 +74,13 @@ func scanProgram(scanner interface{ Scan(...any) error }) (Program, error) {
 }
 
 func (s *Service) ListPrograms(ctx context.Context, o ListOptions) (ListResult, error) {
+	detailIndex := s.DetailIndexStatus()
+	// Scope-derived filters cannot be correct while provider details are still
+	// lazy. Start a bounded background index automatically; callers receive
+	// progress and can refresh without opening every program by hand.
+	if o.HasWildcard != nil || o.AssetType != "" || o.MinAssets > 0 || o.MaxAssets > 0 || o.Sort == "assets_desc" || o.Sort == "assets_asc" || o.Sort == "wildcards" {
+		detailIndex = s.StartDetailIndex()
+	}
 	if o.Page < 1 {
 		o.Page = 1
 	}
@@ -112,13 +120,15 @@ func (s *Service) ListPrograms(ctx context.Context, o ListOptions) (ListResult, 
 		if *o.HasWildcard {
 			where = append(where, "p.wildcard_count>0")
 		} else {
-			where = append(where, "p.wildcard_count=0")
+			// An unloaded program is unknown, not a confirmed non-wildcard.
+			where = append(where, "p.detail_synced_at IS NOT NULL AND p.wildcard_count=0")
 		}
 	}
 	if o.MinAssets > 0 {
 		add("p.in_scope_count>=?", o.MinAssets)
 	}
 	if o.MaxAssets > 0 {
+		where = append(where, "p.detail_synced_at IS NOT NULL")
 		add("p.in_scope_count<=?", o.MaxAssets)
 	}
 	if o.MinRewardCents > 0 {
@@ -151,7 +161,7 @@ func (s *Service) ListPrograms(ctx context.Context, o ListOptions) (ListResult, 
 		}
 		items = append(items, p)
 	}
-	return ListResult{Programs: items, Total: total, Page: o.Page, Limit: o.Limit}, rows.Err()
+	return ListResult{Programs: items, Total: total, Page: o.Page, Limit: o.Limit, DetailIndex: detailIndex}, rows.Err()
 }
 
 func (s *Service) GetProgram(ctx context.Context, id string) (Program, error) {

@@ -969,12 +969,19 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		headers map[string]string
 		path    string
 	}
+	originalURI := parsed.EscapedPath()
+	if originalURI == "" {
+		originalURI = "/"
+	}
+	if parsed.RawQuery != "" {
+		originalURI += "?" + parsed.RawQuery
+	}
 
 	attempts := []attempt{
 		{label: "X-Forwarded-For: 127.0.0.1", headers: map[string]string{"X-Forwarded-For": "127.0.0.1"}},
 		{label: "X-Real-IP: 127.0.0.1", headers: map[string]string{"X-Real-IP": "127.0.0.1"}},
-		{label: "X-Original-URL", headers: map[string]string{"X-Original-URL": parsed.Path}},
-		{label: "X-Rewrite-URL", headers: map[string]string{"X-Rewrite-URL": parsed.Path}},
+		{label: "X-Original-URL", headers: map[string]string{"X-Original-URL": originalURI}},
+		{label: "X-Rewrite-URL", headers: map[string]string{"X-Rewrite-URL": originalURI}},
 		{label: "X-Custom-IP-Authorization", headers: map[string]string{"X-Custom-IP-Authorization": "127.0.0.1"}},
 		{label: "X-Originating-IP: 127.0.0.1", headers: map[string]string{"X-Originating-IP": "127.0.0.1"}},
 		{label: "X-Client-IP: 127.0.0.1", headers: map[string]string{"X-Client-IP": "127.0.0.1"}},
@@ -1001,10 +1008,7 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 			continue
 		}
 
-		lower := strings.ToLower(body1)
-		if strings.Contains(lower, "sign in") || strings.Contains(lower, "log in") ||
-			strings.Contains(lower, "login") || strings.Contains(lower, "unauthorized") ||
-			strings.Contains(lower, "access denied") || strings.Contains(lower, "forbidden") {
+		if looksLike403AuthWall(body1) {
 			continue // looks like the same auth wall, not real content
 		}
 
@@ -1021,9 +1025,22 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 			conf = ConfCandidateHi
 			loc = "path"
 		}
-		return att.label, fmt.Sprintf("stable controls: 403/403; stable bypass replay: 200/200 via %s; protected and bypass bodies are materially different", att.label), conf, loc
+		return att.label, fmt.Sprintf("stable controls: 403/403 (%d/%d bytes); stable bypass replay: 200/200 (%d/%d bytes) via %s; protected and bypass bodies are materially different", len(baseline1), len(baseline2), len(body1), len(body2), att.label), conf, loc
 	}
 	return "", "", 0, ""
+}
+
+func looksLike403AuthWall(body string) bool {
+	lower := strings.ToLower(body)
+	for _, phrase := range []string{"sign in", "log in", "login required", "authentication required", "please authenticate", "unauthorized", "access denied", "permission denied", "403 forbidden"} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	// A real login form is an auth wall. A harmless occurrence such as
+	// "audit_login_events" in actual admin content is not.
+	return strings.Contains(lower, "<form") &&
+		(strings.Contains(lower, `type="password"`) || strings.Contains(lower, `type='password'`) || strings.Contains(lower, `name="password"`) || strings.Contains(lower, `name='password'`))
 }
 
 func mutate403Path(base *url.URL, escapedPath string) string {

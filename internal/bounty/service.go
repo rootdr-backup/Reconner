@@ -112,6 +112,9 @@ type Service struct {
 	mu          sync.Mutex
 	detailMu    sync.Mutex
 	detailLocks map[string]*sync.Mutex
+	indexMu     sync.Mutex
+	indexState  DetailIndexStatus
+	indexRetry  map[string]time.Time
 }
 
 func NewService(db *database.DB, log *logger.Logger) *Service {
@@ -120,7 +123,7 @@ func NewService(db *database.DB, log *logger.Logger) *Service {
 		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
 			MaxIdleConns: 20, MaxIdleConnsPerHost: 6, IdleConnTimeout: 60 * time.Second,
 		}},
-		log: log, detailLocks: map[string]*sync.Mutex{},
+		log: log, detailLocks: map[string]*sync.Mutex{}, indexRetry: map[string]time.Time{},
 	}
 }
 

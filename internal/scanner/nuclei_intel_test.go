@@ -78,6 +78,9 @@ func TestNucleiBlockedTemplate(t *testing.T) {
 		{"some-other-id", "LFR in Express via GET"}, // name-pattern match, id doesn't matter
 		{"lfr-in-express-via-get", "whatever"},      // now blocked by id too (so -eid stops it running)
 		{"express-lfr", "whatever"},
+		{"unix-command-injection", "Unix Command Injection"},
+		{"windows-command-injection", "Windows Command Injection"},
+		{"community-cmdi", "Unix Command Injection"},
 	}
 	for _, c := range blocked {
 		if !nucleiBlockedTemplate(c.id, c.name) {
@@ -103,6 +106,9 @@ func TestNucleiExcludeIDFlag(t *testing.T) {
 	}
 	if !strings.Contains(flag[1], "sql") {
 		t.Fatalf("nucleiExcludeIDFlag(nil) must include the built-in blocklist, got %q", flag[1])
+	}
+	if !strings.Contains(flag[1], "unix-command-injection") || !strings.Contains(flag[1], "windows-command-injection") {
+		t.Fatalf("nucleiExcludeIDFlag(nil) must exclude noisy command-injection templates, got %q", flag[1])
 	}
 
 	cfg := &config.Config{NucleiExcludeTemplateIDs: []string{"my-custom-bad-template"}}

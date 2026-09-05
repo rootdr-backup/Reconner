@@ -122,6 +122,13 @@ var blockedTemplateIDs = map[string]bool{
 	"express-lfr":            true,
 	"lfr-express":            true,
 	"node-express-lfr":       true,
+
+	// Generic command-injection fuzz templates are intentionally excluded. They
+	// routinely promote reflected payload text and unstable timing into findings.
+	// Reconner's native command-injection scanner uses a per-request marker,
+	// reflection rejection, and optional OAST confirmation instead.
+	"unix-command-injection":    true,
+	"windows-command-injection": true,
 }
 
 // blockedNamePatterns are lowercase substrings of a template's DISPLAY NAME
@@ -162,6 +169,8 @@ var blockedNamePatterns = []string{
 	"compression oracle",
 	"web cache poisoning",
 	"cache poisoning",
+	"unix command injection",
+	"windows command injection",
 }
 
 // injectionEchoMarkers identify templates whose "proof" is a token echoed back in

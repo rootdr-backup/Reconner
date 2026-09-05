@@ -11,7 +11,7 @@ import type { Target } from '../../types'
 // (adds race/smuggling/xxe/ato + full recon); Custom = leave the operator's picks.
 const PROFILE_MODULES: Record<string, string[] | 'all'> = {
   quick: ['http_probe', 'js_analysis', 'param_discovery', 'param_reflection', 'open_redirect', 'xss', 'dast', 'sqli', 'nuclei', 'exposure', 'verify'],
-  standard: ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'param_reflection', 'paramfuzz', 'dir_discovery', 'backup_discovery', 'open_redirect', 'nuclei', 'xss', 'dast', 'vuln_scan', 'sqli', 'nosqli', 'ssrf', 'idor', 'jwt', 'lfi', 'ssti', 'cmdi', 'xxe', 'oast', 'cache_poison', 'passive', 'takeover', 'exposure', 'intel', 'verify', 'monitor'],
+  standard: ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'param_reflection', 'paramfuzz', 'dir_discovery', 'backup_discovery', 'open_redirect', 'nuclei', 'xss', 'dast', 'vuln_scan', 'sqli', 'nosqli', 'ssrf', 'idor', 'jwt', 'lfi', 'ssti', 'csti', 'cmdi', 'xxe', 'oast', 'cache_poison', 'passive', 'takeover', 'exposure', 'intel', 'verify', 'monitor'],
   deep: 'all',
 }
 const SCAN_PROFILES: { id: string; label: string; sub: string }[] = [
@@ -50,6 +50,7 @@ const MODULES: ModDef[] = [
   { id: 'oast',             label: 'Blind SSRF/RCE (OAST)',desc: 'Out-of-band callbacks prove blind SSRF & RCE', default: true,  group: 'Injection' },
   { id: 'lfi',              label: 'LFI / Path Traversal', desc: 'etc/passwd, win.ini, php filter wrappers',     default: true,  group: 'Injection' },
   { id: 'ssti',             label: 'SSTI (Template Inj.)', desc: '{{7*7}} across Jinja/Twig/Freemarker/ERB',     default: true,  group: 'Injection' },
+  { id: 'csti',             label: 'CSTI (Client Template)', desc: 'Dual safe arithmetic proof after real-browser rendering; no sandbox escape', default: true, group: 'Injection' },
   { id: 'xxe',              label: 'XXE Injection',        desc: 'In-band file read + OAST blind XML entity',    default: true,  group: 'Injection' },
   { id: 'cmdi',             label: 'Command Injection',    desc: 'Reflection-proof echo marker + out-of-band OS command injection (RCE)', default: true, group: 'Injection' },
   { id: 'passive',          label: 'Passive Scan',         desc: 'Headers, cookies, stack traces, leaked secrets', default: true, group: 'Analysis' },

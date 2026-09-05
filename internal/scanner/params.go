@@ -80,6 +80,7 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	}
 
 	allURLs := make(map[string]bool)
+	crawlURLs := make(map[string]bool)
 	var urlMu sync.Mutex
 
 	// Single-scope targets restrict gathering to the EXACT host,
@@ -88,10 +89,11 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	_ = s.db.QueryRow(`SELECT COALESCE(scope,'full') FROM targets WHERE id=?`, targetID).Scan(&scope)
 	singleScope := scope == "single"
 
-	// accepts only URLs that belong to the target domain/subdomains and have query params
+	// Admit every in-scope crawled URL into the target vocabulary, while only
+	// parameterized URLs continue to the parameter extractor below.
 	addURL := func(line string) {
 		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, "?") {
+		if line == "" {
 			return
 		}
 		// Single-endpoint mode: only keep URLs under the seed endpoint prefix — a
@@ -114,7 +116,10 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 			return
 		}
 		urlMu.Lock()
-		allURLs[line] = true
+		crawlURLs[line] = true
+		if strings.Contains(line, "?") {
+			allURLs[line] = true
+		}
 		urlMu.Unlock()
 	}
 
@@ -335,6 +340,12 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	// contact forms etc. that GET-only crawling never reaches).
 	formCount := s.discoverForms(ctx, targetID, domain, logFn)
 	logFn("info", "param_discovery", fmt.Sprintf("Discovered %d form-body parameters.", formCount))
+	crawled := make([]string, 0, len(crawlURLs))
+	for raw := range crawlURLs {
+		crawled = append(crawled, raw)
+	}
+	words := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, crawled)
+	logFn("info", "param_discovery", fmt.Sprintf("Adaptive target wordlist updated with %d ranked words.", len(words)))
 	return nil
 }
 

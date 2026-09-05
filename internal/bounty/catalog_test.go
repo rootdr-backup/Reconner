@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/recon-platform/internal/database"
 )
@@ -208,6 +209,25 @@ func TestHackerOneProviderContract(t *testing.T) {
 	var programID string
 	if err := db.QueryRow(`SELECT id FROM bounty_programs WHERE provider='hackerone'`).Scan(&programID); err != nil {
 		t.Fatal(err)
+	}
+	wildcard := true
+	indexed, err := svc.ListPrograms(context.Background(), ListOptions{HasWildcard: &wildcard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexed.DetailIndex.Running || indexed.DetailIndex.Total != 1 {
+		t.Fatalf("scope-derived filter must start the unopened-program index, got %+v", indexed.DetailIndex)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for svc.DetailIndexStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	indexed, err = svc.ListPrograms(context.Background(), ListOptions{HasWildcard: &wildcard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed.Total != 1 || len(indexed.Programs) != 1 || !indexed.Programs[0].DetailsLoaded {
+		t.Fatalf("wildcard filter must include unopened catalog programs after indexing: %+v", indexed)
 	}
 	p, err := svc.GetProgram(context.Background(), programID)
 	if err != nil {

@@ -580,6 +580,56 @@ func (b *browserXSSConfirmer) DOMReflectsInsertion(parent context.Context, ip in
 	return reflected
 }
 
+// renderInsertion returns the post-render DOM for one benign injected value.
+// CSTI uses it to distinguish a server reflection from client-side evaluation;
+// the shared navigation gate keeps the single Chromium tab race-free.
+func (b *browserXSSConfirmer) renderInsertion(parent context.Context, ip insertionPoint, auth map[string]string, value string) string {
+	if b == nil {
+		return ""
+	}
+	loc := insertionLocation(ip)
+	method := strings.ToUpper(strings.TrimSpace(ip.Method))
+	if loc == "json" || loc == "multipart" || loc == "xml" || loc == "header" || loc == "cookie" ||
+		(method != "" && method != "GET" && method != "POST") {
+		return ""
+	}
+	select {
+	case b.navGate <- struct{}{}:
+		defer func() { <-b.navGate }()
+	case <-parent.Done():
+		return ""
+	}
+	tab, ok := b.ensureTab()
+	if !ok {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	defer cancel()
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{ip.URL}, auth)
+	defer stopHeaders()
+	var dom string
+	if method == "POST" {
+		parsed, err := url.Parse(ip.URL)
+		if err != nil {
+			return ""
+		}
+		origin := parsed.Scheme + "://" + parsed.Host + "/"
+		actionJSON, _ := json.Marshal(ip.URL)
+		valuesJSON, _ := json.Marshal(browserFormValues(ip, value))
+		script := fmt.Sprintf(`(()=>{const a=%s,v=%s,f=document.createElement('form');f.method='POST';f.action=a;for(const [k,vs] of Object.entries(v)){for(const x of vs){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=x;f.appendChild(i)}}document.body.appendChild(f);f.submit()})()`, actionJSON, valuesJSON)
+		actions := append(headerActions, chromedp.Navigate(origin), chromedp.Evaluate(script, nil), chromedp.Sleep(900*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+		_ = chromedp.Run(ctx, actions...)
+		return dom
+	}
+	req, err := buildInjectedRequest(ctx, ip, value, auth)
+	if err != nil {
+		return ""
+	}
+	actions := append(headerActions, chromedp.Navigate(req.URL.String()), chromedp.Sleep(900*time.Millisecond), chromedp.Evaluate(`document.documentElement.outerHTML`, &dom))
+	_ = chromedp.Run(ctx, actions...)
+	return dom
+}
+
 func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, rawURL string, headers map[string]string, canary string) bool {
 	select {
 	case b.navGate <- struct{}{}:

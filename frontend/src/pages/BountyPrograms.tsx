@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
 import { cn, timeAgo } from '../lib/utils'
 import type { BountyAsset, BountyProgram, BountySyncState } from '../types'
+import type { BountyProgramList } from '../lib/api'
 
 type Filters = {
   search: string; provider: string; bounties: string; wildcard: string; assetType: string
@@ -37,6 +38,7 @@ export default function BountyPrograms() {
   const [filters, setFilters] = useState<Filters>(initialFilters)
   const [programs, setPrograms] = useState<BountyProgram[]>([])
   const [total, setTotal] = useState(0)
+  const [detailIndex, setDetailIndex] = useState<BountyProgramList['detail_index'] | null>(null)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [statuses, setStatuses] = useState<BountySyncState[]>([])
@@ -69,11 +71,11 @@ export default function BountyPrograms() {
     return q
   }, [filters, page])
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const result = await bountyApi.list(query)
-      setPrograms(result.programs || []); setTotal(result.total || 0)
+      setPrograms(result.programs || []); setTotal(result.total || 0); setDetailIndex(result.detail_index || null)
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not load bounty catalog') }
     finally { setLoading(false) }
   }
@@ -82,10 +84,15 @@ export default function BountyPrograms() {
   useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t) }, [query])
   useEffect(() => {
     loadStatus(); const timer = setInterval(() => {
-      bountyApi.status().then(next => { setStatuses(next); if (next.some(s => s.status === 'running')) load() }).catch(() => {})
+      bountyApi.status().then(next => { setStatuses(next); if (next.some(s => s.status === 'running')) load(true) }).catch(() => {})
     }, 15000)
     return () => clearInterval(timer)
   }, [query])
+  useEffect(() => {
+    if (!detailIndex?.running) return
+    const timer = setInterval(() => load(true), 2500)
+    return () => clearInterval(timer)
+  }, [detailIndex?.running, query])
   useEffect(() => { setPage(1) }, [filters])
 
   const openProgram = async (p: BountyProgram) => {
@@ -161,6 +168,17 @@ export default function BountyPrograms() {
         </div>
       )}
 
+      {detailIndex?.running && (
+        <div className="rounded-xl border border-accent/25 bg-accent/[.07] px-4 py-3 text-xs text-text-secondary">
+          Indexing unopened program scopes for accurate scope filters: {detailIndex.completed} of {detailIndex.total} checked, {detailIndex.pending} remaining. Results update automatically.
+        </div>
+      )}
+      {!detailIndex?.running && !!detailIndex?.last_error && (
+        <div className="rounded-xl border border-severity-medium/25 bg-severity-medium/[.07] px-4 py-3 text-xs text-severity-medium">
+          Scope index completed with {detailIndex.failed} temporary provider errors. Cached results are available; failed programs will retry automatically.
+        </div>
+      )}
+
       <div className="card p-3 sm:p-4 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5">
           <Input placeholder="Search company, handle, industry…" value={filters.search} onChange={e => setFilters(f => ({ ...f, search: e.target.value }))} className="xl:col-span-2" />
@@ -185,7 +203,7 @@ export default function BountyPrograms() {
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">{Array.from({ length: 9 }).map((_,i)=><div key={i} className="card p-4 space-y-3"><Skeleton className="h-5 w-2/3"/><Skeleton className="h-3 w-full"/><Skeleton className="h-12 w-full"/></div>)}</div>
       ) : programs.length === 0 ? (
-        <div className="card"><EmptyState title={running ? 'Catalog sync is running' : 'No programs match these filters'} description={running ? 'Lightweight provider indexes are being cached; individual scopes load on demand.' : 'Clear filters, or ask an administrator to refresh the public catalogs.'} action={!running && user?.role === 'admin' ? <Button size="sm" onClick={triggerSync}>Start refresh</Button> : undefined}/></div>
+        <div className="card"><EmptyState title={running ? 'Catalog sync is running' : detailIndex?.running ? 'Checking unopened program scopes' : 'No programs match these filters'} description={running ? 'Lightweight provider indexes are being cached; individual scopes load on demand.' : detailIndex?.running ? 'The filtered list fills automatically as every cached program scope is checked.' : 'Clear filters, or ask an administrator to refresh the public catalogs.'} action={!running && !detailIndex?.running && user?.role === 'admin' ? <Button size="sm" onClick={triggerSync}>Start refresh</Button> : undefined}/></div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {programs.map(p => <ProgramCard key={p.id} program={p} onOpen={() => openProgram(p)} />)}

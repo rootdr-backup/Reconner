@@ -35,6 +35,7 @@ const (
 	ClassNoSQLi   VulnClass = "nosqli"
 	ClassCRLF     VulnClass = "crlf"
 	ClassXSS      VulnClass = "xss"
+	ClassCSTI     VulnClass = "csti"
 )
 
 // classTokens: a parameter matches a class when ANY of its name tokens is in the
@@ -73,6 +74,8 @@ var classTokens = map[VulnClass]map[string]bool{
 	ClassXSS: set("q", "query", "search", "keyword", "name", "message", "comment", "text",
 		"content", "title", "description", "input", "term", "redirect", "url", "return",
 		"callback", "lang", "view", "tab", "id", "page"),
+	ClassCSTI: set("q", "query", "search", "name", "message", "comment", "text", "content",
+		"title", "description", "input", "term", "template", "preview", "view", "label"),
 }
 
 func set(items ...string) map[string]bool {

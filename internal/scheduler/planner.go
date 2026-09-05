@@ -97,6 +97,7 @@ var moduleRequires = map[string][]string{
 	ModuleNoSQLi:       capParams,
 	ModuleLFI:          capParams,
 	ModuleSSTI:         capParams,
+	ModuleCSTI:         capParams,
 	ModuleDAST:         capParams,
 	ModuleXSS:          capParams, // standalone reflected-XSS objective
 	ModuleVulnScan:     capParams,

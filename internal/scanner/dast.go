@@ -200,7 +200,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 			// the old MIME gate rejected them before testing the browser's script
 			// resource execution path. Only Chromium can prove this class faithfully
 			// because it applies MIME/nosniff/CORS/resource-loading semantics itself.
-			if b := getXSSBrowser(); b != nil {
+			if b := getXSSBrowser(); b != nil && s.takeBrowserBudget() {
 				if pl, ok := b.ConfirmScriptResource(ctx, ip, auth); ok {
 					s.confirmXSS(ctx, targetID, ip, "script_resource", pl, "browser", 99)
 					out.xssConfirmed++
@@ -228,15 +228,26 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 			out.xssRejected++
 		case a.Executable:
 			confirmed := false
+			proofAttempted := false
+			proofPayload, proofMethod := "", ""
+			proofConfidence := ConfCandidateLo
+			proofExecuted := false
+			tryExecutionProof := func() {
+				if proofAttempted {
+					return
+				}
+				proofAttempted = true
+				proofPayload, proofMethod, proofConfidence, proofExecuted = s.proveExecutingXSS(ctx, ip, a, auth, baseline)
+			}
 			// A URL attribute controlled from its first byte does not need a quote
 			// breakout: javascript: is itself the execution primitive. The benign
 			// marker-tag confirm below cannot prove this class, so send it directly
 			// to Chromium (which activates javascript: links) instead of silently
 			// leaving every scheme-only sink inconclusive.
 			if a.Context == CtxURL && a.URLScheme {
-				execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth, baseline)
-				if executed {
-					s.confirmXSS(ctx, targetID, ip, a.Context, execPayload, proof, conf)
+				tryExecutionProof()
+				if proofExecuted {
+					s.confirmXSS(ctx, targetID, ip, a.Context, proofPayload, proofMethod, proofConfidence)
 					out.xssConfirmed++
 					confirmed = true
 				}
@@ -268,11 +279,11 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					!strings.Contains(baseline, needle) {
 					// HTML injection is proven. Now find a payload the app does NOT
 					// filter, so the REPORTED PoC actually pops (the dominant "finds
-					// XSS but no popup" gap): browser real-execution proof first, then
-					// a browserless bypass-ladder rotation.
-					execPayload, proof, conf, executed := s.proveExecutingXSS(ctx, ip, a, auth, baseline)
-					if executed {
-						s.confirmXSS(ctx, targetID, ip, a.Context, execPayload, proof, conf)
+					// XSS but no popup" gap): use browser execution proof when
+					// available; only its absence permits the short candidate ladder.
+					tryExecutionProof()
+					if proofExecuted {
+						s.confirmXSS(ctx, targetID, ip, a.Context, proofPayload, proofMethod, proofConfidence)
 						out.xssConfirmed++
 						confirmed = true
 					}
@@ -283,9 +294,22 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 			// only an in-JS breakout works) — strong candidate, left for browser/
 			// manual proof (never auto-reported as a finding).
 			if !confirmed {
-				c := s.xssCandidate(targetID, ip, a.Context, "breakout/injection signal survived, but executable JavaScript was not proven")
+				note := "breakout/injection signal survived, but executable JavaScript was not proven"
+				c := s.xssCandidate(targetID, ip, a.Context, note)
+				method := "dast-context"
+				reason := "no runtime or CSP-valid executable payload proof"
+				confidence := ConfCandidateLo
+				if proofPayload != "" {
+					c.Payload = proofPayload
+					c.DetectionMethod += "/" + proofMethod
+					confidence = proofConfidence
+					c.Confidence = proofConfidence
+					method = "dast-" + proofMethod
+					reason = "Chromium was unavailable; a bounded existing payload candidate survived the parsed response and CSP checks, but runtime execution remains unproven"
+					c.Evidence = note + ". Candidate payload: " + proofPayload
+				}
 				_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{Verdict: VerifyInconclusive,
-					Confidence: ConfCandidateLo, Method: "dast-context", Reason: "no runtime or CSP-valid executable payload proof"}, FindingMeta{Actor: "dast"})
+					Confidence: confidence, Method: method, Reason: reason}, FindingMeta{Actor: "dast"})
 			}
 		}
 	} else if probeHTMLSink && xssOnly {
@@ -300,7 +324,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 			cachedReflected, cached := cachedDOMReflection(domReflectKey(ip, auth))
 			// A cached negative from param_reflection costs no browser navigation
 			// here and therefore must not consume the limited escalation budget.
-			if (!cached || cachedReflected) && s.browserBudget.Add(-1) >= 0 {
+			if (!cached || cachedReflected) && s.takeBrowserBudget() {
 				// One inert rendered-DOM canary eliminates parameters that are not
 				// consumed client-side. The old path immediately sprayed the complete
 				// browser payload ladder (up to ~20 serialized navigations) at every
@@ -548,42 +572,45 @@ func exploitExample(ctxName, injected string) string {
 // markup non-executing. This distinction is what keeps reflected HTML injection
 // out of the confirmed-XSS bucket.
 func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, auth map[string]string, baseline string) (payload, proof string, confidence int, executed bool) {
-	// 1) Browserless rotation selects a strong candidate payload. It never sets
-	// executed=true by itself.
-	ladder := ""
-	for _, p := range buildExecPayloads(a) {
-		if ctx.Err() != nil {
+	// Real-browser execution is the only promotion path, so run it first. The old
+	// order sprayed the complete raw-response ladder (often 30+ requests) and then
+	// performed the browser proof that actually decided the verdict.
+	if b := getXSSBrowser(); b != nil {
+		if s.takeBrowserBudget() {
+			if pl, ok := b.ConfirmInsertionWithAnalysis(ctx, ip, auth, &a); ok {
+				return pl, "browser", 99, true
+			}
+		}
+		return "", "inconclusive", ConfCandidateLo, false
+	}
+
+	// Chromium is unavailable: inspect only a short prefix of the existing ladder
+	// to retain a useful manual-review candidate without restoring the old request
+	// explosion. Raw survival is never promoted to a finding.
+	const fallbackLimit = 6
+	for i, p := range buildExecPayloads(a) {
+		if i >= fallbackLimit || ctx.Err() != nil {
 			break
 		}
 		r := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
 		if browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff) &&
 			cspAllowsInlineScript(r.CSP) && execPayloadSurvived(r.Body, p) &&
 			!execPayloadSurvived(baseline, p) {
-			ladder = p.Payload
-			break
+			return p.Payload, "differential-candidate", 85, false
 		}
 	}
-	// 2) Independent real-execution proof in a headless browser (GET sinks). This
-	//    also catches client-rendered / SPA reflections the raw-HTML pass can't see.
-	browserPayload := ""
-	if b := getXSSBrowser(); b != nil {
-		if pl, ok := b.ConfirmInsertionWithAnalysis(ctx, ip, auth, &a); ok {
-			browserPayload = pl
+	return "", "inconclusive", ConfCandidateLo, false
+}
+
+func (s *DASTScanner) takeBrowserBudget() bool {
+	for {
+		remaining := s.browserBudget.Load()
+		if remaining <= 0 {
+			return false
 		}
-	}
-	switch {
-	case ladder != "" && browserPayload != "":
-		return ladder, "browser+differential", 99, true
-	case browserPayload != "":
-		// app executes, but no ladder vector survived the raw pass (client-rendered
-		// or a filter the raw check couldn't beat) — report the browser-proven vector.
-		return browserPayload, "browser", 99, true
-	case ladder != "":
-		return ladder, "differential-candidate", 85, false
-	default:
-		// HTML injection alone is not JavaScript execution. Keep it as a candidate
-		// when every executable vector is filtered or blocked by CSP.
-		return "", "inconclusive", ConfCandidateLo, false
+		if s.browserBudget.CompareAndSwap(remaining, remaining-1) {
+			return true
+		}
 	}
 }
 

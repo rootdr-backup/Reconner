@@ -140,6 +140,16 @@ export interface BountyProgramList {
   total: number
   page: number
   limit: number
+  detail_index: {
+    running: boolean
+    total: number
+    pending: number
+    completed: number
+    failed: number
+    started_at?: string
+    completed_at?: string
+    last_error?: string
+  }
 }
 
 export const bounty = {

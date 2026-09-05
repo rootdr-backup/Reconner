@@ -8,6 +8,8 @@ func TestBlockedNoisyTemplates(t *testing.T) {
 		{"web-cache-poisoning-real", "Web Cache Poisoning"},
 		{"some-id", "Brotli Compression Oracle Attack Detection"}, // name-only backstop
 		{"web-cache-poisoning", "Web Cache Poisoning (real)"},
+		{"unix-command-injection", "Unix Command Injection"},
+		{"windows-command-injection", "Windows Command Injection"},
 	}
 	for _, b := range blocked {
 		if !nucleiBlockedTemplate(b.id, b.name) {

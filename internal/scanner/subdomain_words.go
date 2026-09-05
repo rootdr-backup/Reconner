@@ -96,6 +96,11 @@ func (s *SubdomainScanner) deepDNSWords(ctx context.Context, domain string, know
 			add(env + "." + label)
 		}
 	}
+	if s.cfg != nil {
+		for _, word := range loadAdaptiveWordlist(s.cfg.WordlistsDir, domain, 400) {
+			add(word)
+		}
+	}
 
 	if s.cfg != nil && s.cfg.WordlistsDir != "" {
 		entries, _ := os.ReadDir(s.cfg.WordlistsDir)

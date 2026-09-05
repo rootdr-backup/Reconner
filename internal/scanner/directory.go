@@ -333,6 +333,10 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			"host cap hit: scanning %d of %d alive hosts (content-discovery is memory-heavy) — raise dir_discovery_max_hosts in config.json to cover the rest",
 			len(services), totalAlive))
 	}
+	adaptiveWords := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
+	probePaths := append([]string{}, builtinWordlist...)
+	probePaths = append(probePaths, adaptiveDirectoryPaths(adaptiveWords, 128)...)
+	probePaths = uniquePaths(probePaths)
 
 	// ALWAYS run the built-in prober: it's fast, bounded, and guarantees the
 	// Directory section is populated even if dirsearch/feroxbuster are missing
@@ -351,7 +355,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		base := strings.TrimRight(svcURL, "/")
 		bl := soft404Baseline(ctx, base) // discard catch-all 200 pages
 		baselines[svcURL] = bl
-		for _, path := range builtinWordlist {
+		for _, path := range probePaths {
 			if ctx.Err() != nil {
 				break
 			}
@@ -627,7 +631,8 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 	var domain string
 	_ = s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id = ?`, targetID).Scan(&domain)
 
-	found := scanBackupCandidates(ctx, s.db, targetID, services, domain)
+	adaptiveWords := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
+	found := scanBackupCandidates(ctx, s.db, targetID, services, domain, adaptiveWords)
 	logFn("info", "backup_discovery", fmt.Sprintf("Backup discovery done. Found %d files.", found))
 	return nil
 }
@@ -640,11 +645,15 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 // endpoints never flowed through this at all before (they live in
 // network_services, not http_services, so RunBackupDiscovery above never saw
 // them), which is the gap this shared extraction closes.
-func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string, services []string, domain string) int {
+func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string, services []string, domain string, adaptiveWords ...[]string) int {
 	// Curated high-signal patterns + generated candidates (domain-derived names,
 	// config files with backup suffixes, dated variants, bounded wordlist).
 	patterns := append([]string{}, backupPatterns...)
 	patterns = append(patterns, generateBackupCandidates(domain)...)
+	if len(adaptiveWords) > 0 {
+		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 24)...)
+	}
+	patterns = uniquePaths(patterns)
 
 	// Raised from 20: the wordlist merge (backup_magic.go) roughly 5x'd the
 	// per-host candidate count, so more concurrency keeps wall-clock time sane.
