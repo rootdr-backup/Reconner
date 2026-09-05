@@ -212,10 +212,14 @@ type Scheduler struct {
 	// throttleLog dedupes the cooldown warning so a loaded box logs it once, not
 	// every 2s drain tick.
 	throttleLog atomic.Bool
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	stopping    bool
-	wg          sync.WaitGroup
+	// memoryLog separately dedupes cgroup/host pressure warnings. Memory pressure
+	// is handled by admission control; repeated runtime.GC calls cannot reclaim
+	// Chromium/nuclei/sqlmap child processes and only add CPU churn.
+	memoryLog atomic.Bool
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	stopping  bool
+	wg        sync.WaitGroup
 
 	pauseMu    sync.Mutex
 	paused     map[string]bool               // taskID -> paused (gate checked between modules)
@@ -1944,8 +1948,9 @@ func (s *Scheduler) updateTargetStats(targetID string) {
 // configured MaxConcurrentTargets and shrinks under pressure so a heavy box
 // doesn't thrash: high memory OR a CPU run-queue above the core count throttles
 // new starts (a "cooldown"), and once load drops the ceiling climbs back toward
-// the configured max on the next drain tick. Never returns below 1 (so a single
-// task can always make progress), and never above the configured max.
+// the configured max on the next drain tick. It returns zero only while an idle
+// host/container is already under severe pressure; otherwise it stays between
+// one and the configured maximum.
 func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 	base := s.cfg.Limits.MaxConcurrentTargets
 	if base < 1 {
@@ -1958,16 +1963,10 @@ func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 	// not detector coverage, and queued scans start automatically as slots free.
 	base = resourceTargetCeiling(runtime.NumCPU(), s.cfg.Limits.MaxMemoryMB, base)
 
-	// Memory pressure (only when a limit is configured).
-	memPressure := 0 // 0 none, 1 moderate, 2 severe
-	if vm, err := mem.VirtualMemory(); err == nil {
-		switch {
-		case vm.UsedPercent >= 92:
-			memPressure = 2
-		case vm.UsedPercent >= 82:
-			memPressure = 1
-		}
-	}
+	// Read the cgroup first so a 2 GiB container on a large host throttles against
+	// its own limit and includes child-process memory. Bare-metal installs retain
+	// the host-wide fallback.
+	memPressure := classifyMemoryPressure(currentMemoryLoad(s.cfg.Limits.MaxMemoryMB).percent)
 
 	// CPU run-queue pressure: 1-min load average relative to core count.
 	cpuPressure := 0
@@ -2003,8 +2002,12 @@ func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 	if eff > base {
 		eff = base
 	}
-	// Under severe pressure, don't admit anything beyond what's already running —
-	// but never below 1, so a lone task can still start on an idle-but-tight box.
+	// Under severe pressure, don't admit anything beyond what's already running.
+	// If the box/container is already critically full while idle, admit zero new
+	// work until it recovers rather than guaranteeing an OOM by starting one scan.
+	if pressure == 2 && running == 0 {
+		eff = 0
+	}
 	if pressure == 2 && running >= eff && eff < base {
 		if s.throttleLog.CompareAndSwap(false, true) {
 			s.logger.Warn("Scheduler cooldown: server under load, throttling new scans",
@@ -2050,28 +2053,64 @@ func resourceTargetCeiling(cpu, memoryBudgetMB, configured int) int {
 	return ceiling
 }
 
-func (s *Scheduler) checkMemoryPressure(taskID string, logFn scanner.LogFunc) {
-	if s.cfg.Limits.MaxMemoryMB <= 0 {
-		return // 0 = unlimited: never throttle / GC-spam
+type memoryLoad struct {
+	usedMB, limitMB int
+	percent         float64
+	source          string
+	ok              bool
+}
+
+func currentMemoryLoad(configuredLimitMB int) memoryLoad {
+	if used, limit, ok := config.CgroupMemoryStats(); ok {
+		if configuredLimitMB > 0 && configuredLimitMB < limit {
+			limit = configuredLimitMB
+		}
+		if limit <= 0 {
+			return memoryLoad{}
+		}
+		return memoryLoad{usedMB: used, limitMB: limit, percent: float64(used) * 100 / float64(limit), source: "cgroup", ok: true}
 	}
 	vm, err := mem.VirtualMemory()
-	if err != nil {
+	if err != nil || vm.Total == 0 {
+		return memoryLoad{}
+	}
+	used, limit := int(vm.Used/1024/1024), int(vm.Total/1024/1024)
+	// On bare metal, gopsutil is host-wide: MaxMemoryMB is Reconner's own
+	// scheduling budget and cannot be compared with memory used by every other
+	// service on the machine. Use real host pressure here; resourceTargetCeiling
+	// separately applies the configured Reconner budget to scan concurrency.
+	return memoryLoad{usedMB: used, limitMB: limit, percent: float64(used) * 100 / float64(limit), source: "host", ok: true}
+}
+
+func classifyMemoryPressure(percent float64) int {
+	switch {
+	case percent >= 92:
+		return 2
+	case percent >= 82:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (s *Scheduler) checkMemoryPressure(_ string, logFn scanner.LogFunc) {
+	load := currentMemoryLoad(s.cfg.Limits.MaxMemoryMB)
+	if !load.ok {
 		return
 	}
-
-	usedMB := int(vm.Used / 1024 / 1024)
-	if usedMB > s.cfg.Limits.MaxMemoryMB {
-		logFn("warn", "scheduler", fmt.Sprintf("High memory usage: %d MB / %d MB limit. Running GC...", usedMB, s.cfg.Limits.MaxMemoryMB))
-		runtime.GC()
+	if classifyMemoryPressure(load.percent) > 0 {
+		if s.memoryLog.CompareAndSwap(false, true) {
+			logFn("warn", "scheduler", fmt.Sprintf(
+				"Memory pressure: %d/%d MB (%.1f%%, %s); new scan admission is throttled while active tools finish.",
+				load.usedMB, load.limitMB, load.percent, load.source))
+		}
+	} else {
+		s.memoryLog.Store(false)
 	}
 }
 
 func (s *Scheduler) monitorMemory() {
 	defer s.wg.Done()
-
-	if s.cfg.Limits.MaxMemoryMB <= 0 {
-		return // 0 = unlimited: don't run the memory watchdog at all
-	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -2080,14 +2119,18 @@ func (s *Scheduler) monitorMemory() {
 		case <-s.stopCh:
 			return
 		case <-ticker.C:
-			vm, err := mem.VirtualMemory()
-			if err != nil {
+			load := currentMemoryLoad(s.cfg.Limits.MaxMemoryMB)
+			if !load.ok {
 				continue
 			}
-			usedMB := int(vm.Used / 1024 / 1024)
-			if usedMB > s.cfg.Limits.MaxMemoryMB {
-				runtime.GC()
-				s.logger.Warn("Memory pressure detected", "used_mb", usedMB, "limit_mb", s.cfg.Limits.MaxMemoryMB)
+			if classifyMemoryPressure(load.percent) > 0 {
+				if s.memoryLog.CompareAndSwap(false, true) {
+					s.logger.Warn("Memory pressure detected; throttling new scan admission",
+						"used_mb", load.usedMB, "limit_mb", load.limitMB,
+						"percent", load.percent, "source", load.source)
+				}
+			} else {
+				s.memoryLog.Store(false)
 			}
 		}
 	}

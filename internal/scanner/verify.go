@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/recon-platform/internal/config"
@@ -35,6 +37,65 @@ type VerifyScanner struct {
 
 func NewVerifyScanner(db *database.DB, exec *tools.Executor, cfg *config.Config, log *logger.Logger, broadcast BroadcastFunc) *VerifyScanner {
 	return &VerifyScanner{db: db, exec: exec, cfg: cfg, logger: log, broadcast: broadcast}
+}
+
+type sqlmapCandidate struct {
+	id, url, method, param, loc, subtype string
+	conf                                 int
+}
+
+func sqlmapVerificationWorkers(cfg *config.Config, candidates int) int {
+	if candidates <= 1 {
+		return candidates
+	}
+	workers := 2 // deliberately small: overlap I/O without multiplying target load
+	if cfg == nil || cfg.Limits.MaxToolExecutions == 1 || (cfg.Limits.MaxMemoryMB > 0 && cfg.Limits.MaxMemoryMB < 1536) {
+		workers = 1
+	} else if cfg.Limits.MaxToolExecutions > 0 && cfg.Limits.MaxToolExecutions < workers {
+		workers = cfg.Limits.MaxToolExecutions
+	}
+	if workers > candidates {
+		workers = candidates
+	}
+	return workers
+}
+
+// runSQLmapCandidates bounds concurrency and stops feeding work immediately on
+// cancellation. A candidate already inside Verify observes the same context and
+// the executor kills its process group, so cancellation cannot leave sqlmap
+// children running or silently drain the remaining queue.
+func runSQLmapCandidates(ctx context.Context, candidates []sqlmapCandidate, workers int, verify func(sqlmapCandidate)) int {
+	if workers < 1 || len(candidates) == 0 || ctx.Err() != nil {
+		return 0
+	}
+	jobs := make(chan sqlmapCandidate)
+	var wg sync.WaitGroup
+	var processed atomic.Int64
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for candidate := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				verify(candidate)
+				processed.Add(1)
+			}
+		}()
+	}
+
+feed:
+	for _, candidate := range candidates {
+		select {
+		case jobs <- candidate:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return int(processed.Load())
 }
 
 // verifySQLiWithSQLmap proves high-confidence internal SQLi candidates with the
@@ -72,35 +133,50 @@ func (s *VerifyScanner) verifySQLiWithSQLmap(ctx context.Context, targetID strin
 	if err != nil {
 		return
 	}
-	type cand struct {
-		id, url, method, param, loc, subtype string
-		conf                                 int
-	}
-	var cands []cand
+	var cands []sqlmapCandidate
 	for rows.Next() {
-		var c cand
+		var c sqlmapCandidate
 		if rows.Scan(&c.id, &c.url, &c.method, &c.param, &c.loc, &c.subtype, &c.conf) == nil {
 			cands = append(cands, c)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		logFn("warn", "verify", "Unable to load the complete sqlmap candidate set: "+err.Error())
+		return
 	}
 	rows.Close()
 	if len(cands) == 0 {
 		return
 	}
-	logFn("info", "verify", fmt.Sprintf("sqlmap proof pass on %d SQLi candidate(s)...", len(cands)))
+	first := VulnerabilityCandidate{Type: "sqli"}
+	if ctx.Err() != nil || !verifier.CanVerify(first) {
+		return
+	}
+	workers := sqlmapVerificationWorkers(s.cfg, len(cands))
+	logFn("info", "verify", fmt.Sprintf("sqlmap proof pass on %d SQLi candidate(s), %d bounded worker(s)...", len(cands), workers))
 
-	for _, c := range cands {
+	var confirmed atomic.Int64
+	processed := runSQLmapCandidates(ctx, cands, workers, func(c sqlmapCandidate) {
 		vc := VulnerabilityCandidate{ID: c.id, TargetID: targetID, Type: "sqli", Subtype: c.subtype,
 			URL: c.url, Method: c.method, Parameter: c.param, Location: c.loc}
-		if !verifier.CanVerify(vc) {
-			return // sqlmap missing → stop (all would be the same)
-		}
 		r := verifier.Verify(ctx, vc)
-		_, _ = RecordCandidateResult(ctx, s.db, vc, r, FindingMeta{Actor: "sqlmap"})
-		switch r.Verdict {
-		case VerifyVerified:
+		if ctx.Err() != nil {
+			return // cancelled sqlmap output is not a meaningful verification result
+		}
+		if _, err := RecordCandidateResult(ctx, s.db, vc, r, FindingMeta{Actor: "sqlmap"}); err != nil {
+			logFn("warn", "verify", fmt.Sprintf("sqlmap result for %s could not be persisted and remains eligible for retry: %v", c.url, err))
+			return
+		}
+		if r.Verdict == VerifyVerified {
+			confirmed.Add(1)
 			logFn("warn", "verify", fmt.Sprintf("SQLi CONFIRMED by sqlmap: %s param=%s", c.url, c.param))
 		}
+	})
+	if ctx.Err() != nil && processed < len(cands) {
+		logFn("info", "verify", fmt.Sprintf("sqlmap proof pass cancelled after %d/%d candidate(s); unprocessed candidates remain eligible for resume.", processed, len(cands)))
+	} else {
+		logFn("info", "verify", fmt.Sprintf("sqlmap proof pass complete: processed %d candidate(s), confirmed %d.", processed, confirmed.Load()))
 	}
 }
 

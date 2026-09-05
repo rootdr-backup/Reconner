@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/models"
 	"github.com/recon-platform/internal/scanner"
 	"github.com/recon-platform/internal/scheduler"
@@ -550,12 +551,18 @@ func (h *Handler) handleToolStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]any{}
 
-	vm, err := mem.VirtualMemory()
-	if err == nil {
+	if used, limit, ok := config.CgroupMemoryStats(); ok {
+		stats["memory_total_mb"] = limit
+		stats["memory_used_mb"] = used
+		stats["memory_free_mb"] = max(0, limit-used)
+		stats["memory_percent"] = float64(used) * 100 / float64(limit)
+		stats["memory_source"] = "cgroup"
+	} else if vm, err := mem.VirtualMemory(); err == nil {
 		stats["memory_total_mb"] = vm.Total / 1024 / 1024
 		stats["memory_used_mb"] = vm.Used / 1024 / 1024
 		stats["memory_free_mb"] = vm.Free / 1024 / 1024
 		stats["memory_percent"] = vm.UsedPercent
+		stats["memory_source"] = "host"
 	}
 
 	cpuPercent, err := cpu.Percent(0, false)

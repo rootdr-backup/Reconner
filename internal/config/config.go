@@ -1,14 +1,11 @@
 package config
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 )
 
 type WorkerConfig struct {
@@ -376,30 +373,6 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// detectTotalMemMB returns total physical RAM in MB, best-effort. Reads
-// /proc/meminfo on Linux; falls back to 4096 when it can't be determined so a
-// container without /proc still gets today's conservative sizing.
-func detectTotalMemMB() int {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 4096
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "MemTotal:") {
-			fields := strings.Fields(line) // "MemTotal:  16342234 kB"
-			if len(fields) >= 2 {
-				if kb, err := strconv.Atoi(fields[1]); err == nil && kb > 0 {
-					return kb / 1024
-				}
-			}
-		}
-	}
-	return 4096
-}
-
 // autoTunedWorkers/Limits scale concurrency to the host's real capacity. Floors
 // equal the historical conservative defaults, so a small VM behaves exactly as
 // before; ceilings keep a very large server from spraying an unbounded number of
@@ -417,12 +390,26 @@ func autoTunedWorkers(cpu int) WorkerConfig {
 	}
 }
 
+func memoryBudgetMB(memMB, maximum int) int {
+	memoryBudget := memMB * 3 / 4
+	if memoryBudget < 128 {
+		memoryBudget = 128
+	}
+	if memMB > 0 && memoryBudget > memMB {
+		memoryBudget = memMB
+	}
+	if maximum > 0 && memoryBudget > maximum {
+		memoryBudget = maximum
+	}
+	return memoryBudget
+}
+
 func autoTunedLimits(cpu, memMB int) ResourceLimits {
 	return ResourceLimits{
 		MaxConcurrentTargets: clampInt(cpu/2, 7, 64),
 		MaxScansPerTarget:    2,
 		MaxToolExecutions:    clampInt(cpu/2, 6, 48),
-		MaxMemoryMB:          clampInt(memMB*3/4, 3072, 65536),
+		MaxMemoryMB:          memoryBudgetMB(memMB, 65536),
 		MaxURLsPerModule:     0,
 		ParallelModules:      true,
 		HTTPRateLimit:        clampInt(cpu*40, 150, 2000),
@@ -439,6 +426,7 @@ func defaultConfig() *Config {
 	autoTune := os.Getenv("RECON_NO_AUTOTUNE") == ""
 	cpu := runtime.NumCPU()
 	memMB := detectTotalMemMB()
+	defaultMemoryBudget := memoryBudgetMB(memMB, 3072)
 	workers := WorkerConfig{
 		SubdomainEnumeration: 25,
 		HTTPProbing:          40,
@@ -451,7 +439,7 @@ func defaultConfig() *Config {
 		MaxConcurrentTargets: 7,
 		MaxScansPerTarget:    2,
 		MaxToolExecutions:    6,
-		MaxMemoryMB:          3072,
+		MaxMemoryMB:          defaultMemoryBudget,
 		MaxURLsPerModule:     0,
 		ParallelModules:      true,
 		HTTPRateLimit:        150,
@@ -481,11 +469,11 @@ func defaultConfig() *Config {
 		ScanUserAgent:      "",
 		ScanHeaders:        map[string]string{},
 		CSRFSecret:         "change-me-csrf-secret-32-bytes!!",
-		EnableSQLmap:       true,              // prove SQLi candidates with sqlmap by default (scope-guarded)
+		EnableSQLmap:       false,             // heavy proof pass is explicit opt-in
 		SQLiTimeBased:      true,              // statistical time-based SQLi (linear-scaling proof)
 		NucleiVerify:       true,              // route nuclei sqli/xss/redirect hits through the verifier
 		NucleiExtraTargets: true,              // scan discovered parameterized URLs, not just site roots
-		NucleiDAST:         true,              // run nuclei's fuzzing-templates (XSS/SQLi/SSRF/LFI/SSTI) against params — was off, so nuclei did no active injection
+		NucleiDAST:         false,             // parameter-fuzzing templates are explicit opt-in
 		NucleiMaxSurfaces:  8000,              // cap canonical nuclei surfaces per target (post-dedup safety bound)
 		NucleiMaxPerHost:   2000,              // cap canonical surfaces contributed by any single host
 		ScanWatchdogHours:  24,                // base watchdog floor; scheduler adds adaptive headroom for large targets

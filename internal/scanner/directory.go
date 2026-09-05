@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,12 @@ var dirHTTPClient = &http.Client{
 		if len(via) >= 3 {
 			return http.ErrUseLastResponse
 		}
+		// Content discovery must never follow a target-controlled redirect onto a
+		// different host. The original 3xx is still returned and recorded, but no
+		// out-of-scope request is sent.
+		if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+			return http.ErrUseLastResponse
+		}
 		return nil
 	},
 }
@@ -64,8 +71,14 @@ func (b soft404) matches(status int, body []byte, contentType string) bool {
 	if !b.active || status != b.statusCode {
 		return false
 	}
-	if b.title != "" && extractTitle(string(body)) == b.title {
-		return true // same catch-all shell, any length
+	if b.title != "" {
+		candidateTitle := extractTitle(string(body))
+		if candidateTitle == b.title {
+			return true // same catch-all shell, any length
+		}
+		if candidateTitle != "" {
+			return false // a different explicit title is a strong real-page signal
+		}
 	}
 	if b.contentType != "" && contentType != "" && ctFamily(b.contentType) != ctFamily(contentType) {
 		return false // different content type → genuine content, keep it
@@ -166,6 +179,109 @@ func (s *DirScanner) dirDiscoveryHostCap() int {
 	return 150
 }
 
+func (s *DirScanner) directoryHostConcurrency() int {
+	if s.cfg != nil && s.cfg.Workers.DirectoryDiscovery > 0 {
+		return s.cfg.Workers.DirectoryDiscovery
+	}
+	return 1
+}
+
+// directoryToolThreads derives per-process concurrency from the deployment's
+// total HTTP budget and the number of hosts that may run simultaneously. The old
+// fixed dirsearch -t 60 multiplied into hundreds/thousands of requests, causing
+// WAF bans and starving sibling modules (which then looked like false negatives).
+func (s *DirScanner) directoryToolThreads() int {
+	rate, hostWorkers := 150, s.directoryHostConcurrency()
+	if s.cfg != nil && s.cfg.Limits.HTTPRateLimit > 0 {
+		rate = s.cfg.Limits.HTTPRateLimit
+	}
+	// Reserve half the configured request budget for other modules and for
+	// response bursts; threads are an in-flight bound, not an exact RPS value.
+	threads := (rate / 2) / hostWorkers
+	if threads < 1 {
+		threads = 1
+	}
+	if threads > 20 {
+		threads = 20
+	}
+	return threads
+}
+
+func (s *DirScanner) builtinProbeConcurrency() int {
+	rate := 150
+	if s.cfg != nil && s.cfg.Limits.HTTPRateLimit > 0 {
+		rate = s.cfg.Limits.HTTPRateLimit
+	}
+	workers := rate / 10
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 20 {
+		workers = 20
+	}
+	return workers
+}
+
+func (s *DirScanner) directoryValidationWorkers() int {
+	workers := s.directoryToolThreads() / 4
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	return workers
+}
+
+func isDirectoryFindingStatus(status int) bool {
+	return (status >= 200 && status <= 399) || status == 401 || status == 403 || status == 405
+}
+
+func sameDirectoryServiceHost(serviceURL, foundURL string) bool {
+	service, err := url.Parse(strings.TrimSpace(serviceURL))
+	if err != nil || service.Hostname() == "" {
+		return false
+	}
+	found, err := url.Parse(strings.TrimSpace(foundURL))
+	return err == nil && (found.Scheme == "http" || found.Scheme == "https") && found.Hostname() != "" && strings.EqualFold(service.Hostname(), found.Hostname())
+}
+
+// externalDirectoryRevalidator keeps tool stdout flowing while a small worker
+// pool re-fetches reported hits through Reconner's soft-404/status classifier.
+// Doing the GET inline in the stdout callback serialized every hit and could
+// back-pressure the tool until its per-host deadline, silently dropping the tail.
+func (s *DirScanner) externalDirectoryRevalidator(ctx context.Context, targetID, svcURL string, baseline soft404) (func(string), func()) {
+	jobs := make(chan string, 32)
+	var wg sync.WaitGroup
+	var seen sync.Map
+	for i := 0; i < s.directoryValidationWorkers(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for foundURL := range jobs {
+				s.probeAndStore(ctx, targetID, foundURL, baseline)
+			}
+		}()
+	}
+	submit := func(foundURL string) {
+		if !sameDirectoryServiceHost(svcURL, foundURL) || !urlHostInScope(ctx, foundURL) {
+			return
+		}
+		if _, loaded := seen.LoadOrStore(foundURL, struct{}{}); loaded {
+			return
+		}
+		select {
+		case jobs <- foundURL:
+		case <-ctx.Done():
+		}
+	}
+	finish := func() {
+		close(jobs)
+		wg.Wait()
+	}
+	return submit, finish
+}
+
 // loadHTTPServices returns the capped host list plus how many alive hosts
 // existed in total, so callers can tell the operator when the cap actually
 // dropped hosts instead of staying silent about it.
@@ -223,9 +339,10 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	// or their output format changed between versions (the old code only fell
 	// back to built-in when NO tool was installed, so a dirsearch whose output
 	// we couldn't parse left the section permanently empty).
-	sem := make(chan struct{}, 20)
+	sem := make(chan struct{}, s.builtinProbeConcurrency())
 	var wg sync.WaitGroup
 	var found atomic.Int64
+	baselines := make(map[string]soft404, len(services))
 	logFn("info", "dir_discovery", fmt.Sprintf("Probing common paths on %d services...", len(services)))
 	for _, svcURL := range services {
 		if ctx.Err() != nil {
@@ -233,6 +350,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		}
 		base := strings.TrimRight(svcURL, "/")
 		bl := soft404Baseline(ctx, base) // discard catch-all 200 pages
+		baselines[svcURL] = bl
 		for _, path := range builtinWordlist {
 			if ctx.Err() != nil {
 				break
@@ -255,7 +373,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	// more coverage. Their failure no longer matters: the built-in results stand.
 	if s.exec.IsToolAvailable("dirsearch") {
 		logFn("info", "dir_discovery", fmt.Sprintf("Augmenting with dirsearch on %d services...", len(services)))
-		dsem := make(chan struct{}, s.cfg.Workers.DirectoryDiscovery)
+		dsem := make(chan struct{}, s.directoryHostConcurrency())
 		var dwg sync.WaitGroup
 		for _, svcURL := range services {
 			if ctx.Err() != nil {
@@ -266,7 +384,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			go func(u string) {
 				defer dwg.Done()
 				defer func() { <-dsem }()
-				s.runDirsearch(ctx, targetID, u, logFn)
+				s.runDirsearch(ctx, targetID, u, baselines[u], logFn)
 			}(svcURL)
 		}
 		dwg.Wait()
@@ -276,7 +394,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			if ctx.Err() != nil {
 				break
 			}
-			s.runFeroxbuster(ctx, targetID, svcURL, logFn)
+			s.runFeroxbuster(ctx, targetID, svcURL, baselines[svcURL], logFn)
 		}
 	} else {
 		logFn("info", "dir_discovery", "dirsearch/feroxbuster not installed — built-in prober only")
@@ -286,7 +404,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	return nil
 }
 
-func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, logFn LogFunc) {
+func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, baseline soft404, logFn LogFunc) {
 	// dirsearch output format: [HH:MM:SS] STATUS - SIZE - /path
 	// or with full URL: [HH:MM:SS] STATUS - SIZE - https://host/path
 	base := strings.TrimRight(svcURL, "/")
@@ -295,6 +413,7 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 	// 12 hosts serialised into ~16 min). Cap each host and let the rest proceed.
 	dctx, dcancel := context.WithTimeout(ctx, 150*time.Second)
 	defer dcancel()
+	submitValidation, finishValidation := s.externalDirectoryRevalidator(dctx, targetID, svcURL, baseline)
 
 	callback := func(line string) {
 		line = strings.TrimSpace(line)
@@ -322,12 +441,8 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		}
 		var statusCode int
 		fmt.Sscanf(parts[1], "%d", &statusCode)
-		if statusCode == 0 {
+		if !isDirectoryFindingStatus(statusCode) {
 			return
-		}
-		size := 0
-		if len(parts) >= 4 {
-			size = humanSizeToBytes(parts[3])
 		}
 		pathOrURL := parts[len(parts)-1]
 		var foundURL string
@@ -338,14 +453,17 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		} else {
 			return
 		}
-		s.storeDirFinding(targetID, foundURL, statusCode, size, "")
+		// External tools have their own soft-404 heuristics, but their output is
+		// not authoritative. Re-fetch every reported hit through Reconner's shared
+		// baseline classifier before it is allowed into directory_findings.
+		submitValidation(foundURL)
 	}
 
 	args := []string{
 		"-u", svcURL, "--no-color", "-q",
 		"-e", "php,asp,aspx,jsp,html,txt,bak,zip,sql,tar,gz,rar,xml,json,yaml,env,js,pdf,cfg,conf,old,swp,inc",
-		"-i", "200,204,301,302,307,401,403,405,500",
-		"--timeout", "6", "--full-url", "-t", "60", "--max-time", "120",
+		"-i", "200,204,301,302,307,401,403,405",
+		"--timeout", "6", "--full-url", "-t", strconv.Itoa(s.directoryToolThreads()), "--max-time", "120",
 	}
 	args = append(args, ToolRequestIdentityArgs(ctx, "dirsearch")...)
 	err := s.exec.RunWithCallback(dctx, targetID, callback, "dirsearch", args...)
@@ -354,40 +472,20 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		pyArgs := append([]string{"-m", "dirsearch"}, args...)
 		err = s.exec.RunWithCallback(dctx, targetID, callback, "python3", pyArgs...)
 	}
+	finishValidation()
 	if err != nil && ctx.Err() == nil && dctx.Err() != context.DeadlineExceeded {
 		logFn("warn", "dir_discovery", fmt.Sprintf("dirsearch error for %s: %v", svcURL, err))
 	}
 }
 
-// humanSizeToBytes parses dirsearch-style sizes ("260B", "10KB", "3MB") to bytes.
-func humanSizeToBytes(s string) int {
-	s = strings.TrimSpace(strings.ToUpper(s))
-	if s == "" || s == "-" {
-		return 0
-	}
-	mult := 1.0
-	switch {
-	case strings.HasSuffix(s, "KB"):
-		mult, s = 1024, strings.TrimSuffix(s, "KB")
-	case strings.HasSuffix(s, "MB"):
-		mult, s = 1024*1024, strings.TrimSuffix(s, "MB")
-	case strings.HasSuffix(s, "GB"):
-		mult, s = 1024*1024*1024, strings.TrimSuffix(s, "GB")
-	case strings.HasSuffix(s, "B"):
-		s = strings.TrimSuffix(s, "B")
-	}
-	var v float64
-	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%f", &v); err != nil {
-		return 0
-	}
-	return int(v * mult)
-}
-
-func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string, logFn LogFunc) {
+func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string, baseline soft404, logFn LogFunc) {
 	// feroxbuster output: STATUS METHOD SIZE WORDS LINES URL
-	args := []string{"-u", svcURL, "-q", "-t", "20", "--timeout", "8", "-x", "php,asp,aspx,jsp,html,txt,bak,zip", "--no-state"}
+	dctx, cancel := context.WithTimeout(ctx, 150*time.Second)
+	defer cancel()
+	submitValidation, finishValidation := s.externalDirectoryRevalidator(dctx, targetID, svcURL, baseline)
+	args := []string{"-u", svcURL, "-q", "-t", strconv.Itoa(s.directoryToolThreads()), "--timeout", "8", "-x", "php,asp,aspx,jsp,html,txt,bak,zip", "--no-state"}
 	args = append(args, ToolRequestIdentityArgs(ctx, "feroxbuster")...)
-	err := s.exec.RunWithCallback(ctx, targetID, func(line string) {
+	err := s.exec.RunWithCallback(dctx, targetID, func(line string) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ">") {
 			return
@@ -398,7 +496,7 @@ func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string
 		}
 		var statusCode int
 		fmt.Sscanf(parts[0], "%d", &statusCode)
-		if statusCode == 0 {
+		if !isDirectoryFindingStatus(statusCode) {
 			return
 		}
 		foundURL := ""
@@ -409,10 +507,11 @@ func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string
 			}
 		}
 		if foundURL != "" {
-			s.storeDirFinding(targetID, foundURL, statusCode, 0, "")
+			submitValidation(foundURL)
 		}
 	}, "feroxbuster", args...)
-	if err != nil && ctx.Err() == nil {
+	finishValidation()
+	if err != nil && ctx.Err() == nil && dctx.Err() != context.DeadlineExceeded {
 		logFn("warn", "dir_discovery", fmt.Sprintf("feroxbuster error for %s: %v", svcURL, err))
 	}
 }
@@ -431,7 +530,7 @@ func (s *DirScanner) probeAndStore(ctx context.Context, targetID, targetURL stri
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 
-	if resp.StatusCode == 404 || resp.StatusCode == 400 {
+	if !isDirectoryFindingStatus(resp.StatusCode) {
 		return false
 	}
 	// Discard soft-404 catch-all responses.
@@ -440,8 +539,7 @@ func (s *DirScanner) probeAndStore(ctx context.Context, targetID, targetURL stri
 	}
 
 	redirect := resp.Header.Get("Location")
-	s.storeDirFinding(targetID, targetURL, resp.StatusCode, trueSize(resp, len(body)), redirect)
-	return true
+	return s.storeDirFinding(targetID, targetURL, resp.StatusCode, trueSize(resp, len(body)), redirect)
 }
 
 // realSize returns the TRUE resource size: the Content-Length header when the
@@ -493,9 +591,9 @@ func sensitiveBackupType(fileType string) bool {
 	return false
 }
 
-func (s *DirScanner) storeDirFinding(targetID, foundURL string, statusCode, contentLength int, redirectURL string) {
+func (s *DirScanner) storeDirFinding(targetID, foundURL string, statusCode, contentLength int, redirectURL string) bool {
 	id := uuid.New().String()
-	_, _ = s.db.Exec(`
+	_, err := s.db.Exec(`
 		INSERT INTO directory_findings (id, target_id, url, status_code, content_length, redirect_url)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(target_id, url) DO UPDATE SET
@@ -503,6 +601,13 @@ func (s *DirScanner) storeDirFinding(targetID, foundURL string, statusCode, cont
 			content_length = excluded.content_length,
 			redirect_url = excluded.redirect_url
 	`, id, targetID, foundURL, statusCode, contentLength, redirectURL)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Unable to persist validated directory finding", "url", foundURL, "error", err)
+		}
+		return false
+	}
+	return true
 }
 
 func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, logFn LogFunc) error {

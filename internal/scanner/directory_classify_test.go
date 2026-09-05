@@ -29,6 +29,12 @@ func TestSoft404Classification(t *testing.T) {
 	if base.matches(200, realPage, "text/html") {
 		t.Error("a distinct HTML page (different title, different size) must be kept")
 	}
+	// A real page can be close in size to the catch-all; an explicit different
+	// title must still win over the coarse length heuristic.
+	similarSizeRealPage := []byte(`<html><head><title>Account</title></head><body>real</body></html>`)
+	if base.matches(200, similarSizeRealPage, "text/html") {
+		t.Error("a different titled page must not be discarded merely for similar size")
+	}
 
 	// 4. Inactive baseline never matches.
 	if (soft404{}).matches(200, shell, "text/html") {

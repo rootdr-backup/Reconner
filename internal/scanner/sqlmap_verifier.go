@@ -3,9 +3,11 @@ package scanner
 import (
 	"context"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
@@ -30,6 +32,8 @@ type SQLmapVerifier struct {
 	db           *database.DB
 }
 
+var sqlmapFallbackOutputMu sync.Mutex
+
 func NewSQLmapVerifier(exec *tools.Executor, cfg *config.Config, log *logger.Logger, targetDomain string, origins []string, authHeaders map[string]string) *SQLmapVerifier {
 	return &SQLmapVerifier{exec: exec, cfg: cfg, logger: log, targetDomain: targetDomain, origins: origins, authHeaders: authHeaders}
 }
@@ -47,6 +51,20 @@ func (v *SQLmapVerifier) Verify(ctx context.Context, c VulnerabilityCandidate) V
 		return VerifyResult{Verdict: VerifyRejected, Reason: "candidate URL out of scope", Method: "sqlmap"}
 	}
 	args := buildSQLmapArgsWithShape(c, RequestIdentityHeaders(ctx, v.authHeaders), v.requestSiblings(ctx, c), v.requestSiblingTypes(ctx, c))
+	// Concurrent proof workers must not share sqlmap's default per-host session
+	// files. Isolate each candidate in a temporary output directory; otherwise two
+	// candidates on one host can lock/corrupt each other's session and become
+	// spurious inconclusive results.
+	if outputDir, err := os.MkdirTemp("", "reconner-sqlmap-"); err == nil {
+		defer os.RemoveAll(outputDir)
+		args = append(args, "--output-dir", outputDir)
+	} else {
+		// A broken/full temp filesystem must not make concurrent candidates share
+		// sqlmap's session state. Serialize only this rare fallback and still run
+		// the verifier so coverage is not silently lost.
+		sqlmapFallbackOutputMu.Lock()
+		defer sqlmapFallbackOutputMu.Unlock()
+	}
 	res, err := v.exec.Run(ctx, "sqlmap", args...)
 	if err != nil && res == nil {
 		return VerifyResult{Verdict: VerifyInconclusive, Reason: "sqlmap failed to run: " + err.Error(), Method: "sqlmap"}

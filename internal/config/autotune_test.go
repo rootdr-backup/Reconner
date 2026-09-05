@@ -15,15 +15,36 @@ func TestClampInt(t *testing.T) {
 	}
 }
 
-// A tiny 1-core VM must never scale BELOW the historical fixed defaults.
-func TestAutoTuneSmallHostKeepsFloors(t *testing.T) {
+// A tiny container must keep worker compatibility while its memory budget stays
+// below the real cgroup/host capacity (the old hard 3072 MB floor caused OOMs).
+func TestAutoTuneSmallHostRespectsMemory(t *testing.T) {
 	w := autoTunedWorkers(1)
 	if w.SubdomainEnumeration != 25 || w.HTTPProbing != 40 || w.Nuclei != 6 {
 		t.Fatalf("small-host workers regressed below floor: %+v", w)
 	}
 	l := autoTunedLimits(1, 512)
-	if l.MaxConcurrentTargets != 7 || l.HTTPRateLimit != 150 || l.MaxMemoryMB != 3072 {
-		t.Fatalf("small-host limits regressed below floor: %+v", l)
+	if l.MaxConcurrentTargets != 7 || l.HTTPRateLimit != 150 || l.MaxMemoryMB != 384 {
+		t.Fatalf("small-host limits ignore available memory: %+v", l)
+	}
+}
+
+func TestHeavyVerificationDefaultsAreOptIn(t *testing.T) {
+	t.Setenv("RECON_NO_AUTOTUNE", "1")
+	cfg := defaultConfig()
+	if cfg.EnableSQLmap || cfg.NucleiDAST {
+		t.Fatalf("heavy verification must default off: sqlmap=%v nuclei_dast=%v", cfg.EnableSQLmap, cfg.NucleiDAST)
+	}
+}
+
+func TestFixedDefaultsStillRespectSmallMemory(t *testing.T) {
+	if got := memoryBudgetMB(512, 3072); got != 384 {
+		t.Fatalf("fixed default budget=%d want 384", got)
+	}
+	if got := memoryBudgetMB(64, 3072); got != 64 {
+		t.Fatalf("tiny-environment budget=%d must not exceed available 64 MB", got)
+	}
+	if got := memoryBudgetMB(131072, 3072); got != 3072 {
+		t.Fatalf("fixed-default ceiling=%d want 3072", got)
 	}
 }
 

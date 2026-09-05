@@ -60,6 +60,28 @@ wordlists and nuclei templates — lives under `/data`, mounted from the
 `reconner-data` named volume. Rebuilding or updating the image never loses your
 data. To wipe it, remove the volume: `docker compose down -v`.
 
+## Container sizing and host protection
+
+Compose limits the complete Reconner process tree by default to `3g` of memory
+and 512 PIDs. This covers Chromium and external tools as well as the Go service.
+Reconner reads the cgroup limit and usage, sizes `limits.max_memory_mb` from the
+smaller of host/container memory, and pauses new scan admission under pressure.
+
+Set `RECON_MEMORY_LIMIT` in `.env` for the host. For an existing `config.json`
+that already contains an explicit `limits` object, also align the two fields
+shown below; fresh/partial configurations are auto-tuned.
+
+| Host RAM | `RECON_MEMORY_LIMIT` | `limits.max_memory_mb` | `limits.max_concurrent_targets` |
+|---:|---:|---:|---:|
+| 2 GB | `1536m` | `1024` | `1` |
+| 4 GB | `3g` | `2304` | `1` |
+| 8 GB | `6g` | `4608` | `2` |
+| 16 GB | `12g` | `9216` | `4` |
+
+Keep `RECON_PIDS_LIMIT=512` unless measurements show a legitimate need to
+raise it. A PID-limit failure is preferable to exhausting the host-wide PID
+table. Do not set `limits.max_memory_mb` above the Compose memory limit.
+
 ## Notes
 
 - **Port**: the app always listens on `8080` inside the container. Publish it on

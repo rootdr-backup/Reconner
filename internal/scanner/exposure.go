@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"hash"
 	"io"
@@ -706,10 +707,10 @@ func (s *ExposureScanner) runOpenBuckets(ctx context.Context, targetID string, l
 		resp.Body.Close()
 		cancel()
 
-		b := string(body)
-		// Public, listable S3/GCS buckets return an XML listing with these tags.
-		if resp.StatusCode == 200 && (strings.Contains(b, "<ListBucketResult") ||
-			strings.Contains(b, "<Contents>") || strings.Contains(b, "<Key>")) {
+		// A verified public listing has ListBucketResult as the XML root. Generic
+		// <Contents>/<Key> elements occur in feeds, sitemaps, API responses and
+		// documentation pages and must never confirm a high-severity bucket finding.
+		if resp.StatusCode == 200 && isListableBucketXML(body) {
 			s.store(targetID, "open_bucket", "high", u, "",
 				"Cloud storage bucket is publicly listable")
 			found.Add(1)
@@ -719,6 +720,13 @@ func (s *ExposureScanner) runOpenBuckets(ctx context.Context, targetID string, l
 	}
 	logFn("info", "exposure", fmt.Sprintf("Bucket check done. Found %d public buckets.", found.Load()))
 	return nil
+}
+
+func isListableBucketXML(body []byte) bool {
+	var document struct {
+		XMLName xml.Name
+	}
+	return xml.Unmarshal(body, &document) == nil && strings.EqualFold(document.XMLName.Local, "ListBucketResult")
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
