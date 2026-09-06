@@ -282,6 +282,11 @@ func reopenCandidate(ctx context.Context, db *database.DB, id, actor, method, re
 }
 
 func upsertFindingProjection(ctx context.Context, db *database.DB, candidateID string, c VulnerabilityCandidate, result VerifyResult, lifecycle string, meta FindingMeta) error {
+	// Normalize the URL BEFORE the UNIQUE(target_id,type,url,parameter) insert
+	// so https://www.x.com:443/a and https://x.com/a hit the same row instead
+	// of showing as two Needs Review rows for the same file. Raw evidence stays
+	// untouched; only the identity column is canonical.
+	c.URL = NormalizeURL(c.URL)
 	status := ""
 	switch lifecycle {
 	case CandConfirmed, CandVerified:

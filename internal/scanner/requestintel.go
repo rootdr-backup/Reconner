@@ -38,21 +38,42 @@ type CanonResponse struct {
 
 var reNumSegments = regexp.MustCompile(`/\d+`)
 
-// NormalizeURL produces a stable template for a URL: sorted query keys (values
-// dropped) and numeric path segments collapsed to {id}. This lets us recognize
-// that /api/orders/1 and /api/orders/2 are the SAME endpoint.
+// NormalizeURL produces a stable template for a URL: lower-cased scheme/host,
+// default ports stripped (:443/https, :80/http), a single leading www. folded,
+// numeric path segments collapsed to {id}, query keys sorted lower-cased (values
+// dropped), fragments dropped and trailing-slash noise removed. This lets us
+// recognize that https://www.x.com:443/api/orders/1 and
+// https://x.com/api/orders/2 are the SAME endpoint, so Needs Review doesn't
+// list them as separate rows.
 func NormalizeURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
 		return raw
 	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	// Strip only the DEFAULT port for the known scheme, so
+	// https://x.com:443 == https://x.com but https://x.com:8443 stays distinct
+	// (and http://x.com:443 keeps its explicit port).
+	if scheme == "https" {
+		host = strings.TrimSuffix(host, ":443")
+	} else if scheme == "http" {
+		host = strings.TrimSuffix(host, ":80")
+	}
+	// Fold a single leading www. — www and apex almost always serve the same
+	// app, and keeping them distinct doubles Needs Review rows for the same file.
+	// Deeper subdomains (api., app.) are left alone.
+	host = strings.TrimPrefix(host, "www.")
 	path := reNumSegments.ReplaceAllString(u.Path, "/{id}")
+	if len(path) > 1 {
+		path = strings.TrimSuffix(path, "/")
+	}
 	keys := make([]string, 0, len(u.Query()))
 	for k := range u.Query() {
-		keys = append(keys, k)
+		keys = append(keys, strings.ToLower(k))
 	}
 	sort.Strings(keys)
-	norm := u.Scheme + "://" + u.Host + path
+	norm := scheme + "://" + host + path
 	if len(keys) > 0 {
 		norm += "?" + strings.Join(keys, "&")
 	}

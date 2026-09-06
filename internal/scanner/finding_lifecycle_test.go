@@ -139,3 +139,33 @@ func TestExistingCandidateResultUsesCandidateID(t *testing.T) {
 		t.Fatalf("existing candidate state=%s", got)
 	}
 }
+
+func TestSameFileViaWWWAndExplicitPortProjectsOneRow(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	mk := func(rawURL string) VulnerabilityCandidate {
+		return VulnerabilityCandidate{
+			TargetID: tid, Type: "xss", Subtype: "reflected", URL: rawURL,
+			Method: "GET", Parameter: "q", Location: "query",
+			DetectionSource: "test", DetectionMethod: "reflection",
+			Severity: "high", Confidence: 80, Evidence: "reflected",
+		}
+	}
+	id1, err := RecordCandidateDetection(ctx, db, mk("https://www.example.com:443/js/app.js?q=1"), FindingMeta{Actor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := RecordCandidateDetection(ctx, db, mk("https://example.com/js/app.js?q=2"), FindingMeta{Actor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("www + :443 must dedup to one candidate: %q vs %q", id1, id2)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='xss'`, tid).Scan(&n)
+	if n != 1 {
+		t.Fatalf("Needs Review must show one row for the same file, got %d", n)
+	}
+}
