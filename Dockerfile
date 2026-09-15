@@ -299,6 +299,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \
  && rm -rf /var/lib/apt/lists/*
 
+# Fixed, unprivileged runtime identity. The writable home is intentional:
+# Chromium and several recon tools persist harmless caches/config beneath it.
+RUN groupadd --gid 10001 reconner \
+ && useradd --uid 10001 --gid reconner --create-home \
+      --home-dir /home/reconner --shell /usr/sbin/nologin reconner
+
 # ── assemble the tool-chain ──────────────────────────────────────────────────
 # puredns and shuffledns (both from gotools) shell out to massdns for actual
 # DNS resolution/brute-forcing — both COPYs land in /usr/local/bin together so
@@ -326,7 +332,9 @@ RUN ln -s /opt/venv/bin/dirsearch /usr/local/bin/dirsearch \
 COPY --from=backend  /out/reconner            /usr/local/bin/reconner
 COPY --from=frontend /app/frontend/dist       /opt/reconner/frontend/dist
 COPY docker/entrypoint.sh                     /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+ && mkdir -p /data \
+ && chown -R reconner:reconner /data /home/reconner /opt/reconner
 
 ENV RECON_CONFIG=/data/config.json \
     RECONNER_CHROME=/usr/bin/chromium \
@@ -337,6 +345,10 @@ ENV RECON_CONFIG=/data/config.json \
 # image: the entrypoint generates a strong random password on first boot and
 # prints it once in the logs (see docker/entrypoint.sh and the README's
 # "First Login" section). No secret of any kind lives in this image.
+
+# All build-time command checks below run with the same restricted identity as
+# production. This catches tools that accidentally require root before publish.
+USER reconner:reconner
 
 # ── build-time verification ──────────────────────────────────────────────────
 # Every tool Reconner can invoke MUST be present and actually executable in

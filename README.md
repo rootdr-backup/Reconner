@@ -107,6 +107,16 @@ docker compose up -d --no-deps reconner
 docker compose ps
 ```
 
+The hardened image runs as uid/gid `10001` instead of root. A new named volume
+gets the correct ownership automatically. If an older volume was created by a
+root-running image and startup reports that `/data` is not writable, repair its
+ownership once, then start Reconner again:
+
+```bash
+docker compose run --rm --user 0 --entrypoint chown reconner -R 10001:10001 /data
+docker compose up -d --no-deps reconner
+```
+
 For a local source build:
 
 ```bash

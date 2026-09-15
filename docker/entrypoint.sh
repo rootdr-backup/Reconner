@@ -16,12 +16,16 @@ CFG="${RECON_CONFIG:-${DATA_DIR}/config.json}"
 PORT="${PORT:-8080}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 
-mkdir -p \
+if ! mkdir -p \
   "${DATA_DIR}" \
   "${DATA_DIR}/tools" \
   "${DATA_DIR}/screenshots" \
   "${DATA_DIR}/wordlists" \
-  "${DATA_DIR}/nuclei-templates"
+  "${DATA_DIR}/nuclei-templates"; then
+  echo "ERROR: ${DATA_DIR} is not writable by Reconner (uid 10001)." >&2
+  echo "For a legacy Docker volume, run the one-time ownership command in README.md." >&2
+  exit 1
+fi
 
 if [ ! -f "${CFG}" ]; then
   # Generate a strong random password when none was provided. base64 of 32
