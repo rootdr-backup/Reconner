@@ -105,7 +105,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loginRL.reset(ip) // successful login clears this IP's failure count
-	h.auth.SetSessionCookie(w, sessionID)
+	h.auth.SetSessionCookie(w, r, sessionID)
 	h.writeSuccess(w, map[string]string{"message": "logged in"})
 }
 
@@ -114,7 +114,7 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_ = h.auth.Logout(sessionID)
 	}
-	h.auth.ClearSessionCookie(w)
+	h.auth.ClearSessionCookie(w, r)
 	h.writeSuccess(w, map[string]string{"message": "logged out"})
 }
 
@@ -154,7 +154,7 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	sessionID, _ := h.auth.GetSessionFromRequest(r)
 	userID, _ := h.auth.ValidateSession(sessionID)
 
-	if err := h.auth.ChangePassword(userID, req.OldPassword, req.NewPassword); err != nil {
+	if err := h.auth.ChangePassword(userID, sessionID, req.OldPassword, req.NewPassword); err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			h.writeError(w, http.StatusUnauthorized, "current password incorrect")
 			return

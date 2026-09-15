@@ -50,12 +50,16 @@ var tmBuckets = map[string][]string{
 
 // Run harvests archived parameterised URLs and classifies them.
 func (s *TimeMachineScanner) Run(ctx context.Context, targetID, domain string, logFn LogFunc) error {
+	domain = normalizeHost(hostOfURL(domain))
+	if domain == "" {
+		return fmt.Errorf("timemachine target domain is empty or invalid")
+	}
 	logFn("info", "timemachine", "TimeMachine: mining Wayback archive for forgotten parameterised URLs...")
 
 	urls, err := s.fetchWayback(ctx, domain)
 	if err != nil {
 		logFn("warn", "timemachine", fmt.Sprintf("Wayback fetch failed: %v", err))
-		return nil // non-fatal: it's an enrichment source
+		return BlockedPhase("Wayback query failed: " + err.Error())
 	}
 	logFn("info", "timemachine", fmt.Sprintf("TimeMachine: %d archived URLs retrieved", len(urls)))
 
@@ -68,7 +72,7 @@ func (s *TimeMachineScanner) Run(ctx context.Context, targetID, domain string, l
 			break
 		}
 		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" {
+		if err != nil || u.Host == "" || !archivedURLInScope(domain, u) {
 			continue
 		}
 		q := u.Query()
@@ -118,6 +122,12 @@ func (s *TimeMachineScanner) Run(ctx context.Context, targetID, domain string, l
 	}
 	logFn("info", "timemachine", "TimeMachine complete.")
 	return nil
+}
+
+func archivedURLInScope(domain string, u *url.URL) bool {
+	host := normalizeHost(u.Hostname())
+	domain = normalizeHost(domain)
+	return host != "" && domain != "" && (host == domain || strings.HasSuffix(host, "."+domain))
 }
 
 // fetchWayback pulls the domain's archived original URLs from the CDX API. It

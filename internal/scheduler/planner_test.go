@@ -185,8 +185,9 @@ func TestPlanCapabilitiesOnlyUntouched(t *testing.T) {
 	}
 }
 
-// TestPlanNetworkPassthrough: network pipeline tokens are preserved and never
-// trigger web-capability planning.
+// TestPlanNetworkPassthrough: legacy network tokens are preserved for old task
+// interpretation and never trigger web capabilities. CreateTask separately
+// rejects them rather than creating a green no-op task.
 func TestPlanNetworkPassthrough(t *testing.T) {
 	in := []string{ModuleNetwork, "bruteforce", "ingram"}
 	plan := PlanModules(in)
@@ -276,6 +277,57 @@ func TestPlanSpeedTokenPreserved(t *testing.T) {
 	}
 	if !has(plan, ModuleParamDiscovery) {
 		t.Errorf("detector+speed selection must still expand recon: %v", plan)
+	}
+}
+
+func TestCreateTaskOptionsDoNotInflateProgressTotal(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain) VALUES ('option-target','example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask("option-target", []string{ModuleHTTPProbe, "speed_fast", "no_subdomain_brute"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Total != 1 {
+		t.Fatalf("task total=%d, want one executable phase (options are not phases)", task.Total)
+	}
+	var persisted int
+	if err := s.db.QueryRow(`SELECT total FROM tasks WHERE id=?`, task.ID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted total=%d, want 1", persisted)
+	}
+}
+
+func TestCreateTaskRejectsOptionsOnlyAndPhantomNetworkPipeline(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('admission-target','10.0.0.1','network')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateTask("admission-target", []string{"speed_fast"}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
+		t.Fatalf("options-only task error=%v, want ErrInvalidModuleSelection", err)
+	}
+	if _, err := s.CreateTask("admission-target", []string{ModuleNetwork}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
+		t.Fatalf("phantom network task error=%v, want ErrInvalidModuleSelection", err)
+	}
+	if _, err := s.CreateTask("admission-target", []string{ModuleHTTPProbe}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
+		t.Fatalf("web modules on legacy network project error=%v, want ErrInvalidModuleSelection", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE target_id='admission-target'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected task persisted %d row(s)", count)
+	}
+}
+
+func TestSkippedParallelGroupIsFullyHandledForResume(t *testing.T) {
+	got := markModulesCompleted([]string{ModuleJSAnalysis}, []string{ModuleJSAnalysis, ModuleParamDiscovery})
+	if len(got) != 2 || got[0] != ModuleJSAnalysis || got[1] != ModuleParamDiscovery {
+		t.Fatalf("completed modules=%v, want unique full skipped group", got)
 	}
 }
 

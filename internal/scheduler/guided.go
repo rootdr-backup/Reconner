@@ -42,33 +42,47 @@ func (s *Scheduler) executeGuidedTask(parent context.Context, taskID, targetID, 
 	} else if e = json.Unmarshal([]byte(box.Decrypt(sealed)), &input); e != nil {
 		runErr = e
 	} else {
-		total := scanner.GuidedCheckCount(input)
-		_, _ = s.db.Exec(`UPDATE tasks SET total=? WHERE id=?`, total, taskID)
-		_, runErr = scanner.RunGuided(ctx, s.db, targetID, input, func(raw string) bool { return scanner.GuidedURLInScope(ctx, s.db, targetID, raw) }, func(report scanner.GuidedReport) {
-			b, _ := json.Marshal(report)
-			safe, _ := json.Marshal(scanner.PublicGuidedReport(report))
-			enc := box.Encrypt(string(b))
-			if !strings.HasPrefix(enc, "enc:v1:") {
-				cancel()
-				return
-			}
-			if _, e := s.db.Exec(`UPDATE guided_runs SET encrypted_report=?,redacted_report=? WHERE id=? AND target_id=?`, enc, string(safe), runID, targetID); e != nil {
-				cancel()
-				return
-			}
-			latest := report.Results[len(report.Results)-1]
-			_, _ = s.db.Exec(`UPDATE tasks SET progress=?,current_module=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, len(report.Results), latest.Module, taskID)
-			s.hub.Broadcast("task_progress", map[string]any{"task_id": taskID, "target_id": targetID, "progress": len(report.Results), "total": total, "current_module": latest.Module})
-			logFn("info", latest.Module, fmt.Sprintf("Template %s: %s (%d requests, %d findings). %s", latest.TemplateID, latest.Status, latest.Requests, len(latest.Findings), latest.Reason))
-			// Guided execution is intentionally monolithic, so its progress boundary
-			// is also its module-boundary pause gate. The in-flight check completes,
-			// then no next template/module starts until the operator resumes.
-			s.waitIfPaused(ctx, taskID, logFn)
-		})
+		checks := scanner.GuidedChecks(input)
+		total := len(checks)
+		if e := s.replaceGuidedTaskPhases(taskID, checks); e != nil {
+			runErr = e
+		} else {
+			_, _ = s.db.Exec(`UPDATE tasks SET total=? WHERE id=?`, total, taskID)
+			_, runErr = scanner.RunGuided(ctx, s.db, targetID, input, func(raw string) bool { return scanner.GuidedURLInScope(ctx, s.db, targetID, raw) }, func(report scanner.GuidedReport) {
+				b, _ := json.Marshal(report)
+				safe, _ := json.Marshal(scanner.PublicGuidedReport(report))
+				enc := box.Encrypt(string(b))
+				if !strings.HasPrefix(enc, "enc:v1:") {
+					cancel()
+					return
+				}
+				if _, e := s.db.Exec(`UPDATE guided_runs SET encrypted_report=?,redacted_report=? WHERE id=? AND target_id=?`, enc, string(safe), runID, targetID); e != nil {
+					cancel()
+					return
+				}
+				latest := report.Results[len(report.Results)-1]
+				phaseIndex := len(report.Results) - 1
+				_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,attempt_count=1,
+				started_at=COALESCE(started_at,CURRENT_TIMESTAMP),finished_at=CURRENT_TIMESTAMP,
+				updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND phase_index=?`,
+					latest.Status, latest.Reason, taskID, phaseIndex)
+				_, _ = s.db.Exec(`UPDATE tasks SET progress=?,current_module=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, len(report.Results), latest.Module, taskID)
+				s.hub.Broadcast("task_progress", map[string]any{"task_id": taskID, "target_id": targetID, "progress": len(report.Results), "total": total, "current_module": latest.Module})
+				logFn("info", latest.Module, fmt.Sprintf("Template %s: %s (%d requests, %d findings). %s", latest.TemplateID, latest.Status, latest.Requests, len(latest.Findings), latest.Reason))
+				// Guided execution is intentionally monolithic, so its progress boundary
+				// is also its module-boundary pause gate. The in-flight check completes,
+				// then no next template/module starts until the operator resumes.
+				s.waitIfPaused(ctx, taskID, logFn)
+			})
+		}
 	}
 	if runErr != nil {
 		status = "failed"
 		message = "Guided run stopped; inspect partial results and task logs"
+		if s.guidedTaskPhaseCount(taskID) == 0 {
+			_, _ = s.db.Exec(`INSERT INTO task_phases(task_id,phase_index,module,status,reason,attempt_count,started_at,finished_at)
+				VALUES(?,0,'guided_capture','failed',?,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, taskID, message)
+		}
 	}
 	var persistedStatus string
 	_ = s.db.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&persistedStatus)
@@ -77,6 +91,20 @@ func (s *Scheduler) executeGuidedTask(parent context.Context, taskID, targetID, 
 	} else if persistedStatus == "cancelled" || parent.Err() != nil {
 		status = "cancelled"
 		message = ""
+	}
+	switch status {
+	case "cancelled":
+		s.finishUnresolvedTaskPhases(taskID, "cancelled", "guided run cancelled before check completed")
+	case InterruptedStatus:
+		s.finishUnresolvedTaskPhases(taskID, "blocked", "service stopped; guided run requires fresh approval")
+	case "failed":
+		s.finishUnresolvedTaskPhases(taskID, "blocked", "not reached because guided execution failed")
+	case "finished":
+		if unresolved := s.unresolvedTaskPhaseCount(taskID); unresolved > 0 {
+			status = "failed"
+			message = fmt.Sprintf("guided phase ledger invariant failed: %d check(s) were not completed", unresolved)
+			s.finishUnresolvedTaskPhases(taskID, "failed", message)
+		}
 	}
 	_, _ = s.db.Exec(`UPDATE tasks SET status=?,error=?,current_module='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('interrupted','cancelled')`, status, message, taskID)
 	s.pauseMu.Lock()
@@ -90,4 +118,32 @@ func (s *Scheduler) executeGuidedTask(parent context.Context, taskID, targetID, 
 	}
 	s.refreshTargetScanStatus(targetID, targetStatus, status != InterruptedStatus)
 	s.hub.Broadcast("task_finished", map[string]string{"task_id": taskID, "target_id": targetID, "status": status})
+}
+
+func (s *Scheduler) replaceGuidedTaskPhases(taskID string, checks []scanner.GuidedCheck) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM task_phases WHERE task_id=?`, taskID); err != nil {
+		return err
+	}
+	for i, check := range checks {
+		module := check.Module
+		if strings.TrimSpace(check.TemplateID) != "" {
+			module += ":" + check.TemplateID
+		}
+		if _, err := tx.Exec(`INSERT INTO task_phases(task_id,phase_index,module,status)
+			VALUES(?,?,?,'pending')`, taskID, i, module); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Scheduler) guidedTaskPhaseCount(taskID string) int {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=?`, taskID).Scan(&count)
+	return count
 }

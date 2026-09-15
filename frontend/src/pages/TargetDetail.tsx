@@ -14,7 +14,7 @@ import type {
 } from '../types'
 
 const isScannableProjectAsset = (asset: Asset) =>
-  ['domain', 'wildcard', 'url', 'page', 'js', 'api', 'ip', 'cidr'].includes(asset.asset_type || 'domain')
+  asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')
 
 // Findings information architecture — a logical hierarchy instead of a flat row
 // of unrelated siblings. Assets = the discovered surface; Vulnerabilities = the
@@ -339,7 +339,7 @@ export default function TargetDetail() {
 
   const canResumeLastTask = lastFailedTask &&
     (lastFailedTask.status === 'failed' || lastFailedTask.status === 'cancelled') &&
-    (lastFailedTask.modules?.length || 0) > (lastFailedTask.completed_modules?.length || 0)
+    (lastFailedTask.total || 0) > (lastFailedTask.completed_modules?.length || 0)
 
   const resumeLastTask = async () => {
     if (!lastFailedTask) return
@@ -614,11 +614,11 @@ export default function TargetDetail() {
         </div>
 		<div className="flex flex-col sm:flex-row gap-2 mb-3">
 		  <select value={newAssetType} onChange={e => setNewAssetType(e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary sm:w-32">
-			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP'],['cidr','CIDR'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
 		  </select>
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}
-			placeholder="domain, full URL/page, .js file, IP or CIDR"
+			placeholder="domain, full URL/page, or .js file"
             className="flex-1 bg-surface-alt border border-border rounded px-2 py-1.5 text-xs font-mono" />
           <Button size="sm" variant="secondary" loading={assetBusy} onClick={addAsset}>Add</Button>
         </div>
@@ -637,7 +637,7 @@ export default function TargetDetail() {
                   <p className="text-[11px] font-mono text-text-secondary truncate" title={a.value}>{a.value}</p>
                 </div>
                 <Button size="sm" variant="primary" disabled={a.approval_status !== 'approved' || !isScannableProjectAsset(a)}
-                  title={!isScannableProjectAsset(a) ? 'Reference-only asset type' : undefined} onClick={() => setScanAsset(a)}>Scan</Button>
+                  title={!isScannableProjectAsset(a) ? (a.kind === 'network' ? 'Legacy network assets are read-only in this build' : 'Reference-only asset type') : undefined} onClick={() => setScanAsset(a)}>Scan</Button>
                 <button onClick={() => renameAsset(a)} title="Rename" className="p-1 rounded text-text-muted hover:text-accent hover:bg-accent/10">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                 </button>
@@ -790,7 +790,7 @@ export default function TargetDetail() {
         {tabLoading
           ? <div className="py-2"><SkeletonRows rows={8} cols={5} /></div>
           : data.length === 0
-            ? <Empty message={tab === 'cameras' ? 'No cameras/DVRs found by Ingram yet. Run a scan with the Ingram (camera) option enabled.' : 'No data found'} />
+            ? <Empty message={tab === 'cameras' ? 'No legacy camera/DVR results are stored for this project. Network execution is unavailable in this build.' : 'No data found'} />
             : tab === 'cameras'
             ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 p-4">

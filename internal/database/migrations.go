@@ -1,6 +1,7 @@
 package database
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -26,6 +27,7 @@ func RunMigrations(db *DB) error {
 		createVulnFindingsTable,
 		createTasksTable,
 		createTaskLogsTable,
+		createTaskPhasesTable,
 		createScreenshotsTable,
 		createMonitoringChangesTable,
 		createNotificationsTable,
@@ -150,8 +152,130 @@ func RunMigrations(db *DB) error {
 	if err := migrateBrowserlessXSSConfirmations(db); err != nil {
 		return fmt.Errorf("XSS runtime-proof migration failed: %w", err)
 	}
+	if err := migrateTaskPhases(db); err != nil {
+		return fmt.Errorf("task phase ledger migration failed: %w", err)
+	}
 
 	return nil
+}
+
+// migrateTaskPhases gives pre-v3 tasks the same explicit execution ledger as
+// newly-created tasks. Option tokens remain in tasks.modules so resume preserves
+// scan behavior, but they are configuration—not executable phases—and therefore
+// do not get ledger rows or inflate tasks.total.
+type legacyTaskPhaseSource struct {
+	id, status string
+	modules    []string
+	completed  map[string]bool
+}
+
+func migrateTaskPhases(db *DB) error {
+	rows, err := db.Query(`SELECT id,COALESCE(modules,'[]'),COALESCE(completed_modules,'[]'),COALESCE(status,'pending') FROM tasks`)
+	if err != nil {
+		return err
+	}
+	var tasks []legacyTaskPhaseSource
+	for rows.Next() {
+		var task legacyTaskPhaseSource
+		var raw, rawCompleted string
+		if err := rows.Scan(&task.id, &raw, &rawCompleted, &task.status); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := json.Unmarshal([]byte(raw), &task.modules); err != nil {
+			rows.Close()
+			return fmt.Errorf("task %s has malformed modules JSON: %w", task.id, err)
+		}
+		var completed []string
+		if err := json.Unmarshal([]byte(rawCompleted), &completed); err != nil {
+			rows.Close()
+			return fmt.Errorf("task %s has malformed completed_modules JSON: %w", task.id, err)
+		}
+		task.completed = make(map[string]bool, len(completed))
+		for _, module := range completed {
+			task.completed[module] = true
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, task := range tasks {
+		phaseIndex := 0
+		for _, module := range task.modules {
+			if taskPhaseOption(module) {
+				continue
+			}
+			status, reason := legacyTaskPhaseOutcome(task, module)
+			attemptCount := 0
+			if status != "pending" {
+				attemptCount = 1
+			}
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO task_phases(task_id,phase_index,module,status,reason,attempt_count,finished_at)
+				VALUES(?,?,?,?,?,?,CASE WHEN ?='pending' THEN NULL ELSE CURRENT_TIMESTAMP END)`,
+				task.id, phaseIndex, module, status, reason, attemptCount, status); err != nil {
+				return err
+			}
+			phaseIndex++
+		}
+		if _, err := tx.Exec(`UPDATE tasks SET total=?,progress=CASE WHEN status='finished' THEN ? ELSE MIN(progress,?) END WHERE id=?`,
+			phaseIndex, phaseIndex, phaseIndex, task.id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func legacyTaskPhaseOutcome(task legacyTaskPhaseSource, module string) (string, string) {
+	if legacyUnsupportedPhase(module) {
+		return "unsupported", "legacy phase is not supported by the v3 execution contract"
+	}
+	if task.completed[module] {
+		return "completed", ""
+	}
+	switch task.status {
+	case "finished":
+		return "unknown", "legacy task finished without a per-phase completion record"
+	case "failed":
+		return "blocked", "legacy task ended before this phase completed"
+	case "cancelled":
+		return "cancelled", "legacy task was cancelled"
+	case "interrupted":
+		return "blocked", "legacy task was interrupted and requires resume"
+	default:
+		return "pending", ""
+	}
+}
+
+func legacyUnsupportedPhase(module string) bool {
+	switch module {
+	case "dast", "dom_xss", "portscan":
+		return true
+	case "network", "network_brute", "network_backup", "network_nuclei_only",
+		"network_ingram", "network_devices", "network_initial_access",
+		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports":
+		return true
+	default:
+		return strings.HasPrefix(module, "network")
+	}
+}
+
+func taskPhaseOption(module string) bool {
+	switch module {
+	case "speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
+		"asn_discovery", "no_asn_discovery", "single_endpoint":
+		return true
+	default:
+		return false
+	}
 }
 
 // SQLite rejects ALTER TABLE ADD COLUMN when the default is a non-constant
@@ -263,8 +387,8 @@ func migrateParametersRequestIdentity(db *DB) error {
 
 // --- Network scanning (P1) ---
 // A target's kind ∈ web|network. 'network' targets carry an IP/CIDR/range/list
-// scope in `domain` and run the network pipeline (port scan → service discovery
-// → CVE/protocol analysis) instead of the web recon pipeline.
+// scope in `domain`. The tables remain for lossless upgrade/export even though
+// this stability build does not run the retired port/service/CVE executor.
 // exclude_scope holds out-of-scope hosts/IPs/CIDRs/URLs (comma/newline list) that
 // must NOT be scanned even though they fall under the target — the standard
 // bug-bounty "these subdomains/ranges are excluded" case. Enforced at subdomain
@@ -1052,6 +1176,27 @@ CREATE TABLE IF NOT EXISTS task_logs (
 	FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );`
 
+// task_phases is the durable execution truth for every selected capability.
+// A terminal task can no longer imply that all of its phases ran: each row says
+// exactly what happened and carries the reason for non-completion.
+const createTaskPhasesTable = `
+CREATE TABLE IF NOT EXISTS task_phases (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	task_id TEXT NOT NULL,
+	phase_index INTEGER NOT NULL,
+	module TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	reason TEXT DEFAULT '',
+	attempt_count INTEGER DEFAULT 0,
+	duration_ms INTEGER DEFAULT 0,
+	started_at DATETIME,
+	finished_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(task_id, phase_index),
+	FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);`
+
 const createScreenshotsTable = `
 CREATE TABLE IF NOT EXISTS screenshots (
 	id TEXT PRIMARY KEY,
@@ -1400,6 +1545,8 @@ CREATE INDEX IF NOT EXISTS idx_nuclei_findings_severity ON nuclei_findings(sever
 CREATE INDEX IF NOT EXISTS idx_tasks_target ON tasks(target_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_phases_task ON task_phases(task_id, phase_index);
+CREATE INDEX IF NOT EXISTS idx_task_phases_status ON task_phases(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_monitoring_changes_target ON monitoring_changes(target_id);
 CREATE INDEX IF NOT EXISTS idx_vuln_findings_target ON vuln_findings(target_id);

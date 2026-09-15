@@ -634,7 +634,7 @@ func (b *TelegramBot) NotifyScanStarted(taskID, targetID, domain string) {
 }
 
 func (b *TelegramBot) NotifyPhaseFinished(taskID, targetID, domain, phase, status string, duration time.Duration, progress, total int) {
-	icon := map[string]string{"completed": "✅", "failed": "❌", "timed_out": "⏱", "skipped": "⏭", "cancelled": "🛑"}[status]
+	icon := map[string]string{"completed": "✅", "blocked": "🚫", "failed": "❌", "timed_out": "⏱", "skipped": "⏭", "cancelled": "🛑"}[status]
 	if icon == "" {
 		icon = "ℹ️"
 	}

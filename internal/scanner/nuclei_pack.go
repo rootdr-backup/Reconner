@@ -28,7 +28,7 @@ func materializeReconnerTemplates(dataDir string) string {
 		dataDir = os.TempDir()
 	}
 	dir := filepath.Join(dataDir, "nuclei-reconner-pack")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return ""
 	}
 	entries, err := reconnerTemplateFS.ReadDir("nucleitemplates")
@@ -49,7 +49,7 @@ func materializeReconnerTemplates(dataDir string) string {
 			wrote++
 			continue
 		}
-		if os.WriteFile(dst, data, 0o644) == nil {
+		if os.WriteFile(dst, data, 0o600) == nil {
 			wrote++
 		}
 	}
@@ -61,7 +61,7 @@ func materializeReconnerTemplates(dataDir string) string {
 
 // sameFileContent reports whether the file at path already holds exactly data.
 func sameFileContent(path string, data []byte) bool {
-	existing, err := os.ReadFile(path)
+	existing, err := os.ReadFile(path) // #nosec G304 -- path is assembled from the configured data directory and embedded template filename
 	if err != nil {
 		return false
 	}

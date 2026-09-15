@@ -66,11 +66,11 @@ func isMediumPlus(severity string) bool {
 
 func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []string, tags []string, logFn LogFunc) error {
 	if !s.exec.IsToolAvailable("nuclei") {
-		logFn("warn", "nuclei", "nuclei not available, skipping vulnerability scan")
-		return nil
+		logFn("warn", "nuclei", "nuclei is unavailable; this phase cannot provide vulnerability-template coverage")
+		return BlockedPhase("nuclei binary is unavailable")
 	}
 	if strings.TrimSpace(targetID) == "" {
-		return nil // no target → nothing to store (avoids FK failures)
+		return fmt.Errorf("nuclei: target id is required")
 	}
 
 	logFn("info", "nuclei", "Loading targets for nuclei scan...")
@@ -190,7 +190,7 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 
 	// Performance: template concurrency, bulk-size, AND running multiple
 	// nuclei PROCESSES in parallel are the throughput knobs that matter (the
-	// same lever already proven in the network module's nucleiNetwork). The
+	// same bounded-process lever used by the nuclei surface runner). The
 	// config default (Workers.Nuclei) was only 4 → very slow; floor it much
 	// higher than nuclei's own 25 default. Split a large surface across
 	// several concurrent processes instead of one giant single-process run —
@@ -787,7 +787,7 @@ func (s *NucleiScanner) syncExtraTemplates(ctx context.Context, logFn LogFunc) {
 			}
 			continue
 		}
-		if err := os.MkdirAll(s.cfg.NucleiTemplates, 0o755); err != nil {
+		if err := os.MkdirAll(s.cfg.NucleiTemplates, 0o750); err != nil {
 			continue
 		}
 		if _, err := s.exec.Run(sctx, "git", "clone", "--depth", "1", repoURL, dir); err != nil {

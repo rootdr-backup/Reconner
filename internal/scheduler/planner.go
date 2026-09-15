@@ -142,9 +142,10 @@ var moduleRequires = map[string][]string{
 	ModuleTakeover: capCoreWeb,
 }
 
-// passthroughModule reports whether a token must be preserved verbatim and never
-// trigger web-capability planning: the per-scan speed tokens and the entire
-// network pipeline (which has its own dependency chain in executeTask).
+// passthroughModule reports whether a legacy/configuration token must be
+// preserved verbatim and never trigger web-capability planning. Network tokens
+// are retained here for deterministic interpretation of old rows, but new task
+// admission rejects them because this build has no network executor.
 func passthroughModule(m string) bool {
 	switch m {
 	case "speed_slow", "speed_normal", "speed_fast",

@@ -104,6 +104,25 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   const idorSelected = planned.has('idor')
   const idorReady = !idorSelected || idCount >= 2 || (idorA.trim() !== '' && idorB.trim() !== '')
 
+  const legacyNetworkScope = asset
+    ? asset.kind === 'network' || asset.kind === 'mixed'
+    : target.kind === 'network' || target.kind === 'mixed'
+  if (legacyNetworkScope) {
+    return (
+      <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="md">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-severity-high/35 bg-severity-high/[.07] p-4">
+            <p className="text-sm font-semibold text-severity-high">Network execution is unavailable in this build</p>
+            <p className="mt-2 text-xs leading-5 text-text-secondary">
+              This legacy project is kept for viewing and export, but Reconner will not create a successful-looking scan that performs no network work. Scan an individual web asset instead; network discovery will return only when it has a tested executor and phase coverage.
+            </p>
+          </div>
+          <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>Close</Button></div>
+        </div>
+      </Modal>
+    )
+  }
+
   // Every toggle used to persist silently across modal opens (same component
   // instance, `open` only controls visibility) — start each fresh "start
   // scan" attempt from a clean slate instead of whatever was left checked

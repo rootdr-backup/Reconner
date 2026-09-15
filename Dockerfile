@@ -8,21 +8,21 @@
 # every one of them is built or downloaded HERE, at image-build time, and
 # copied into a slim runtime. No tool is ever installed at container startup.
 #
-# Stages (produce exactly the 30 required external commands, audited against
+# Stages (produce exactly the 23 required external commands, audited against
 # internal/scheduler/scheduler.go's expectedTools + internal/api/tool_install.go,
-# PLUS headless Chromium as a 31st runtime dependency the app also shells out to):
+# plus headless Chromium and git as runtime dependencies):
 #   1. frontend   — React/Vite dashboard                       → frontend/dist
-#   2. gotools    — 20 Go-based recon tools                    → /out/*
+#   2. gotools    — 15 pinned Go-based recon tools             → /out/*
 #   3. massdns    — massdns (1) compiled from source            → /out/massdns
 #   4. external   — feroxbuster + findomain (2) official releases → /out/*
 #   5. pytools    — dirsearch/uro/waymore (3) in a self-contained venv → /opt/venv
 #   6. backend    — Reconner Go binary (CGO + embedded SQLite)  → /out/reconner
-#   7. runtime    — slim Debian + hydra/sqlmap/nmap/python3 (4, via apt) +
+#   7. runtime    — slim Debian + sqlmap/python3 (2, via apt) +
 #                   Chromium + every tool above, finished with a hard
 #                   build-time verification of the PATH.
-#                   20 (Go) + 1 (massdns) + 2 (releases) + 3 (venv) + 4 (apt)
-#                   = 30 required tools. Chromium AND git are bundled in
-#                   addition to, not counted within, that 30 — git specifically
+#                   15 (Go) + 1 (massdns) + 2 (releases) + 3 (venv) + 2 (apt)
+#                   = 23 required tools. Chromium and git are bundled in
+#                   addition to, not counted within those 23 — git specifically
 #                   because internal/scanner/nuclei.go gates its own official-
 #                   template auto-provisioning on `IsToolAvailable("git")`;
 #                   without it nuclei silently loses the official/fuzzing
@@ -40,7 +40,7 @@
 #
 # All stages that produce binaries linked against system libraries (gotools,
 # massdns, backend) and the runtime itself share the SAME base OS
-# (debian:bookworm) so glibc/libpcap/openssl versions match exactly — this is
+# (debian:bookworm) so glibc/openssl versions match exactly — this is
 # what the earlier `stdint.h` / interpreter-mismatch class of bugs came from.
 #
 # Build context is the repository ROOT (the folder with go.mod, cmd/,
@@ -48,8 +48,8 @@
 # docker-compose.yml and README.md.
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG GO_VERSION=1.26-bookworm
-ARG NODE_VERSION=20-bookworm
+ARG GO_VERSION=1.26.8-bookworm
+ARG NODE_VERSION=24.21.0-bookworm
 ARG DEBIAN_VERSION=bookworm-slim
 ARG VERSION=dev
 ARG VCS_REF=unknown
@@ -69,102 +69,72 @@ RUN npm run build
 # copied into the runtime image — nothing is ever `go install`-ed on the host
 # or at container start.
 #
-# VERSIONING: each tool gets its own ARG_*_VERSION build-arg (default
-# "latest"). True pin-to-exact-tag reproducibility requires knowing each
-# project's current release tag at the moment this file is written, and these
-# ~20 independent repositories tag at very different, fast-moving cadences —
-# hardcoding a snapshot of "current" tags here would go stale immediately and
-# is more likely to silently break the build (wrong/removed tag) than @latest
-# ever was. Instead every tool is independently pinnable without touching this
-# file, e.g. to freeze nuclei:
-#   docker compose build --build-arg NUCLEI_VERSION=v3.3.5
-# Each tool also builds in its OWN layer (not one giant RUN), so a version
-# bump — or a transient network blip on one module — only invalidates that
-# tool's cache layer, never the other 19.
+# Every tool is pinned to an immutable release (or pseudo-version) so a rebuild
+# cannot silently change scanner behavior. Each remains independently
+# overridable as a build arg for deliberate upgrades.
 FROM golang:${GO_VERSION} AS gotools
 ENV GOFLAGS=-buildvcs=false \
     GOBIN=/out \
     CGO_ENABLED=1 \
     GOTOOLCHAIN=auto
-# naabu links libpcap at build time (cgo) for SYN scanning; gcc ships in the
-# golang image. libpcap0.8 is installed in the runtime stage for it to link at
-# run time.
-RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev \
- && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /out
 
-ARG SUBFINDER_VERSION=latest
+ARG SUBFINDER_VERSION=v2.16.0
 RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@${SUBFINDER_VERSION}
 
-ARG HTTPX_VERSION=latest
+ARG HTTPX_VERSION=v1.12.0
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}
 
-ARG NUCLEI_VERSION=latest
+ARG NUCLEI_VERSION=v3.11.1
 RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}
 
-ARG KATANA_VERSION=latest
+ARG KATANA_VERSION=v1.7.0
 RUN go install github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}
 
-ARG NAABU_VERSION=latest
-RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@${NAABU_VERSION}
-
-ARG DNSX_VERSION=latest
+ARG DNSX_VERSION=v1.3.1
 RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}
 
-ARG ALTERX_VERSION=latest
+ARG ALTERX_VERSION=v0.1.0
 RUN go install github.com/projectdiscovery/alterx/cmd/alterx@${ALTERX_VERSION}
 
-ARG ASNMAP_VERSION=latest
+ARG ASNMAP_VERSION=v1.1.1
 RUN go install github.com/projectdiscovery/asnmap/cmd/asnmap@${ASNMAP_VERSION}
 
-ARG UNCOVER_VERSION=latest
-RUN go install github.com/projectdiscovery/uncover/cmd/uncover@${UNCOVER_VERSION}
-
-ARG SHUFFLEDNS_VERSION=latest
+ARG SHUFFLEDNS_VERSION=v1.2.1
 RUN go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@${SHUFFLEDNS_VERSION}
 
-ARG GAU_VERSION=latest
+ARG GAU_VERSION=v2.2.4
 RUN go install github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}
 
-ARG WAYBACKURLS_VERSION=latest
+ARG WAYBACKURLS_VERSION=v0.1.0
 RUN go install github.com/tomnomnom/waybackurls@${WAYBACKURLS_VERSION}
 
-ARG ASSETFINDER_VERSION=latest
+ARG ASSETFINDER_VERSION=v0.1.1
 RUN go install github.com/tomnomnom/assetfinder@${ASSETFINDER_VERSION}
 
-ARG QSREPLACE_VERSION=latest
-RUN go install github.com/tomnomnom/qsreplace@${QSREPLACE_VERSION}
-
-ARG HAKRAWLER_VERSION=latest
+ARG HAKRAWLER_VERSION=v0.0.0-20260805040537-52a16fe61bd1
 RUN go install github.com/hakluke/hakrawler@${HAKRAWLER_VERSION}
 
-ARG DALFOX_VERSION=latest
-RUN go install github.com/hahwul/dalfox/v2@${DALFOX_VERSION}
-
-ARG SUBZY_VERSION=latest
+ARG SUBZY_VERSION=v1.2.1
 RUN go install github.com/PentestPad/subzy@${SUBZY_VERSION}
 
-ARG GOWITNESS_VERSION=latest
-RUN go install github.com/sensepost/gowitness@${GOWITNESS_VERSION}
-
-ARG PUREDNS_VERSION=latest
+ARG PUREDNS_VERSION=v2.1.1
 RUN go install github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}
 
-ARG SCILLA_VERSION=latest
+ARG SCILLA_VERSION=v1.3.4
 RUN go install github.com/edoardottt/scilla/cmd/scilla@${SCILLA_VERSION}
 
 # Sanity check: every binary we expect actually landed in /out. Fails loud and
 # early instead of silently shipping a partial tool-chain.
 RUN set -eu; \
-    for t in subfinder httpx nuclei katana naabu dnsx alterx asnmap uncover \
-             shuffledns gau waybackurls assetfinder qsreplace hakrawler \
-             dalfox subzy gowitness puredns scilla; do \
+    for t in subfinder httpx nuclei katana dnsx alterx asnmap shuffledns gau \
+             waybackurls assetfinder hakrawler subzy puredns scilla; do \
       if [ ! -x "/out/$t" ]; then \
         echo "BUILD FAILURE: /out/$t was not produced by go install" >&2; \
         exit 1; \
       fi; \
     done; \
-    echo "gotools: all 20 Go binaries present in /out"
+    echo "gotools: all 15 pinned Go binaries present in /out"
 
 # ── stage 3: massdns (built from source — not packaged for Debian bookworm) ──
 # Root cause of the earlier `fatal error: stdint.h: No such file or directory`:
@@ -180,14 +150,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-# MASSDNS_REF defaults to the default branch tip: upstream does not cut
-# frequent tagged releases, so "master" is the commonly-installed reference.
-# For a fully frozen build, pin an exact commit SHA or tag:
-#   docker compose build --build-arg MASSDNS_REF=<commit-sha>
-ARG MASSDNS_REF=master
+# Upstream tags infrequently; pin the audited commit instead of a moving branch.
+ARG MASSDNS_REF=6bfa47197d78e68b79041d494e280174cb2d6ae1
 RUN git clone https://github.com/blechschmidt/massdns.git /build/massdns \
  && cd /build/massdns \
- && if [ "${MASSDNS_REF}" != "master" ]; then git checkout "${MASSDNS_REF}"; fi \
+ && git checkout --detach "${MASSDNS_REF}" \
  && make
 RUN mkdir -p /out \
  && cp /build/massdns/bin/massdns /out/massdns \
@@ -212,14 +179,15 @@ ARG FINDOMAIN_VERSION=10.0.1
 
 RUN set -eu; \
     case "${TARGETARCH}" in \
-      amd64) FEROX_ASSET="x86_64-linux-feroxbuster.zip"; FINDOMAIN_ASSET="findomain-linux.zip"; ARCH_TAG="x86-64" ;; \
-      arm64) FEROX_ASSET="aarch64-linux-feroxbuster.zip"; FINDOMAIN_ASSET="findomain-aarch64.zip"; ARCH_TAG="aarch64" ;; \
+      amd64) FEROX_ASSET="x86_64-linux-feroxbuster.zip"; FEROX_SHA="0978619a10049ccaad290b2d1241bc4d8a6aac18da07d6231186fb9d343f99de"; FINDOMAIN_ASSET="findomain-linux.zip"; FINDOMAIN_SHA="7a1b90aaf291868e0fb2d643cefa238caddb7aa932b2355f0e0ce8b47a4b5083"; ARCH_TAG="x86-64" ;; \
+      arm64) FEROX_ASSET="aarch64-linux-feroxbuster.zip"; FEROX_SHA="1e5244e1f52e55a647b65e0c76ae7afe0b9983c1fbea30ed7c67e477175eb381"; FINDOMAIN_ASSET="findomain-aarch64.zip"; FINDOMAIN_SHA="780056cba200722f49628bf89b5cd42f3927e694bd383af679d72cf96efc1621"; ARCH_TAG="aarch64" ;; \
       *) echo "BUILD FAILURE: unsupported TARGETARCH '${TARGETARCH}' — only amd64 and arm64 are supported" >&2; exit 1 ;; \
     esac; \
     \
     echo "==> feroxbuster ${FEROXBUSTER_VERSION} (${FEROX_ASSET})"; \
     curl -fsSL -o /tmp/ferox.zip \
       "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/${FEROX_ASSET}"; \
+    echo "${FEROX_SHA}  /tmp/ferox.zip" | sha256sum -c -; \
     mkdir -p /tmp/ferox_x && unzip -q -o /tmp/ferox.zip -d /tmp/ferox_x; \
     find /tmp/ferox_x -type f -iname '*feroxbuster*' -exec mv {} /out/feroxbuster \; ; \
     chmod +x /out/feroxbuster; \
@@ -229,6 +197,7 @@ RUN set -eu; \
     echo "==> findomain ${FINDOMAIN_VERSION} (${FINDOMAIN_ASSET})"; \
     curl -fsSL -o /tmp/findomain.zip \
       "https://github.com/Findomain/Findomain/releases/download/${FINDOMAIN_VERSION}/${FINDOMAIN_ASSET}"; \
+    echo "${FINDOMAIN_SHA}  /tmp/findomain.zip" | sha256sum -c -; \
     mkdir -p /tmp/findomain_x && unzip -q -o /tmp/findomain.zip -d /tmp/findomain_x; \
     find /tmp/findomain_x -type f -iname '*findomain*' -exec mv {} /out/findomain \; ; \
     chmod +x /out/findomain; \
@@ -254,8 +223,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv --copies /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir dirsearch uro waymore
+RUN pip install --no-cache-dir --upgrade pip==26.2.1 \
+ && pip install --no-cache-dir dirsearch==0.5.0 uro==1.0.2 waymore==8.9
 # The user never needs pip or network access after the container starts: this
 # venv is fully self-contained and is copied verbatim into runtime.
 RUN /opt/venv/bin/python3 -c "import sys; print(sys.version)" \
@@ -295,7 +264,7 @@ ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.title="Reconner" \
-      org.opencontainers.image.description="Self-hosted web + network recon and DAST watchtower, with the complete bundled tool-chain and headless Chromium — nothing to install on the host." \
+      org.opencontainers.image.description="Self-hosted web recon and DAST watchtower with a pinned tool-chain and headless Chromium." \
       org.opencontainers.image.source="https://github.com/rootdr-backup/Reconner" \
       org.opencontainers.image.url="https://github.com/rootdr-backup/Reconner" \
       org.opencontainers.image.licenses="MIT" \
@@ -306,12 +275,9 @@ LABEL org.opencontainers.image.title="Reconner" \
 # Runtime OS packages — kept to what the app and bundled tool-chain actually
 # need at RUN time (no compilers, no -dev headers, no npm/node/go/cargo/pip):
 #   ca-certificates  TLS trust store for every HTTP-speaking tool
-#   chromium         headless-browser XSS/DOM execution proof + gowitness/katana rendering
-#   nmap             network port/service scanning
-#   libpcap0.8       naabu's SYN-scan runtime dependency (built against it in gotools)
-#   hydra            SSH/SMB/RDP/VNC credential brute-force (opt-in, scope-guarded by the app)
+#   chromium         headless-browser XSS/DOM execution proof and rendered crawling
 #   sqlmap           active SQLi confirmation pass (opt-in, off by default)
-#   python3          runs the pytools venv (dirsearch/uro/waymore) AND the Ingram camera scanner
+#   python3          runs the pytools venv (dirsearch/uro/waymore)
 #   git              REQUIRED at runtime, not just at build time: internal/scanner/nuclei.go
 #                    checks `IsToolAvailable("git")` before cloning the official nuclei-templates
 #                    + fuzzing-templates sets into <DataDir>/nuclei-templates on first scan. Without
@@ -326,9 +292,6 @@ LABEL org.opencontainers.image.title="Reconner" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       chromium \
-      nmap \
-      libpcap0.8 \
-      hydra \
       sqlmap \
       python3 \
       git \
@@ -381,14 +344,13 @@ ENV RECON_CONFIG=/data/config.json \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN set -eu; \
-    echo "==> verifying all 30 required tools, plus Chromium and git, are on PATH"; \
+    echo "==> verifying all 23 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
-      subfinder httpx nuclei katana naabu dnsx alterx asnmap uncover \
-      gau waybackurls assetfinder qsreplace dalfox subzy \
-      gowitness hakrawler puredns scilla shuffledns \
-      dirsearch feroxbuster findomain hydra sqlmap uro waymore \
-      massdns nmap python3 \
+      subfinder httpx nuclei katana dnsx alterx asnmap shuffledns \
+      gau waybackurls assetfinder hakrawler subzy puredns scilla \
+      dirsearch feroxbuster findomain sqlmap uro waymore \
+      massdns python3 \
       chromium git \
     ; do \
       if ! command -v "$t" >/dev/null 2>&1; then \
@@ -403,7 +365,6 @@ RUN set -eu; \
     \
     echo "==> executing representative tools to prove they actually run"; \
     python3 --version; \
-    nmap --version | head -1; \
     massdns 2>&1 | head -1 || true; \
     feroxbuster --version; \
     findomain --version; \
@@ -412,19 +373,14 @@ RUN set -eu; \
     httpx -version; \
     subfinder -version; \
     katana -version; \
-    naabu -version; \
     dnsx -version; \
     dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \
     /opt/venv/bin/python3 -m dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not importable via its own venv python3" >&2; exit 1; }; \
     echo "==> tool-chain verification passed"
 
-# Runs as root ON PURPOSE: naabu/nmap SYN scans need raw sockets (CAP_NET_RAW)
-# and the tool-chain spawns privileged probes — the same posture as the shell
-# installer. Isolation is the container boundary + the explicitly granted
-# capabilities in docker-compose.yml (cap_add: NET_RAW, NET_ADMIN), not a
-# non-root uid. Keep the container on a trusted host/network; do not remove
-# those two capabilities unless you only ever run web/DAST scans (no
-# port/service scanning).
+# The runtime receives no extra Linux capabilities. Network/CIDR targets are
+# rejected by this build, so advertising raw-socket scanning or granting
+# NET_RAW/NET_ADMIN would be both misleading and an unnecessary attack surface.
 
 WORKDIR /opt/reconner
 # Persist the database, config, screenshots, wordlists and nuclei templates.

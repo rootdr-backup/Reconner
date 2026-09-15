@@ -337,6 +337,21 @@ export interface TaskLog {
   created_at: string
 }
 
+export interface TaskPhase {
+  id: number
+  task_id: string
+  phase_index: number
+  module: string
+  status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed' | 'timed_out' | 'cancelled' | 'blocked' | 'unsupported' | 'unknown' | string
+  reason: string
+  attempt_count: number
+  duration_ms: number
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface DashboardStats {
   targets: number
   alive_hosts: number

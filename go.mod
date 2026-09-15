@@ -1,6 +1,8 @@
 module github.com/recon-platform
 
-go 1.25.0
+go 1.25.14
+
+toolchain go1.26.8
 
 require (
 	github.com/chromedp/cdproto v0.0.0-20250403032234-65de8f5d025b

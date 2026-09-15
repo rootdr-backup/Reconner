@@ -123,7 +123,7 @@ func ctFamily(ct string) string {
 // soft404Baseline probes a couple of random paths and, if the host returns 200
 // for them, records that as the catch-all baseline. Package-level (not a
 // DirScanner method) because it touches no DirScanner state — shared with
-// NetworkScanner.RunBackupDiscovery (network_backup.go).
+// Historical network-result rows use the same finding shape.
 func soft404Baseline(ctx context.Context, base string) soft404 {
 	probes := []string{"/x9k2j7q1zNope404check", "/this_should_not_exist_" + uuid.New().String()[:8]}
 	out := soft404{}
@@ -640,8 +640,8 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 // scanBackupCandidates is the shared backup/config-file discovery core: soft-404
 // baselining, magic-byte confirmation, HTML/catch-all rejection, DB write, and
 // the high-severity vuln_findings promotion for a confirmed archive/dump. Used
-// by BOTH the web backup_discovery module above and NetworkScanner's own
-// backup phase (network_backup.go) — a network target's discovered web
+// by the web backup_discovery module. Legacy network-result rows may also refer
+// to this classification — a historical network target's discovered web
 // endpoints never flowed through this at all before (they live in
 // network_services, not http_services, so RunBackupDiscovery above never saw
 // them), which is the gap this shared extraction closes.

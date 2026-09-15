@@ -1,0 +1,251 @@
+name: quality-gates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Dependency, source and secret security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Reject reachable Go vulnerabilities
+        uses: golang/govulncheck-action@v1
+        with:
+          repo-checkout: false
+          go-version-file: go.mod
+          go-package: ./...
+      - name: Reject medium-or-higher source vulnerabilities
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -severity medium -confidence medium ./...
+      - name: Reject vulnerable dependencies, committed secrets and misconfiguration
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: table
+
+  backend:
+    name: Go tests, vet and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify formatting and modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l $(find cmd internal pkg -name '*.go' -type f))"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files need gofmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+          go mod verify
+          cp go.mod /tmp/go.mod.before
+          cp go.sum /tmp/go.sum.before
+          go mod tidy
+          cmp -s go.mod /tmp/go.mod.before
+          cmp -s go.sum /tmp/go.sum.before
+      - name: Test with coverage
+        run: go test ./... -covermode=atomic -coverprofile=coverage.out
+      - name: Enforce aggregate coverage floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          awk -v total="$total" 'BEGIN { if (total + 0 < 46.5) { printf "coverage %.1f%% is below the v2.5 baseline floor (46.5%%)\n", total; exit 1 } }'
+      - name: Vet
+        run: go vet ./...
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: go-coverage
+          path: coverage.out
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Exercise concurrent state and scanner paths
+        run: >-
+          go test -race
+          ./internal/scanner
+          ./internal/api
+          ./internal/scheduler
+          ./internal/database
+          ./internal/capture
+          ./internal/browser
+          ./internal/secret
+          ./internal/tools
+
+  detection-benchmarks:
+    name: Zero-FP/FN deterministic benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Tier A and Tier B matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/scanner -run 'Test(BenchmarkLab|BenchmarkE2E|DetectionBenchmark|RealReconPipeline|RealReconPipelineCORS)$' -count=1 -json | tee detection-benchmarks.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: detection-benchmarks
+          path: detection-benchmarks.json
+
+  migrations:
+    name: Migration and persistence contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./internal/database -run 'Migration|Migrations' -count=3
+
+  frontend:
+    name: Frontend tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm audit
+      - run: npm run test:coverage
+      - run: npm run build
+      - name: Enforce production bundle budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          bytes="$(du -sk dist | awk '{print $1}')"
+          if [[ "$bytes" -gt 560 ]]; then
+            echo "frontend dist is ${bytes}KB; v3 budget is 560KB" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: frontend-dist
+          path: |
+            frontend/dist
+            frontend/coverage/coverage-summary.json
+
+  browser-e2e:
+    name: Production browser workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run test:e2e -- --repeat-each=2
+        working-directory: frontend
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: browser-e2e-failure
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+
+  release-smoke:
+    name: Release metadata and service smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify version identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          frontend_version="$(node -p "require('./frontend/package.json').version")"
+          [[ "$version" == "$frontend_version" ]]
+      - name: Build the production application
+        run: make build
+      - name: Run public health and authenticated API smoke contracts
+        run: go test ./internal/api -run 'Test(HealthRouteIsPublicAndDockerCompatible|TargetManagement|UserIsolation|Telegram)' -count=1
+
+  gate:
+    name: Required quality gate
+    if: always()
+    needs: [security, backend, race, detection-benchmarks, migrations, frontend, browser-e2e, release-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse partial or failed quality runs
+        env:
+          SECURITY: ${{ needs.security.result }}
+          BACKEND: ${{ needs.backend.result }}
+          RACE: ${{ needs.race.result }}
+          BENCHMARKS: ${{ needs.detection-benchmarks.result }}
+          MIGRATIONS: ${{ needs.migrations.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          BROWSER_E2E: ${{ needs.browser-e2e.result }}
+          SMOKE: ${{ needs.release-smoke.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for result in "$SECURITY" "$BACKEND" "$RACE" "$BENCHMARKS" "$MIGRATIONS" "$FRONTEND" "$BROWSER_E2E" "$SMOKE"; do
+            [[ "$result" == "success" ]] || exit 1
+          done

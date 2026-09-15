@@ -329,6 +329,9 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	if !h.requireTaskAccess(w, r, id) {
+		return
+	}
 
 	var t models.Task
 	var startedAt, finishedAt *string
@@ -397,6 +400,9 @@ func (h *Handler) handleUpdateNucleiTemplates(w http.ResponseWriter, r *http.Req
 
 func (h *Handler) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	if !h.requireTaskAccess(w, r, id) {
+		return
+	}
 	if err := h.sched.CancelTask(id); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to cancel task")
 		return
@@ -410,6 +416,9 @@ func (h *Handler) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 // start over from zero."
 func (h *Handler) handleResumeTask(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	if !h.requireTaskAccess(w, r, id) {
+		return
+	}
 	newTask, err := h.sched.ResumeTask(id)
 	if err != nil {
 		if errors.Is(err, scheduler.ErrNothingToResume) {
@@ -424,6 +433,9 @@ func (h *Handler) handleResumeTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	if !h.requireTaskAccess(w, r, id) {
+		return
+	}
 	since := r.URL.Query().Get("since")
 	level := r.URL.Query().Get("level")
 
@@ -466,6 +478,74 @@ func (h *Handler) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeSuccess(w, logs)
+}
+
+func (h *Handler) handleGetTaskPhases(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if !h.requireTaskAccess(w, r, id) {
+		return
+	}
+	rows, err := h.db.QueryContext(r.Context(), `SELECT id,task_id,phase_index,module,status,
+		COALESCE(reason,''),COALESCE(attempt_count,0),COALESCE(duration_ms,0),
+		started_at,finished_at,created_at,updated_at
+		FROM task_phases WHERE task_id=? ORDER BY phase_index`, id)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to query task phases")
+		return
+	}
+	defer rows.Close()
+	phases := make([]models.TaskPhase, 0)
+	for rows.Next() {
+		var phase models.TaskPhase
+		var startedAt, finishedAt *string
+		if err := rows.Scan(&phase.ID, &phase.TaskID, &phase.PhaseIndex, &phase.Module, &phase.Status,
+			&phase.Reason, &phase.AttemptCount, &phase.DurationMS, &startedAt, &finishedAt,
+			&phase.CreatedAt, &phase.UpdatedAt); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "failed to decode task phases")
+			return
+		}
+		phase.StartedAt = parseSQLiteTime(startedAt)
+		phase.FinishedAt = parseSQLiteTime(finishedAt)
+		phases = append(phases, phase)
+	}
+	if err := rows.Err(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to read task phases")
+		return
+	}
+	h.writeSuccess(w, phases)
+}
+
+func parseSQLiteTime(raw *string) *time.Time {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, *raw); err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+// requireTaskAccess applies the same owner/admin isolation as target routes,
+// using the task's joined target instead of mistaking /tasks/{id}'s id for a
+// target id. This protects task details, logs, phases and all task mutations.
+func (h *Handler) requireTaskAccess(w http.ResponseWriter, r *http.Request, taskID string) bool {
+	uid, isAdmin := h.callerScope(r)
+	if isAdmin {
+		return true
+	}
+	var ownerID int64
+	if err := h.db.QueryRowContext(r.Context(), `SELECT tgt.owner_id FROM tasks t
+		JOIN targets tgt ON tgt.id=t.target_id WHERE t.id=?`, taskID).Scan(&ownerID); err != nil {
+		h.writeError(w, http.StatusNotFound, "task not found")
+		return false
+	}
+	if ownerID != uid {
+		h.writeError(w, http.StatusForbidden, "you do not have access to this task")
+		return false
+	}
+	return true
 }
 
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {

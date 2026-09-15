@@ -99,11 +99,13 @@ func TestTelegramOutboxFansOutAndHonorsPerChatPreferences(t *testing.T) {
 
 	bot.NotifyNewVuln("finding-1", "target-1", "example.com", "sqli", "medium", "https://example.com/?id=1", "id")
 	bot.NotifyPhaseFinished("task-1", "target-1", "example.com", "sqli", "completed", 0, 3, 5)
+	bot.NotifyPhaseFinished("task-1", "target-1", "example.com", "origin_ip", "blocked", 0, 4, 5)
+	bot.NotifyPhaseFinished("task-1", "target-1", "example.com", "nuclei", "skipped", 0, 5, 5)
 
 	var findingRows, phaseRows int
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM telegram_outbox WHERE category='finding'`).Scan(&findingRows)
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM telegram_outbox WHERE category='phase_finished'`).Scan(&phaseRows)
-	if findingRows != 1 || phaseRows != 2 {
+	if findingRows != 1 || phaseRows != 6 {
 		t.Fatalf("preference fanout wrong: findings=%d phases=%d", findingRows, phaseRows)
 	}
 	// Exact-once per chat/event: replaying the same callbacks cannot duplicate.
@@ -111,8 +113,14 @@ func TestTelegramOutboxFansOutAndHonorsPerChatPreferences(t *testing.T) {
 	bot.NotifyPhaseFinished("task-1", "target-1", "example.com", "sqli", "completed", 0, 3, 5)
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM telegram_outbox WHERE category='finding'`).Scan(&findingRows)
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM telegram_outbox WHERE category='phase_finished'`).Scan(&phaseRows)
-	if findingRows != 1 || phaseRows != 2 {
+	if findingRows != 1 || phaseRows != 6 {
 		t.Fatalf("outbox dedup failed: findings=%d phases=%d", findingRows, phaseRows)
+	}
+	var blockedMessage, skippedMessage string
+	_ = h.db.QueryRow(`SELECT message FROM telegram_outbox WHERE event_key='scan:phase:task-1:origin_ip:blocked' LIMIT 1`).Scan(&blockedMessage)
+	_ = h.db.QueryRow(`SELECT message FROM telegram_outbox WHERE event_key='scan:phase:task-1:nuclei:skipped' LIMIT 1`).Scan(&skippedMessage)
+	if !strings.Contains(blockedMessage, "🚫 Scan phase blocked") || !strings.Contains(skippedMessage, "⏭ Scan phase skipped") {
+		t.Fatalf("terminal phase notifications lost status: blocked=%q skipped=%q", blockedMessage, skippedMessage)
 	}
 	_, _ = h.db.Exec(`UPDATE telegram_config SET enabled=0 WHERE id=1`)
 	bot.NotifyNewVuln("finding-while-disabled", "target-1", "example.com", "xss", "high", "https://example.com/x", "q")
@@ -176,6 +184,77 @@ func TestTelegramAdminCanCreateAndEditTarget(t *testing.T) {
 	}
 	if updated.Name != "Renamed" || updated.Priority != "high" {
 		t.Fatalf("target edit did not persist: %+v", updated)
+	}
+}
+
+func TestTelegramTargetManagementRejectsUnsupportedNetworkScopes(t *testing.T) {
+	h, _ := newIsoHandler(t)
+	h.cfg = &config.Config{SessionSecret: "test"}
+	bot := NewTelegramBot(h)
+	ctx := context.Background()
+
+	for _, scope := range []string{"10.0.0.0/24", "example.com,10.0.0.1"} {
+		if _, err := bot.createTelegramTarget(ctx, scope, "unsupported"); err == nil || !strings.Contains(err.Error(), "network/CIDR") {
+			t.Fatalf("create scope %q error=%v, want explicit network rejection", scope, err)
+		}
+	}
+	var count int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM targets`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("unsupported Telegram create persisted %d target(s)", count)
+	}
+
+	target, err := bot.createTelegramTarget(ctx, "example.org", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.editTelegramTarget(ctx, target, []string{"name=must-not-commit", "scope=192.0.2.0/24"}); err == nil || !strings.Contains(err.Error(), "network/CIDR") {
+		t.Fatalf("network edit error=%v, want explicit rejection", err)
+	}
+	unchanged, err := bot.resolveTelegramTarget(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Domain != "example.org" || unchanged.Name != "web" || unchanged.Kind != "web" {
+		t.Fatalf("rejected edit was not atomic: %+v", unchanged)
+	}
+
+	if _, err := bot.startTelegramScan(ctx, telegramTarget{Kind: "network"}, "deep"); err == nil || !strings.Contains(err.Error(), "network/CIDR") {
+		t.Fatalf("legacy network scan error=%v, want explicit rejection", err)
+	}
+}
+
+func TestTelegramViewerCannotMutateAndSkipPhaseAliasIsAudited(t *testing.T) {
+	h, _ := newIsoHandler(t)
+	bot := NewTelegramBot(h)
+	var messages []map[string]any
+	server := telegramAPIMock(t, &messages)
+	defer server.Close()
+	bot.apiBase = server.URL
+	ctx := context.Background()
+
+	bot.handleCommand(ctx, "token", TelegramChat{ChatID: "1001", Role: "viewer"}, "/addtarget example.org | denied")
+	bot.handleCommand(ctx, "token", TelegramChat{ChatID: "1001", Role: "viewer"}, "/scan example.org")
+	var targets, tasks int
+	_ = h.db.QueryRow(`SELECT COUNT(*) FROM targets`).Scan(&targets)
+	_ = h.db.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&tasks)
+	if targets != 0 || tasks != 0 {
+		t.Fatalf("viewer mutation escaped RBAC: targets=%d tasks=%d", targets, tasks)
+	}
+
+	target, err := bot.createTelegramTarget(ctx, "example.org", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot.handleCommand(ctx, "token", TelegramChat{ChatID: "2002", Role: "operator"}, "/skipphase "+target.ID)
+	var action, status string
+	if err := h.db.QueryRow(`SELECT action,status FROM telegram_audit_log WHERE chat_id='2002' ORDER BY created_at DESC LIMIT 1`).Scan(&action, &status); err != nil {
+		t.Fatal(err)
+	}
+	if action != "scan_skip" || status != "failed" {
+		t.Fatalf("skipphase alias audit=(%q,%q), want (scan_skip,failed)", action, status)
 	}
 }
 

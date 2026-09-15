@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -156,8 +157,5 @@ func validDNSPrefix(prefix string) bool {
 }
 
 func itoaSmall(n int) string {
-	if n == 10 {
-		return "10"
-	}
-	return string(rune('0' + n))
+	return strconv.Itoa(n)
 }

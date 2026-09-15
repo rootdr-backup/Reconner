@@ -9,6 +9,18 @@ import (
 
 const bytesPerMiB = 1024 * 1024
 
+func uint64MiBToInt(bytes uint64, roundUp bool) int {
+	value := bytes / bytesPerMiB
+	if roundUp && bytes%bytesPerMiB != 0 {
+		value++
+	}
+	maxInt := uint64(^uint(0) >> 1)
+	if value > maxInt {
+		return int(maxInt)
+	}
+	return int(value)
+}
+
 type cgroupMemoryFiles struct {
 	limit string
 	used  string
@@ -50,8 +62,8 @@ func readCgroupMemoryStats(readFile func(string) ([]byte, error)) (usedMB, limit
 		}
 		// Round the limit up so a sub-MiB remainder is not silently discarded;
 		// usage is a measurement and can be rounded down.
-		limitMB = int((limitBytes + bytesPerMiB - 1) / bytesPerMiB)
-		usedMB = int(usedBytes / bytesPerMiB)
+		limitMB = uint64MiBToInt(limitBytes, true)
+		usedMB = uint64MiBToInt(usedBytes, false)
 		return usedMB, limitMB, limitMB > 0
 	}
 	return 0, 0, false

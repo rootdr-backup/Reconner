@@ -5,15 +5,28 @@ import { Badge, Button, Spinner, Empty } from '../components/ui'
 import { LiveLogs } from '../components/tasks/LiveLogs'
 import { useUIStore } from '../store/ui'
 import { timeAgo, cn } from '../lib/utils'
-import type { Task } from '../types'
+import type { Task, TaskPhase } from '../types'
 
 const dot: Record<string,string> = { running:'bg-accent animate-pulse', finished:'bg-severity-low', failed:'bg-severity-critical', pending:'bg-text-muted', cancelled:'bg-border-strong' }
 const tc: Record<string,string> = { running:'text-accent', finished:'text-severity-low', failed:'text-severity-critical', pending:'text-text-muted', cancelled:'text-text-muted' }
+const phaseTone: Record<string,string> = {
+  running: 'border-accent/40 bg-accent/10 text-accent',
+  completed: 'border-severity-low/30 bg-severity-low/10 text-severity-low',
+  skipped: 'border-series-3/30 bg-series-3/10 text-series-3',
+  failed: 'border-severity-critical/30 bg-severity-critical/10 text-severity-critical',
+  timed_out: 'border-severity-critical/30 bg-severity-critical/10 text-severity-critical',
+  cancelled: 'border-border text-text-muted',
+  blocked: 'border-severity-high/30 bg-severity-high/10 text-severity-high',
+  unsupported: 'border-severity-high/30 bg-severity-high/10 text-severity-high',
+  unknown: 'border-severity-medium/30 bg-severity-medium/10 text-severity-medium',
+  pending: 'border-border text-text-muted',
+}
 
 export default function Tasks() {
   const [taskList, setTaskList] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Task | null>(null)
+  const [phases, setPhases] = useState<TaskPhase[]>([])
   const [statusFilter, setStatusFilter] = useState('')
   const [taskSort, setTaskSort] = useState('recent')
   const { addToast } = useUIStore()
@@ -36,6 +49,18 @@ export default function Tasks() {
     return () => { off(); clearInterval(i) }
   }, [statusFilter])
 
+  useEffect(() => {
+    if (!selected) { setPhases([]); return }
+    let alive = true
+    const loadPhases = () => tasksApi.phases(selected.id).then(rows => {
+      if (alive) setPhases(rows || [])
+    }).catch(() => { if (alive) setPhases([]) })
+    loadPhases()
+    const timer = selected.status === 'running' || selected.status === 'pending'
+      ? setInterval(loadPhases, 3000) : undefined
+    return () => { alive = false; if (timer) clearInterval(timer) }
+  }, [selected?.id, selected?.status])
+
   const handleCancel = async (task: Task, e: React.MouseEvent) => {
     e.stopPropagation()
     try { await tasksApi.cancel(task.id); addToast('info', 'Task cancelled'); load(statusFilter) }
@@ -49,7 +74,7 @@ export default function Tasks() {
   // resume" and we surface that.
   const canResume = (task: Task) =>
     (task.status === 'failed' || task.status === 'cancelled') &&
-    (task.modules?.length || 0) > (task.completed_modules?.length || 0)
+    (task.total || 0) > (task.completed_modules?.length || 0)
 
   const handleResume = async (task: Task, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -132,6 +157,21 @@ export default function Tasks() {
                 )}
               </div>
             )}
+            <div className="border-b border-border px-4 py-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Phase ledger</p>
+                <span className="text-[10px] text-text-muted">{phases.filter(p => !['pending','running'].includes(p.status)).length}/{phases.length} terminal</span>
+              </div>
+              <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar" aria-label="Scan phase outcomes">
+                {phases.length === 0 ? <span className="text-xs text-text-muted">No phase records</span> : phases.map(phase => (
+                  <div key={phase.id} title={phase.reason || `${phase.module}: ${phase.status}`}
+                    className={cn('shrink-0 rounded-md border px-2 py-1.5 max-w-44', phaseTone[phase.status] || phaseTone.pending)}>
+                    <p className="text-[10px] font-medium truncate">{phase.module}</p>
+                    <p className="text-[9px] uppercase tracking-wide opacity-80">{phase.status.replace('_', ' ')}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
             <div className="flex-1 min-h-0"><LiveLogs taskId={selected.id} active={selected.status === 'running'}/></div>
           </div>
         ) : (

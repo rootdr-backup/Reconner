@@ -37,3 +37,21 @@ func TestWrongKeyFails(t *testing.T) {
 		t.Fatal("wrong key must not decrypt")
 	}
 }
+
+func TestReencryptPreservesPlaintextAndIsRetrySafe(t *testing.T) {
+	original := New("old-key").Encrypt("bot-token:secret")
+	rotated, err := Reencrypt(original, "old-key", "new-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := New("new-key").Decrypt(rotated); got != "bot-token:secret" {
+		t.Fatalf("new key decrypted %q", got)
+	}
+	if got := New("old-key").Decrypt(rotated); got == "bot-token:secret" {
+		t.Fatal("old key still decrypts rotated ciphertext")
+	}
+	retried, err := Reencrypt(rotated, "old-key", "new-key")
+	if err != nil || retried != rotated {
+		t.Fatalf("retry = (%q,%v), want unchanged ciphertext", retried, err)
+	}
+}

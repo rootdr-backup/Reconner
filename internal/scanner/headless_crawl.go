@@ -82,13 +82,13 @@ const extractJS = `(() => {
 func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	chromePath := findChromePath()
 	if chromePath == "" {
-		logFn("info", "headless_crawl", "No headless Chromium available — skipping rendered crawl.")
-		return nil
+		logFn("info", "headless_crawl", "No headless Chromium available — rendered crawl blocked.")
+		return BlockedPhase("Chromium is unavailable for rendered crawling")
 	}
 
 	domain := c.targetDomain(ctx, targetID)
 	if domain == "" {
-		return nil
+		return fmt.Errorf("headless crawl target domain is empty")
 	}
 
 	seeds := c.seedURLs(ctx, targetID)
@@ -115,15 +115,15 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx, chromedp.WithErrorf(noop), chromedp.WithLogf(noop))
 	defer cancelBrowser()
 	if err := chromedp.Run(browserCtx); err != nil {
-		logFn("info", "headless_crawl", "Headless browser failed to start — skipping rendered crawl.")
-		return nil
+		logFn("info", "headless_crawl", "Headless browser failed to start — rendered crawl blocked.")
+		return BlockedPhase("Chromium failed to start: " + err.Error())
 	}
 	headerActions, stopHeaders := scopedBrowserHeaderSession(browserCtx, browserCtx, ctx, seeds, nil)
 	defer stopHeaders()
 	if len(headerActions) > 0 {
 		if err := chromedp.Run(browserCtx, headerActions...); err != nil {
-			logFn("warn", "headless_crawl", "Could not configure scoped request identity; skipping rendered crawl.")
-			return nil
+			logFn("warn", "headless_crawl", "Could not configure scoped request identity; rendered crawl blocked.")
+			return BlockedPhase("could not configure scoped browser request identity: " + err.Error())
 		}
 	}
 

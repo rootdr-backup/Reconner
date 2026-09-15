@@ -64,6 +64,13 @@ func normalizeAssetValue(raw string) (string, error) {
 // same Public-Suffix-aware splitter the scanner uses, so the scan menu can ask
 // for the right module set (web, network, or BOTH for a mixed asset).
 func detectAssetKind(value string) (kind, netScope string, webHosts []string) {
+	trimmed := strings.Trim(strings.TrimSpace(value), "[]")
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return "network", ip.String(), nil
+	}
+	if _, network, err := net.ParseCIDR(strings.TrimSpace(value)); err == nil {
+		return "network", network.String(), nil
+	}
 	webHosts, netScope = scanner.SplitScope(value)
 	switch {
 	case len(webHosts) > 0 && netScope != "":
@@ -72,6 +79,29 @@ func detectAssetKind(value string) (kind, netScope string, webHosts []string) {
 		return "network", netScope, webHosts
 	default:
 		return "web", netScope, webHosts
+	}
+}
+
+func classifyProjectScope(values []string) string {
+	hasWeb, hasNetwork := false, false
+	for _, value := range values {
+		kind, _, _ := detectAssetKind(value)
+		switch kind {
+		case "network":
+			hasNetwork = true
+		case "mixed":
+			hasWeb, hasNetwork = true, true
+		default:
+			hasWeb = true
+		}
+	}
+	switch {
+	case hasWeb && hasNetwork:
+		return "mixed"
+	case hasNetwork:
+		return "network"
+	default:
+		return "web"
 	}
 }
 
@@ -117,6 +147,10 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind, _, _ := detectAssetKind(value)
+	if kind != "web" {
+		h.writeError(w, http.StatusBadRequest, "network/CIDR assets are unavailable in this build; add a web domain or URL")
+		return
+	}
 	assetType := normalizeManualAssetType(req.AssetType, value, kind)
 	aid := uuid.New().String()
 	if _, err := h.db.Exec(
@@ -205,6 +239,10 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 		value, valueChanged = v, v != existing
 	}
 	kind, _, _ = detectAssetKind(value)
+	if kind != "web" {
+		h.writeError(w, http.StatusBadRequest, "network/CIDR assets are unavailable in this build; use a web domain or URL")
+		return
+	}
 	if req.AssetType != nil {
 		assetType = *req.AssetType
 	}
@@ -273,9 +311,9 @@ func (h *Handler) handleDeleteAsset(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccess(w, map[string]string{"message": "deleted"})
 }
 
-// handleScanAsset starts a scan pinned to ONE asset's scope — so a target's
-// assets are scanned individually. Web modules come from the request; the network
-// half runs automatically for a network/mixed asset.
+// handleScanAsset starts a scan pinned to one approved asset. Historical
+// IP/CIDR assets remain readable, but scheduler admission rejects them because
+// this build has no network executor.
 func (h *Handler) handleScanAsset(w http.ResponseWriter, r *http.Request) {
 	id, aid := mux.Vars(r)["id"], mux.Vars(r)["aid"]
 	var req struct {

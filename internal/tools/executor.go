@@ -30,7 +30,8 @@ const procKillGrace = 10 * time.Second
 // network brute phase) — worker children the tool spawned (hydra's per-target
 // workers, feroxbuster/dirsearch threads) survive and keep the stdout/stderr
 // pipes open, so the pipe-reader goroutines never see EOF and Wait() blocks
-// forever. That is the "skip network brute → scan stalls with no output" bug.
+// forever. That is the class of bug where skipping an external-tool phase
+// leaves its task stuck with no further output.
 // Setpgid puts the tool in its own group; Cancel SIGKILLs the whole group; and
 // WaitDelay force-closes the pipes if any descendant still lingers.
 func hardenProc(cmd *exec.Cmd) {
@@ -89,7 +90,26 @@ type ExecResult struct {
 
 type LineCallback func(line string)
 
+// validateToolName keeps callers on Reconner's curated executable search path.
+// Tool arguments may contain arbitrary target data, but the executable itself
+// must be a bare ASCII filename: never a relative/absolute path or shell text.
+func validateToolName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return fmt.Errorf("invalid external tool name %q", name)
+	}
+	for _, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '+' {
+			continue
+		}
+		return fmt.Errorf("invalid external tool name %q", name)
+	}
+	return nil
+}
+
 func (e *Executor) RunWithCallback(ctx context.Context, taskID string, callback LineCallback, name string, args ...string) error {
+	if err := validateToolName(name); err != nil {
+		return err
+	}
 	if e.toolFree {
 		return fmt.Errorf("external tool %s disabled", name)
 	}
@@ -101,7 +121,7 @@ func (e *Executor) RunWithCallback(ctx context.Context, taskID string, callback 
 	}
 
 	toolPath := e.findTool(name)
-	cmd := exec.CommandContext(ctx, toolPath, args...)
+	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
 	hardenProc(cmd)
 
@@ -169,6 +189,9 @@ func (e *Executor) safeCallback(tool string, cb LineCallback, line string) {
 }
 
 func (e *Executor) Run(ctx context.Context, name string, args ...string) (*ExecResult, error) {
+	if err := validateToolName(name); err != nil {
+		return nil, err
+	}
 	if e.toolFree {
 		return nil, fmt.Errorf("external tool %s disabled", name)
 	}
@@ -181,7 +204,7 @@ func (e *Executor) Run(ctx context.Context, name string, args ...string) (*ExecR
 
 	start := time.Now()
 	toolPath := e.findTool(name)
-	cmd := exec.CommandContext(ctx, toolPath, args...)
+	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
 	hardenProc(cmd)
 
@@ -209,17 +232,21 @@ func (e *Executor) Run(ctx context.Context, name string, args ...string) (*ExecR
 
 func (e *Executor) KillTask(taskID string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	cmd := e.activeProcs[taskID]
+	e.mu.Unlock()
 
-	if cmd, ok := e.activeProcs[taskID]; ok {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+	if cmd == nil || cmd.Process == nil {
+		return
 	}
+	if cmd.Cancel != nil {
+		_ = cmd.Cancel()
+		return
+	}
+	_ = cmd.Process.Kill()
 }
 
 func (e *Executor) IsToolAvailable(name string) bool {
-	if e.toolFree {
+	if e.toolFree || validateToolName(name) != nil {
 		return false
 	}
 	path := e.findTool(name)
@@ -232,7 +259,7 @@ func (e *Executor) IsToolAvailable(name string) bool {
 }
 
 func (e *Executor) findTool(name string) string {
-	localPath := filepath.Join(e.cfg.ToolsDir, name)
+	localPath := filepath.Join(e.cfg.ToolsDir, name) // #nosec G703 -- name is validated by every public executor entrypoint
 	if _, err := os.Stat(localPath); err == nil {
 		return localPath
 	}
@@ -248,7 +275,7 @@ func (e *Executor) findTool(name string) string {
 		filepath.Join(os.Getenv("HOME"), ".local", "bin"), // pip/pipx installs (waymore/dirsearch/uro)
 	} {
 		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil { // #nosec G703 -- name passed strict bare-ASCII validation before findTool is called
 			return p
 		}
 	}
@@ -276,6 +303,12 @@ func (e *Executor) extendedPath() string {
 }
 
 func (e *Executor) RunWithInputCallback(ctx context.Context, input io.Reader, taskID string, callback LineCallback, name string, args ...string) error {
+	if err := validateToolName(name); err != nil {
+		return err
+	}
+	if e.toolFree {
+		return fmt.Errorf("external tool %s disabled", name)
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -284,7 +317,7 @@ func (e *Executor) RunWithInputCallback(ctx context.Context, input io.Reader, ta
 	}
 
 	toolPath := e.findTool(name)
-	cmd := exec.CommandContext(ctx, toolPath, args...)
+	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
 	cmd.Stdin = input
 	hardenProc(cmd)
@@ -335,6 +368,12 @@ func (e *Executor) RunWithInputCallback(ctx context.Context, input io.Reader, ta
 }
 
 func (e *Executor) RunWithInput(ctx context.Context, input io.Reader, name string, args ...string) (*ExecResult, error) {
+	if err := validateToolName(name); err != nil {
+		return nil, err
+	}
+	if e.toolFree {
+		return nil, fmt.Errorf("external tool %s disabled", name)
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -344,7 +383,7 @@ func (e *Executor) RunWithInput(ctx context.Context, input io.Reader, name strin
 
 	start := time.Now()
 	toolPath := e.findTool(name)
-	cmd := exec.CommandContext(ctx, toolPath, args...)
+	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
 	cmd.Stdin = input
 	hardenProc(cmd)

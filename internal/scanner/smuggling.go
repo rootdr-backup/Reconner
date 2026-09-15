@@ -40,7 +40,7 @@ func NewSmugglingScanner(db *database.DB, exec *tools.Executor, cfg *config.Conf
 	return &SmugglingScanner{db: db, exec: exec, cfg: cfg, logger: log, broadcast: broadcast}
 }
 
-const (
+var (
 	smugReadDeadline = 10 * time.Second
 	smugSlowBaseline = 4 * time.Second // baseline must be at least this fast
 	smugDelayHit     = 8 * time.Second // probe must block at least this long
@@ -152,7 +152,7 @@ func (s *SmugglingScanner) sendRaw(ctx context.Context, scheme, host, hostport, 
 	var err error
 	if scheme == "https" {
 		conn, err = tls.DialWithDialer(dialer, "tcp", hostport, &tls.Config{
-			InsecureSkipVerify: true, // scanning arbitrary targets; cert validity is irrelevant here
+			InsecureSkipVerify: true, // #nosec G402 -- raw smuggling proof must reach authorized targets even when their certificate is invalid
 			ServerName:         host,
 		})
 	} else {

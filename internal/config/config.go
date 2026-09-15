@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -44,9 +46,15 @@ type Config struct {
 	WordlistsDir    string `json:"wordlists_dir"`
 	NucleiTemplates string `json:"nuclei_templates"`
 	SessionSecret   string `json:"session_secret"`
-	AdminUsername   string `json:"admin_username"`
-	AdminPassword   string `json:"admin_password"`
-	LogLevel        string `json:"log_level"`
+	// PreviousSessionSecret and SecretRotationPending exist only during the
+	// crash-safe one-time rotation of an old/empty deployment key. The explicit
+	// boolean matters because an empty historical key is a valid value that must
+	// still survive a restart. Both fields are cleared after database re-keying.
+	PreviousSessionSecret string `json:"previous_session_secret,omitempty"`
+	SecretRotationPending bool   `json:"secret_rotation_pending,omitempty"`
+	AdminUsername         string `json:"admin_username"`
+	AdminPassword         string `json:"admin_password"`
+	LogLevel              string `json:"log_level"`
 	// ScanUserAgent and ScanHeaders identify authorised bug-bounty traffic.
 	// Per-target values override these deployment-wide defaults.
 	ScanUserAgent string            `json:"scan_user_agent"`
@@ -195,7 +203,11 @@ type Config struct {
 	// that point in the current run — this field is the FLOOR, not a hard ceiling
 	// that ignores target size.
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
-	// NetworkFullPortScan makes naabu scan all 65535 ports instead of the curated
+	// Legacy network-executor notes below describe removed v2 configuration keys.
+	// There are deliberately no corresponding Config fields in this build: JSON's
+	// unknown keys are ignored for upgrade compatibility, and scan admission
+	// rejects network projects instead of pretending these controls are active.
+	// NetworkFullPortScan made naabu scan all 65535 ports instead of the curated
 	// high-signal set. Slower but exhaustive; off by default.
 	// NetworkBasicAuthCheck enables the DEFAULT-credential check against exposed
 	// HTTP Basic-auth panels found during a network scan, using a curated set
@@ -289,7 +301,7 @@ type Config struct {
 	// port 1389. Needs BlindXSSCallbackURL set (for the reachable host) and this
 	// port open to the target. Only bound in serve mode.
 	OOBRawPort int `json:"oob_raw_port"`
-	// IngramSnapshotsDisabled turns OFF camera-snapshot capture. Snapshots are
+	// IngramSnapshotsDisabled was a removed camera-snapshot control. Snapshots are
 	// ON by default (this flag is inverted so the zero-value = enabled): for every
 	// device Ingram cracks it grabs one still image from the live feed and
 	// Reconner stores it as a screenshot linked to the finding's evidence. Set
@@ -330,14 +342,50 @@ func (c *Config) Save() error {
 	if c.path == "" {
 		return fmt.Errorf("config path unknown; cannot save")
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(c, "", "  ") // #nosec G117 -- deployment secrets must be persisted in the atomic mode-0600 config file
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0750); err != nil {
+	dir := filepath.Dir(c.path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
-	return os.WriteFile(c.path, data, 0600)
+	tmp, err := os.CreateTemp(dir, ".reconner-config-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, c.path); err != nil {
+		return err
+	}
+	// fsync the containing directory as well as the file. Without this, a power
+	// loss immediately after rename can still lose the new directory entry on
+	// filesystems that delay metadata persistence.
+	dirHandle, err := os.Open(dir) // #nosec G304 -- directory is derived from the explicit deployment-local RECON_CONFIG path
+	if err != nil {
+		return err
+	}
+	if err := dirHandle.Sync(); err != nil {
+		dirHandle.Close()
+		return err
+	}
+	return dirHandle.Close()
 }
 
 // AnthropicAPIKey returns the Claude API key, sourced ONLY from the environment
@@ -359,6 +407,21 @@ func (c *Config) URLLimit() int {
 // fresh install. It is intentionally an obvious placeholder — the UI forces the
 // operator to change it on first login (see handleMe's must_change_password).
 const DefaultAdminPassword = "change_m)_e"
+
+// These values are retained only to recognize and migrate pre-v3 config files.
+// They are never used for a fresh installation.
+const (
+	legacySessionSecret = "change-me-in-production-32-bytes!" // #nosec G101 -- migration fingerprint for the retired public default
+	legacyCSRFSecret    = "change-me-csrf-secret-32-bytes!!"  // #nosec G101 -- migration fingerprint for the retired public default
+)
+
+func randomSecret() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate deployment secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
 
 // clampInt bounds v to [lo, hi].
 func clampInt(v, lo, hi int) int {
@@ -456,7 +519,7 @@ func defaultConfig() *Config {
 		ScreenshotsDir:     filepath.Join(dataDir, "screenshots"),
 		WordlistsDir:       filepath.Join(dataDir, "wordlists"),
 		NucleiTemplates:    filepath.Join(dataDir, "nuclei-templates"),
-		SessionSecret:      "change-me-in-production-32-bytes!",
+		SessionSecret:      "",
 		AdminUsername:      "admin",
 		AdminPassword:      DefaultAdminPassword,
 		UpdateCheckEnabled: true,
@@ -466,7 +529,7 @@ func defaultConfig() *Config {
 		// can set a deployment-wide value or override it per target.
 		ScanUserAgent:      "",
 		ScanHeaders:        map[string]string{},
-		CSRFSecret:         "change-me-csrf-secret-32-bytes!!",
+		CSRFSecret:         "",
 		EnableSQLmap:       false,             // heavy proof pass is explicit opt-in
 		SQLiTimeBased:      true,              // statistical time-based SQLi (linear-scaling proof)
 		NucleiVerify:       true,              // route nuclei sqli/xss/redirect hits through the verifier
@@ -495,14 +558,19 @@ func Load() (*Config, error) {
 	}
 	cfg.path = configPath
 
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304,G703 -- RECON_CONFIG is an explicit deployment-local path, never request-derived
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(configPath), 0750); err != nil {
-				return cfg, nil
+			if cfg.SessionSecret, err = randomSecret(); err != nil {
+				return nil, err
 			}
-			data, _ := json.MarshalIndent(cfg, "", "  ")
-			_ = os.WriteFile(configPath, data, 0600)
+			if cfg.CSRFSecret, err = randomSecret(); err != nil {
+				return nil, err
+			}
+			if err := cfg.Save(); err != nil {
+				return nil, err
+			}
+			cfg.ensureDirs()
 			return cfg, nil
 		}
 		return nil, err
@@ -515,6 +583,45 @@ func Load() (*Config, error) {
 	cfg.applyEnvOverrides()
 	cfg.ensureDirs()
 	return cfg, nil
+}
+
+// BeginLegacySecretRotation makes a key rotation resumable across power loss.
+// The new key and old-key marker are persisted before database re-encryption.
+// If the process exits before completion, the next boot receives the same pair
+// and can safely retry (secret.Reencrypt is idempotent under the new key).
+func (c *Config) BeginLegacySecretRotation() (oldSecret string, needed bool, err error) {
+	if c.SecretRotationPending {
+		return c.PreviousSessionSecret, true, nil
+	}
+	changed := false
+	if c.CSRFSecret == "" || c.CSRFSecret == legacyCSRFSecret {
+		if c.CSRFSecret, err = randomSecret(); err != nil {
+			return "", false, err
+		}
+		changed = true
+	}
+	if c.SessionSecret == "" || c.SessionSecret == legacySessionSecret {
+		oldSecret = c.SessionSecret
+		if c.SessionSecret, err = randomSecret(); err != nil {
+			return "", false, err
+		}
+		c.PreviousSessionSecret = oldSecret
+		c.SecretRotationPending = true
+		changed = true
+		needed = true
+	}
+	if changed {
+		if err := c.Save(); err != nil {
+			return "", false, err
+		}
+	}
+	return oldSecret, needed, nil
+}
+
+func (c *Config) FinishLegacySecretRotation() error {
+	c.PreviousSessionSecret = ""
+	c.SecretRotationPending = false
+	return c.Save()
 }
 
 // applyEnvOverrides lets secrets be supplied via environment variables instead
