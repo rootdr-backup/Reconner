@@ -78,51 +78,53 @@ ENV GOFLAGS=-buildvcs=false \
     CGO_ENABLED=1 \
     GOTOOLCHAIN=auto
 RUN mkdir -p /out
+COPY docker/build-hardened-go-tool.sh /usr/local/bin/build-hardened-go-tool
+RUN chmod +x /usr/local/bin/build-hardened-go-tool
 
 ARG SUBFINDER_VERSION=v2.16.0
-RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@${SUBFINDER_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/subfinder/v2 ${SUBFINDER_VERSION} ./cmd/subfinder subfinder
 
 ARG HTTPX_VERSION=v1.12.0
-RUN go install github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/httpx ${HTTPX_VERSION} ./cmd/httpx httpx
 
 ARG NUCLEI_VERSION=v3.11.1
-RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/nuclei/v3 ${NUCLEI_VERSION} ./cmd/nuclei nuclei
 
 ARG KATANA_VERSION=v1.7.0
-RUN go install github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/katana ${KATANA_VERSION} ./cmd/katana katana
 
 ARG DNSX_VERSION=v1.3.1
-RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/dnsx ${DNSX_VERSION} ./cmd/dnsx dnsx
 
 ARG ALTERX_VERSION=v0.1.0
-RUN go install github.com/projectdiscovery/alterx/cmd/alterx@${ALTERX_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/alterx ${ALTERX_VERSION} ./cmd/alterx alterx
 
 ARG ASNMAP_VERSION=v1.1.1
-RUN go install github.com/projectdiscovery/asnmap/cmd/asnmap@${ASNMAP_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/asnmap ${ASNMAP_VERSION} ./cmd/asnmap asnmap
 
 ARG SHUFFLEDNS_VERSION=v1.2.1
-RUN go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@${SHUFFLEDNS_VERSION}
+RUN build-hardened-go-tool github.com/projectdiscovery/shuffledns ${SHUFFLEDNS_VERSION} ./cmd/shuffledns shuffledns
 
 ARG GAU_VERSION=v2.2.4
-RUN go install github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}
+RUN build-hardened-go-tool github.com/lc/gau/v2 ${GAU_VERSION} ./cmd/gau gau
 
 ARG WAYBACKURLS_VERSION=v0.1.0
-RUN go install github.com/tomnomnom/waybackurls@${WAYBACKURLS_VERSION}
+RUN build-hardened-go-tool github.com/tomnomnom/waybackurls ${WAYBACKURLS_VERSION} . waybackurls
 
 ARG ASSETFINDER_VERSION=v0.1.1
-RUN go install github.com/tomnomnom/assetfinder@${ASSETFINDER_VERSION}
+RUN build-hardened-go-tool github.com/tomnomnom/assetfinder ${ASSETFINDER_VERSION} . assetfinder
 
 ARG HAKRAWLER_VERSION=v0.0.0-20260805040537-52a16fe61bd1
-RUN go install github.com/hakluke/hakrawler@${HAKRAWLER_VERSION}
+RUN build-hardened-go-tool github.com/hakluke/hakrawler ${HAKRAWLER_VERSION} . hakrawler
 
 ARG SUBZY_VERSION=v1.2.1
-RUN go install github.com/PentestPad/subzy@${SUBZY_VERSION}
+RUN build-hardened-go-tool github.com/PentestPad/subzy ${SUBZY_VERSION} . subzy
 
 ARG PUREDNS_VERSION=v2.1.1
-RUN go install github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}
+RUN build-hardened-go-tool github.com/d3mondev/puredns/v2 ${PUREDNS_VERSION} . puredns
 
 ARG SCILLA_VERSION=v1.3.4
-RUN go install github.com/edoardottt/scilla/cmd/scilla@${SCILLA_VERSION}
+RUN build-hardened-go-tool github.com/edoardottt/scilla ${SCILLA_VERSION} ./cmd/scilla scilla
 
 # Sanity check: every binary we expect actually landed in /out. Fails loud and
 # early instead of silently shipping a partial tool-chain.
@@ -223,8 +225,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv --copies /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN pip install --no-cache-dir --upgrade pip==26.2.1 \
- && pip install --no-cache-dir dirsearch==0.5.0 uro==1.0.2 waymore==8.9
+RUN pip install --no-cache-dir --upgrade \
+      pip==26.2.1 setuptools==80.9.0 \
+ && pip install --no-cache-dir \
+      cryptography==50.0.0 msgpack==1.2.1 \
+      dirsearch==0.5.0 uro==1.0.2 waymore==8.9 \
+ && rm -f /opt/venv/lib/python*/site-packages/dirsearch/native/Cargo.lock
 # The user never needs pip or network access after the container starts: this
 # venv is fully self-contained and is copied verbatim into runtime.
 RUN /opt/venv/bin/python3 -c "import sys; print(sys.version)" \
@@ -289,7 +295,9 @@ LABEL org.opencontainers.image.title="Reconner" \
 #                    reproduced against a real nuclei binary while auditing this image.
 #   curl             image HEALTHCHECK
 #   tini             PID 1 — reaps zombie children the tool-chain spawns
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && apt-get install -y --no-install-recommends \
       ca-certificates \
       chromium \
       sqlmap \
