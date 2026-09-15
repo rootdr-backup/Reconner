@@ -23,6 +23,7 @@ var ErrUserDisabled = errors.New("account disabled")
 var ErrUserExists = errors.New("username already taken")
 var ErrLastAdmin = errors.New("cannot remove or disable the last active administrator")
 var ErrNotFound = errors.New("user not found")
+var ErrInvalidRole = errors.New("role must be admin or member")
 
 // Role constants. 'admin' can manage users and settings; 'member' can run scans
 // and read findings but not touch user administration.
@@ -117,11 +118,13 @@ func (a *Auth) Logout(sessionID string) error {
 func (a *Auth) ValidateSession(sessionID string) (int64, error) {
 	var userID int64
 	var expiresAt time.Time
+	var disabled int
 
 	err := a.db.QueryRow(
-		"SELECT user_id, expires_at FROM sessions WHERE id = ?",
+		`SELECT s.user_id, s.expires_at, u.disabled
+		 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id = ?`,
 		sessionID,
-	).Scan(&userID, &expiresAt)
+	).Scan(&userID, &expiresAt, &disabled)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -133,6 +136,10 @@ func (a *Auth) ValidateSession(sessionID string) (int64, error) {
 	if time.Now().After(expiresAt) {
 		_, _ = a.db.Exec("DELETE FROM sessions WHERE id = ?", sessionID)
 		return 0, ErrSessionExpired
+	}
+	if disabled != 0 {
+		_, _ = a.db.Exec("DELETE FROM sessions WHERE id = ?", sessionID)
+		return 0, ErrUserDisabled
 	}
 
 	_, _ = a.db.Exec(
@@ -151,23 +158,30 @@ func (a *Auth) GetSessionFromRequest(r *http.Request) (string, error) {
 	return cookie.Value, nil
 }
 
-func (a *Auth) SetSessionCookie(w http.ResponseWriter, sessionID string) {
-	http.SetCookie(w, &http.Cookie{
+func requestUsesHTTPS(r *http.Request) bool {
+	return r != nil && (r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https"))
+}
+
+func (a *Auth) SetSessionCookie(w http.ResponseWriter, r *http.Request, sessionID string) {
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is enabled for TLS/proxied HTTPS while local-only HTTP remains usable
 		Name:     sessionCookieName,
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   requestUsesHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionDuration.Seconds()),
 	})
 }
 
-func (a *Auth) ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+func (a *Auth) ClearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- deletion must match the dynamically secure login cookie
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   requestUsesHTTPS(r),
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 }
@@ -177,7 +191,7 @@ func (a *Auth) CleanExpiredSessions() error {
 	return err
 }
 
-func (a *Auth) ChangePassword(userID int64, oldPassword, newPassword string) error {
+func (a *Auth) ChangePassword(userID int64, currentSessionID, oldPassword, newPassword string) error {
 	var passwordHash string
 	err := a.db.QueryRow("SELECT password_hash FROM users WHERE id = ?", userID).Scan(&passwordHash)
 	if err != nil {
@@ -193,17 +207,34 @@ func (a *Auth) ChangePassword(userID int64, oldPassword, newPassword string) err
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	_, err = a.db.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID)
-	return err
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(newHash), userID); err != nil {
+		return err
+	}
+	// Password changes revoke every other device/session. The session that
+	// authorized this change remains valid so the UI does not enter a stale
+	// half-logged-in state immediately after a successful response.
+	if _, err = tx.Exec("DELETE FROM sessions WHERE user_id = ? AND id != ?", userID, currentSessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // --- Multi-user administration (admin-only surface) ---------------------------
 
-func normalizeRole(role string) string {
-	if role == RoleMember {
-		return RoleMember
+func normalizeRole(role string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case RoleAdmin:
+		return RoleAdmin, nil
+	case RoleMember:
+		return RoleMember, nil
+	default:
+		return "", ErrInvalidRole
 	}
-	return RoleAdmin
 }
 
 // GetUser returns the account by id (no password hash).
@@ -256,13 +287,17 @@ func (a *Auth) activeAdminCount(excludeID int64) (int, error) {
 // CreateUser adds an account with the given role. Password must be >= 8 chars
 // (enforced by the handler). Returns the created user.
 func (a *Auth) CreateUser(username, password, role string) (*User, error) {
+	normalizedRole, err := normalizeRole(role)
+	if err != nil {
+		return nil, err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 	res, err := a.db.Exec(
 		"INSERT INTO users (username, password_hash, role, disabled) VALUES (?, ?, ?, 0)",
-		username, string(hash), normalizeRole(role),
+		username, string(hash), normalizedRole,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -283,7 +318,10 @@ func (a *Auth) UpdateUser(id int64, role *string, disabled *bool) (*User, error)
 	}
 	newRole := cur.Role
 	if role != nil {
-		newRole = normalizeRole(*role)
+		newRole, err = normalizeRole(*role)
+		if err != nil {
+			return nil, err
+		}
 	}
 	newDisabled := cur.Disabled
 	if disabled != nil {
@@ -327,8 +365,20 @@ func (a *Auth) AdminSetPassword(id int64, newPassword string) error {
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
 	}
-	_, err = a.db.Exec("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(hash), id)
-	return err
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(hash), id); err != nil {
+		return err
+	}
+	// An administrator resets a password because the old credentials may no
+	// longer be trusted. Existing sessions must not survive that reset.
+	if _, err = tx.Exec("DELETE FROM sessions WHERE user_id = ?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteUser removes an account (and its sessions cascade). Refuses to delete

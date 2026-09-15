@@ -1,7 +1,7 @@
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding,
   Parameter, DirectoryFinding, BackupFinding, OpenRedirectFinding,
-  NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, DashboardStats, AttackPath,
+  NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, TaskPhase, DashboardStats, AttackPath,
   NetworkService, IngramCamera, Asset,
   BountyProgram, BountySyncState, BountyScopeEvent,
 } from '../types'
@@ -272,6 +272,7 @@ export const tasks = {
   cancel: (id: string) => req<void>(`/tasks/${id}/cancel`, { method: 'POST' }),
   resume: (id: string) => req<Task>(`/tasks/${id}/resume`, { method: 'POST' }),
   logs: (id: string) => req<TaskLog[]>(`/tasks/${id}/logs`),
+  phases: (id: string) => req<TaskPhase[]>(`/tasks/${id}/phases`),
 }
 
 export interface ApiKeyState { name: string; label: string; hint: string; set: boolean; masked: string }

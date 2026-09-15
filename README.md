@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Self-hosted bug-bounty platform — verification-first recon &amp; DAST.</strong><br>
-  Web and network scanning, live evidence, and continuous monitoring. Your data stays on your machine.
+  Web scanning, live evidence, and continuous monitoring. Your data stays on your machine.
 </p>
 <p align="center">
   <a href="https://github.com/rootdr-backup/Reconner/actions/workflows/docker-image.yml"><img src="https://github.com/rootdr-backup/Reconner/actions/workflows/docker-image.yml/badge.svg" alt="Docker build"></a>
@@ -32,8 +32,6 @@ workflow built for triage—not another folder full of uncorrelated text files.
   reports while preserving inconclusive signals for review.
 - **Deep web coverage:** crawling, JavaScript analysis, parameters, APIs,
   reflected and DOM XSS, SQL injection, access control and server-side classes.
-- **Network coverage:** ports, services, CVEs and explicitly opt-in credential
-  testing for authorized network engagements.
 - **Designed for long scans:** resumable tasks, persistent data, monitoring,
   live logs, reports and resource-aware scheduling.
 - **Program-aware projects:** browse public HackerOne, Bugcrowd, Intigriti and
@@ -109,6 +107,16 @@ docker compose up -d --no-deps reconner
 docker compose ps
 ```
 
+The hardened image runs as uid/gid `10001` instead of root. A new named volume
+gets the correct ownership automatically. If an older volume was created by a
+root-running image and startup reports that `/data` is not writable, repair its
+ownership once, then start Reconner again:
+
+```bash
+docker compose run --rm --user 0 --entrypoint chown reconner -R 10001:10001 /data
+docker compose up -d --no-deps reconner
+```
+
 For a local source build:
 
 ```bash
@@ -134,6 +142,29 @@ dashboard's update center. A `v<version>` tag is accepted only when it matches
 `VERSION`; CI builds and publishes the image first, then creates the GitHub
 Release. This prevents users from seeing an update before its image exists.
 
+### v3 stability contract
+
+The v3 work freezes the existing feature surface and treats correctness as a
+release artifact, not a slogan. Every one of the 42 supported scheduler modules
+has a declared prerequisite, proof contract and regression-suite owner. A phase
+can finish as `completed`, `blocked`, `failed`, `timed_out`, `skipped`,
+`cancelled`, `unsupported` or `unknown`; a missing tool, credential, identity,
+browser or callback can never be reported as a clean scan.
+
+Every pull request must pass Go formatting, module verification, unit and race
+tests, deterministic detector benchmarks, migrations, frontend coverage and
+production-browser workflows, release smoke tests, dependency/source/secret
+scans, and production container scans. Both `linux/amd64` and `linux/arm64`
+images are built and scanned independently before a multi-platform image can be
+published. A failed or skipped required job blocks publication.
+
+The deterministic corpus is required to score zero known false positives and
+zero known false negatives. This is deliberately not presented as a guarantee
+for arbitrary internet targets: uncertain signals remain candidates, and
+unattempted coverage is visible in the phase ledger. See the complete
+[v3 stability and release plan](docs/V3_STABILITY_RELEASE_PLAN.md) and the
+[supported capability matrix](docs/V3_CAPABILITY_MATRIX.md).
+
 ## Detection pipeline
 
 ```text
@@ -147,7 +178,7 @@ Insertion points + request reconstruction + authentication context
         │
         ├── native detectors (XSS, SQLi, SSRF, LFI, SSTI, …)
         ├── Nuclei and specialized external engines
-        └── network/service modules
+        └── passive enrichment and takeover checks
         │
         ▼
 Candidate lifecycle ── reproducibility ── browser/OAST/timing proof
@@ -175,10 +206,12 @@ bandwidth and provider load bounded. A provider outage leaves the last good
 catalog available and retries with backoff.
 
 Opening a program loads its current structured scope. Select the assets you want
-and create a Project, or create a Project manually and mix domains, wildcards,
-exact URLs/pages, JavaScript files, APIs, IPs and CIDRs. Exact page and JS assets
-are seeded directly into their relevant analysis pipeline instead of being
-reduced to a hostname.
+and create a Project, or create a Project manually from domains, wildcards,
+exact URLs/pages, JavaScript files and APIs. Exact page and JS assets are seeded
+directly into their relevant analysis pipeline instead of being reduced to a
+hostname. IP/CIDR assets remain visible when imported from a provider or an old
+database, but this stability release rejects network execution instead of
+pretending an unsupported scan succeeded.
 
 Program scope remains controlled by the operator:
 
@@ -254,13 +287,15 @@ Available commands include `/status`, `/targets`, `/target`, `/scans`,
 `/findings`, `/scan`, `/pause`, `/resume`, `/skip` (also `/skipphase`),
 `/cancel`, `/addtarget`, `/edittarget` and `/deletetarget`.
 
-## Network reconnaissance
+## Network targets
 
-Network targets may be a single IP, CIDR or range. The pipeline covers port and
-service discovery, version/CVE analysis, network Nuclei templates and optional
-camera/DVR/NVR checks. Credential spraying and brute-force modules are active,
-lockout-sensitive features and remain opt-in. Confirm authorization and the
-engagement's account-lockout policy before enabling them.
+Direct IP/CIDR/range execution is intentionally unavailable in this release.
+Legacy network projects remain readable and exportable. Both the API and scan
+planner fail closed with a clear unsupported-capability error, so no empty or
+successful-looking phantom scan can be created.
+
+The frozen prerequisite and proof surface for all 42 supported modules is in
+[the v3 capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
 ## Toolchain
 
@@ -269,17 +304,16 @@ published:
 
 | Area | Bundled tools |
 |---|---|
-| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, uncover |
+| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, scilla |
 | DNS | dnsx, massdns, puredns, shuffledns |
 | HTTP/crawling | httpx, katana, hakrawler, gau, waybackurls, waymore, uro |
-| Content | dirsearch, feroxbuster, qsreplace |
-| Detection | nuclei, dalfox, subzy, sqlmap |
-| Network/evidence | naabu, nmap, hydra, gowitness, scilla |
+| Content | dirsearch, feroxbuster |
+| Detection | nuclei, subzy, sqlmap |
 | Runtime | Chromium, Python 3 and git |
 
-The container runs with `NET_RAW` and `NET_ADMIN` because SYN scanning requires
-raw sockets. Remove those capabilities if the deployment only performs web
-application scanning.
+The container receives no `NET_RAW` or `NET_ADMIN` capability. Tool versions
+and downloaded release checksums are pinned so rebuilds cannot silently change
+the scanner stack.
 
 ## Configuration
 

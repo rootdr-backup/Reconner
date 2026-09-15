@@ -806,7 +806,7 @@ func (h *Handler) sectionNetworkCameras(ctx context.Context, b *strings.Builder,
 	}
 	b.WriteString(`</div>`)
 	if n == 0 {
-		b.WriteString(`<p class="empty">— no camera/DVR findings (run a scan with Ingram enabled) —</p>`)
+		b.WriteString(`<p class="empty">— no legacy camera/DVR findings are stored for this project —</p>`)
 	}
 	b.WriteString(`</section>`)
 }

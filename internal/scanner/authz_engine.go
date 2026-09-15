@@ -46,8 +46,8 @@ func (s *AuthzEngine) Run(ctx context.Context, targetID, domain string, logFn Lo
 
 	ids := LoadIdentities(ctx, s.db, targetID, secret.New(s.cfg.SessionSecret))
 	if len(ids) < 2 {
-		logFn("info", "authz", "Need ≥2 captured identities for cross-identity authorization testing — skipping (add identities in the target's Identities panel).")
-		return nil
+		logFn("info", "authz", "Need ≥2 captured identities for cross-identity authorization testing — phase blocked.")
+		return BlockedPhase("two captured identities are required for authorization replay")
 	}
 	byLabel := map[string]Identity{}
 	var labels []string
@@ -58,8 +58,8 @@ func (s *AuthzEngine) Run(ctx context.Context, targetID, domain string, logFn Lo
 
 	cands := GenerateCandidates(ctx, s.db, targetID, labels)
 	if len(cands) == 0 {
-		logFn("info", "authz", "No cross-identity candidates (need authenticated traffic showing owned objects). Capture traffic via the browser session, then re-run.")
-		return nil
+		logFn("info", "authz", "No cross-identity candidates; captured owned-object traffic is required — phase blocked.")
+		return BlockedPhase("no captured owned-object traffic is available for authorization replay")
 	}
 	logFn("info", "authz", fmt.Sprintf("Generated %d ranked authorization candidate(s).", len(cands)))
 

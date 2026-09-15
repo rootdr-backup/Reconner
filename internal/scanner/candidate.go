@@ -2,7 +2,7 @@ package scanner
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -54,7 +54,7 @@ type VulnerabilityCandidate struct {
 // XSS observation must never poison a later DOM-XSS/browser observation at the
 // same URL+parameter, and GET/POST observations need independent lifecycles.
 func (c VulnerabilityCandidate) Fingerprint() string {
-	h := sha1.Sum([]byte(strings.Join([]string{
+	h := sha256.Sum256([]byte(strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(c.Type)),
 		strings.ToLower(strings.TrimSpace(c.Subtype)),
 		strings.ToUpper(strings.TrimSpace(c.Method)),

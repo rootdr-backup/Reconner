@@ -2,7 +2,7 @@ package scanner
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
 	"net/url"
@@ -100,7 +100,7 @@ func blurVolatile(body string) string {
 }
 
 func BodyHash(body string) string {
-	sum := sha1.Sum([]byte(blurVolatile(body)))
+	sum := sha256.Sum256([]byte(blurVolatile(body)))
 	return hex.EncodeToString(sum[:])
 }
 

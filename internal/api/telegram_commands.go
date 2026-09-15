@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/recon-platform/internal/models"
-	"github.com/recon-platform/internal/scanner"
 	"github.com/recon-platform/internal/scheduler"
 )
 
@@ -494,6 +493,9 @@ func (b *TelegramBot) resolveTelegramTarget(ctx context.Context, ref string) (te
 }
 
 func (b *TelegramBot) startTelegramScan(ctx context.Context, target telegramTarget, profile string) (*models.Task, error) {
+	if target.Kind == "network" || target.Kind == "mixed" {
+		return nil, fmt.Errorf("network/CIDR scanning is unavailable in this build; use a web-only project")
+	}
 	if b.h.sched == nil {
 		return nil, fmt.Errorf("scheduler is unavailable")
 	}
@@ -502,23 +504,13 @@ func (b *TelegramBot) startTelegramScan(ctx context.Context, target telegramTarg
 		scheduler.ModuleParamDiscovery, scheduler.ModulePassive, scheduler.ModuleExposure, scheduler.ModuleIntel}
 	webStandard := append(append([]string{}, webSafe...), scheduler.ModuleParamReflection, scheduler.ModuleBackupDiscovery,
 		scheduler.ModuleOpenRedirect, scheduler.ModuleXSS, scheduler.ModuleSQLi, scheduler.ModuleCORS, scheduler.ModuleJWT)
-	if target.Kind == "network" {
-		modules = []string{scheduler.ModuleNetwork, scheduler.ModuleNetworkBackup}
-		if profile == "deep" {
-			modules = append(modules, scheduler.ModuleNetworkNucleiOnly)
-		}
-	} else {
-		switch profile {
-		case "safe":
-			modules = webSafe
-		case "deep":
-			modules = append([]string{}, scheduler.AllModules...)
-		default:
-			modules = webStandard
-		}
-		if target.Kind == "mixed" {
-			modules = append(modules, scheduler.ModuleNetwork, scheduler.ModuleNetworkBackup)
-		}
+	switch profile {
+	case "safe":
+		modules = webSafe
+	case "deep":
+		modules = append([]string{}, scheduler.AllModules...)
+	default:
+		modules = webStandard
 	}
 	// Access-control proof is useful only with two identities. A Telegram deep
 	// scan remains runnable on a fresh target but does not pretend IDOR was tested.
@@ -548,8 +540,7 @@ func (b *TelegramBot) controlScan(action, targetID string) error {
 	case "skip":
 		return b.h.sched.SkipCurrentPhase(targetID)
 	case "cancel":
-		b.h.sched.CancelTasksForTarget(targetID)
-		return nil
+		return b.h.sched.CancelTasksForTarget(targetID)
 	default:
 		return fmt.Errorf("unsupported scan action")
 	}
@@ -561,13 +552,10 @@ func (b *TelegramBot) createTelegramTarget(ctx context.Context, rawScope, name s
 		return telegramTarget{}, err
 	}
 	domain := strings.Join(values, ",")
-	webHosts, netScope := scanner.SplitScope(domain)
-	kind := "web"
-	if len(webHosts) > 0 && netScope != "" {
-		kind = "mixed"
-	} else if netScope != "" {
-		kind = "network"
+	if classifyProjectScope(values) != "web" {
+		return telegramTarget{}, fmt.Errorf("network/CIDR targets are unavailable in this build; add web domains or URLs only")
 	}
+	kind := "web"
 	var ownerID int64
 	if err := b.h.db.QueryRowContext(ctx, `SELECT id FROM users WHERE role='admin' AND disabled=0 ORDER BY id LIMIT 1`).Scan(&ownerID); err != nil {
 		return telegramTarget{}, fmt.Errorf("no active Reconner administrator owns bot-created targets")
@@ -651,13 +639,10 @@ func (b *TelegramBot) editTelegramTarget(ctx context.Context, target telegramTar
 			return scopeErr
 		}
 		domain := strings.Join(values, ",")
-		webHosts, netScope := scanner.SplitScope(domain)
-		kind := "web"
-		if len(webHosts) > 0 && netScope != "" {
-			kind = "mixed"
-		} else if netScope != "" {
-			kind = "network"
+		if classifyProjectScope(values) != "web" {
+			return fmt.Errorf("network/CIDR targets are unavailable in this build; use web domains or URLs only")
 		}
+		kind := "web"
 		if _, err = tx.ExecContext(ctx, `UPDATE targets SET domain=?,kind=? WHERE id=?`, domain, kind, target.ID); err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				return fmt.Errorf("another target already uses that scope")

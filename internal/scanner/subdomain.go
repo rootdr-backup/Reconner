@@ -448,7 +448,7 @@ func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool)
 	}
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- vhost discovery must probe authorized hosts with invalid/mismatched certificates
 		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(dialCtx, network, targetAddr)
 		},

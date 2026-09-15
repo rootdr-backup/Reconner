@@ -31,41 +31,35 @@ type toolSpec struct {
 	Method toolInstallMethod `json:"method"`
 	Ref    string            `json:"ref"`   // go module@version / pip package / apt package
 	Doc    string            `json:"doc"`   // upstream docs/releases URL
-	Notes  string            `json:"notes"` // extra requirements (e.g. libpcap for naabu)
+	Notes  string            `json:"notes"` // extra requirements
 }
 
 // toolCatalog maps each expected tool to how it is installed. Go tools install
 // into the app's tools dir (user-space) and are picked up immediately.
 var toolCatalog = map[string]toolSpec{
 	// ── ProjectDiscovery + Go tools (one-click, no root) ──
-	"subfinder":   {methodGo, "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest", "https://github.com/projectdiscovery/subfinder", ""},
-	"httpx":       {methodGo, "github.com/projectdiscovery/httpx/cmd/httpx@latest", "https://github.com/projectdiscovery/httpx", ""},
-	"nuclei":      {methodGo, "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest", "https://github.com/projectdiscovery/nuclei", ""},
-	"katana":      {methodGo, "github.com/projectdiscovery/katana/cmd/katana@latest", "https://github.com/projectdiscovery/katana", ""},
-	"naabu":       {methodGo, "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest", "https://github.com/projectdiscovery/naabu", "Needs libpcap (Debian/Ubuntu: apt install libpcap-dev) and CGO to build SYN scanning."},
-	"dnsx":        {methodGo, "github.com/projectdiscovery/dnsx/cmd/dnsx@latest", "https://github.com/projectdiscovery/dnsx", ""},
-	"alterx":      {methodGo, "github.com/projectdiscovery/alterx/cmd/alterx@latest", "https://github.com/projectdiscovery/alterx", ""},
-	"asnmap":      {methodGo, "github.com/projectdiscovery/asnmap/cmd/asnmap@latest", "https://github.com/projectdiscovery/asnmap", ""},
-	"shuffledns":  {methodGo, "github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest", "https://github.com/projectdiscovery/shuffledns", "Also needs massdns on PATH."},
-	"uncover":     {methodGo, "github.com/projectdiscovery/uncover/cmd/uncover@latest", "https://github.com/projectdiscovery/uncover", ""},
-	"gau":         {methodGo, "github.com/lc/gau/v2/cmd/gau@latest", "https://github.com/lc/gau", ""},
-	"waybackurls": {methodGo, "github.com/tomnomnom/waybackurls@latest", "https://github.com/tomnomnom/waybackurls", ""},
-	"assetfinder": {methodGo, "github.com/tomnomnom/assetfinder@latest", "https://github.com/tomnomnom/assetfinder", ""},
-	"hakrawler":   {methodGo, "github.com/hakluke/hakrawler@latest", "https://github.com/hakluke/hakrawler", ""},
-	"dalfox":      {methodGo, "github.com/hahwul/dalfox/v2@latest", "https://github.com/hahwul/dalfox", ""},
-	"subzy":       {methodGo, "github.com/PentestPad/subzy@latest", "https://github.com/PentestPad/subzy", ""},
-	"gowitness":   {methodGo, "github.com/sensepost/gowitness@latest", "https://github.com/sensepost/gowitness", ""},
-	"puredns":     {methodGo, "github.com/d3mondev/puredns/v2@latest", "https://github.com/d3mondev/puredns", "Also needs massdns on PATH."},
-	"scilla":      {methodGo, "github.com/edoardottt/scilla/cmd/scilla@latest", "https://github.com/edoardottt/scilla", ""},
+	"subfinder":   {methodGo, "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.16.0", "https://github.com/projectdiscovery/subfinder", ""},
+	"httpx":       {methodGo, "github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0", "https://github.com/projectdiscovery/httpx", ""},
+	"nuclei":      {methodGo, "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1", "https://github.com/projectdiscovery/nuclei", ""},
+	"katana":      {methodGo, "github.com/projectdiscovery/katana/cmd/katana@v1.7.0", "https://github.com/projectdiscovery/katana", ""},
+	"dnsx":        {methodGo, "github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1", "https://github.com/projectdiscovery/dnsx", ""},
+	"alterx":      {methodGo, "github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0", "https://github.com/projectdiscovery/alterx", ""},
+	"asnmap":      {methodGo, "github.com/projectdiscovery/asnmap/cmd/asnmap@v1.1.1", "https://github.com/projectdiscovery/asnmap", ""},
+	"shuffledns":  {methodGo, "github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.2.1", "https://github.com/projectdiscovery/shuffledns", "Also needs massdns on PATH."},
+	"gau":         {methodGo, "github.com/lc/gau/v2/cmd/gau@v2.2.4", "https://github.com/lc/gau", ""},
+	"waybackurls": {methodGo, "github.com/tomnomnom/waybackurls@v0.1.0", "https://github.com/tomnomnom/waybackurls", ""},
+	"assetfinder": {methodGo, "github.com/tomnomnom/assetfinder@v0.1.1", "https://github.com/tomnomnom/assetfinder", ""},
+	"hakrawler":   {methodGo, "github.com/hakluke/hakrawler@v0.0.0-20260805040537-52a16fe61bd1", "https://github.com/hakluke/hakrawler", ""},
+	"subzy":       {methodGo, "github.com/PentestPad/subzy@v1.2.1", "https://github.com/PentestPad/subzy", ""},
+	"puredns":     {methodGo, "github.com/d3mondev/puredns/v2@v2.1.1", "https://github.com/d3mondev/puredns", "Also needs massdns on PATH."},
+	"scilla":      {methodGo, "github.com/edoardottt/scilla/cmd/scilla@v1.3.4", "https://github.com/edoardottt/scilla", ""},
 
 	// ── pip (one-click, user-space --user) ──
-	"waymore":   {methodPip, "waymore", "https://github.com/xnl-h4ck3r/waymore", ""},
-	"uro":       {methodPip, "uro", "https://github.com/s0md3v/uro", ""},
-	"dirsearch": {methodPip, "dirsearch", "https://github.com/maurosoria/dirsearch", ""},
+	"waymore":   {methodPip, "waymore==8.9", "https://github.com/xnl-h4ck3r/waymore", ""},
+	"uro":       {methodPip, "uro==1.0.2", "https://github.com/s0md3v/uro", ""},
+	"dirsearch": {methodPip, "dirsearch==0.5.0", "https://github.com/maurosoria/dirsearch", ""},
 
 	// ── apt (needs root — command shown, not auto-run) ──
-	"nmap":    {methodApt, "nmap", "https://nmap.org", ""},
-	"hydra":   {methodApt, "hydra", "https://github.com/vanhauser-thc/thc-hydra", "Debian/Ubuntu package is 'hydra'."},
 	"sqlmap":  {methodApt, "sqlmap", "https://github.com/sqlmapproject/sqlmap", "Or: pip install --user sqlmap-dev / git clone."},
 	"python3": {methodApt, "python3", "https://www.python.org", ""},
 
@@ -171,7 +165,7 @@ func (h *Handler) handleToolInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.MkdirAll(h.cfg.ToolsDir, 0o755); err != nil {
+	if err := os.MkdirAll(h.cfg.ToolsDir, 0o750); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "cannot create tools dir: "+err.Error())
 		return
 	}
@@ -188,7 +182,7 @@ func (h *Handler) handleToolInstall(w http.ResponseWriter, r *http.Request) {
 			h.installUnavailable(w, "go", cmdStr, s)
 			return
 		}
-		c := exec.CommandContext(ctx, "go", "install", s.Ref)
+		c := exec.CommandContext(ctx, "go", "install", s.Ref) // #nosec G204 -- s.Ref comes only from the compile-time allowlisted tool catalog
 		c.Env = append(os.Environ(),
 			"GOBIN="+h.cfg.ToolsDir,
 			"GOFLAGS=-buildvcs=false",
@@ -203,7 +197,7 @@ func (h *Handler) handleToolInstall(w http.ResponseWriter, r *http.Request) {
 			h.installUnavailable(w, "pip", cmdStr, s)
 			return
 		}
-		c := exec.CommandContext(ctx, pip, "install", "--user", "--upgrade", s.Ref)
+		c := exec.CommandContext(ctx, pip, "install", "--user", "--upgrade", s.Ref) // #nosec G204 -- pip and s.Ref are selected from fixed allowlists above
 		out, runErr = c.CombinedOutput()
 	}
 

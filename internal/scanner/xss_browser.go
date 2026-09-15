@@ -172,12 +172,12 @@ func browserBinaryWorks(path string) bool {
 	if strings.TrimSpace(path) == "" {
 		return false
 	}
-	if info, err := os.Stat(path); err != nil || info.IsDir() {
+	if info, err := os.Stat(path); err != nil || info.IsDir() { // #nosec G703 -- candidates come only from operator-controlled env, LookPath, or fixed paths
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd := exec.CommandContext(ctx, path, "--version") // #nosec G702 -- operator-selected browser path is executed without a shell and with one fixed argument
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	return cmd.Run() == nil && ctx.Err() == nil
 }

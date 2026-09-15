@@ -111,7 +111,7 @@ func RunGuided(ctx context.Context, db *database.DB, targetID string, input Guid
 	for _, template := range input.Templates {
 		templates[template.ID] = template
 	}
-	for _, check := range guidedChecks(input) {
+	for _, check := range GuidedChecks(input) {
 		if ctx.Err() != nil {
 			return report, ctx.Err()
 		}
@@ -170,7 +170,12 @@ func guidedChecks(input GuidedInput) []GuidedCheck {
 	return checks
 }
 
-func GuidedCheckCount(input GuidedInput) int { return len(guidedChecks(input)) }
+func GuidedChecks(input GuidedInput) []GuidedCheck {
+	checks := guidedChecks(input)
+	return append([]GuidedCheck(nil), checks...)
+}
+
+func GuidedCheckCount(input GuidedInput) int { return len(GuidedChecks(input)) }
 
 func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (result GuidedResult, err error) {
 	result = GuidedResult{TemplateID: t.ID, Module: module, Status: "completed", Findings: []GuidedFinding{}}

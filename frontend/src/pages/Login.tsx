@@ -34,10 +34,10 @@ export default function Login() {
         <div className="card p-7">
           <h1 className="text-base font-semibold mb-5">Sign in to continue</h1>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div><label className="label">Username</label>
-              <input type="text" value={username} onChange={e => setUsername(e.target.value)} className="input" required/></div>
-            <div><label className="label">Password</label>
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="input" placeholder="••••••••" required/></div>
+            <div><label className="label" htmlFor="login-username">Username</label>
+              <input id="login-username" type="text" value={username} onChange={e => setUsername(e.target.value)} className="input" autoComplete="username" required/></div>
+            <div><label className="label" htmlFor="login-password">Password</label>
+              <input id="login-password" type="password" value={password} onChange={e => setPassword(e.target.value)} className="input" autoComplete="current-password" placeholder="••••••••" required/></div>
             {error && <p className="text-xs text-severity-critical bg-severity-critical/10 border border-severity-critical/20 rounded-lg px-3 py-2">{error}</p>}
             <button type="submit" disabled={loading} className="btn-primary w-full justify-center py-2.5 text-sm">
               {loading ? 'Signing in…' : 'Sign In'}

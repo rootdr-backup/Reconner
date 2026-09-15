@@ -220,7 +220,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		Tags          []string          `json:"tags"`
 		Priority      string            `json:"priority"`
 		Notes         string            `json:"notes"`
-		Kind          string            `json:"kind"`          // web | network (auto-detected if empty)
+		Kind          string            `json:"kind"`          // web; legacy network/mixed values are read-only
 		ExcludeScope  string            `json:"exclude_scope"` // out-of-scope hosts/IPs/CIDRs/URLs
 		ScanUserAgent string            `json:"scan_user_agent"`
 		ScanHeaders   map[string]string `json:"scan_headers"`
@@ -243,21 +243,20 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	normalizedScope := strings.Join(scopeValues, ",")
 
-	// Unified scope: a single target may mix web hosts and network IP/CIDR/ranges.
-	// Auto-detect the kind from the scope composition (explicit req.Kind still wins,
-	// for backward compatibility): web-only, network-only, or "mixed" (both).
-	webHosts, netScope := scanner.SplitScope(normalizedScope)
-	kind := strings.ToLower(strings.TrimSpace(req.Kind))
-	if kind == "" {
-		switch {
-		case len(webHosts) > 0 && netScope != "":
-			kind = "mixed"
-		case netScope != "":
-			kind = "network"
-		default:
-			kind = "web"
-		}
+	// A URL whose host is an IP remains a supported web endpoint. Bare IP/CIDR
+	// execution has no v3 executor, so new network/mixed inventory is rejected
+	// instead of creating a project that can never run. Existing legacy rows are
+	// still readable and exportable after upgrade.
+	requestedKind := strings.ToLower(strings.TrimSpace(req.Kind))
+	if requestedKind != "" && requestedKind != "web" && requestedKind != "network" && requestedKind != "mixed" {
+		h.writeError(w, http.StatusBadRequest, "kind must be web, network, or mixed")
+		return
 	}
+	if requestedKind == "network" || requestedKind == "mixed" || classifyProjectScope(scopeValues) != "web" {
+		h.writeError(w, http.StatusBadRequest, "network/CIDR targets are unavailable in this build; add web domains or URLs only")
+		return
+	}
+	kind := "web"
 
 	// Preserve endpoint paths and query strings. Managed assets are authoritative,
 	// and collapsing https://host/path into the invalid host/path form silently
@@ -322,8 +321,8 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusCreated, map[string]any{"data": target, "success": true})
 }
 
-// handleNetworkServices returns the discovered open ip:port services for a
-// network target (the inventory the Network panel renders).
+// handleNetworkServices preserves read-only access to service inventory written
+// by older builds. This stability build does not create new network scan rows.
 func (h *Handler) handleNetworkServices(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(), `
@@ -496,20 +495,12 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		webHosts, netScope := scanner.SplitScope(strings.Join(scopeValues, ","))
-		switch {
-		case len(webHosts) > 0 && netScope != "":
-			kind = "mixed"
-		case netScope != "":
-			kind = "network"
-		default:
-			kind = "web"
+		kind = classifyProjectScope(scopeValues)
+		if kind != "web" {
+			h.writeError(w, http.StatusBadRequest, "network/CIDR targets are unavailable in this build; use web domains or URLs only")
+			return
 		}
-		if kind == "web" {
-			domain = strings.Join(webHosts, ",")
-		} else {
-			domain = strings.Join(scopeValues, ",")
-		}
+		domain = strings.Join(scopeValues, ",")
 	}
 
 	tx, err := h.db.BeginTx(r.Context(), nil)
@@ -571,7 +562,9 @@ func (h *Handler) deleteTargetByID(id string) error {
 	// Telegram an hour later). Then delete — the FK cascade removes all related
 	// rows (subdomains, http_services, findings, tasks, logs, screenshots…).
 	if h.sched != nil {
-		h.sched.CancelTasksForTarget(id)
+		if err := h.sched.CancelTasksForTarget(id); err != nil {
+			return fmt.Errorf("cancel target tasks: %w", err)
+		}
 	}
 	tx, err := h.db.Begin()
 	if err != nil {
@@ -583,8 +576,16 @@ func (h *Handler) deleteTargetByID(id string) error {
 	// a FK, so the cascade won't reach them — delete explicitly to avoid orphans.
 	// (actions/object_relationships/workflow_variables DO cascade, but deleting
 	// them here too is harmless and keeps behaviour uniform on older DBs.)
-	for _, t := range []string{"evidence", "http_interactions", "objects", "actions", "object_relationships", "workflow_variables"} {
-		if _, err := tx.Exec("DELETE FROM "+t+" WHERE target_id = ?", id); err != nil {
+	for _, statement := range []string{
+		"DELETE FROM evidence WHERE target_id = ?",
+		"DELETE FROM http_interactions WHERE target_id = ?",
+		"DELETE FROM objects WHERE target_id = ?",
+		"DELETE FROM candidate_transitions WHERE target_id = ?",
+		"DELETE FROM actions WHERE target_id = ?",
+		"DELETE FROM object_relationships WHERE target_id = ?",
+		"DELETE FROM workflow_variables WHERE target_id = ?",
+	} {
+		if _, err := tx.Exec(statement, id); err != nil {
 			return err
 		}
 	}
@@ -1403,7 +1404,10 @@ func (h *Handler) handleSkipPhase(w http.ResponseWriter, r *http.Request) {
 // is a no-op success.
 func (h *Handler) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	h.sched.CancelTasksForTarget(id)
+	if err := h.sched.CancelTasksForTarget(id); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to cancel target scans")
+		return
+	}
 	h.writeSuccess(w, map[string]string{"status": "cancelled"})
 }
 

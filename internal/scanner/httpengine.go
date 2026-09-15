@@ -34,7 +34,7 @@ var baseHTTPTransport = &http.Transport{
 	// A scanner deliberately reaches the target regardless of cert validity.
 	// MinVersion TLS 1.0 so we can still talk to legacy endpoints.
 	TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // intentional: scan targets with broken certs
+		InsecureSkipVerify: true, // #nosec G402 -- authorized scanner must retain coverage of broken-cert staging and legacy endpoints
 		MinVersion:         tls.VersionTLS10,
 	},
 }

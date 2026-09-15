@@ -208,8 +208,8 @@ type Task struct {
 	EtaSeconds       int      `json:"eta_seconds"`
 	ModuleEtaSeconds int      `json:"module_eta_seconds"`
 	Modules          []string `json:"modules"`
-	// CompletedModules is the subset of Modules that finished successfully —
-	// what a Resume (see scheduler.ResumeTask) will SKIP on the next attempt.
+	// CompletedModules is the subset of Modules that must not be re-run: phases
+	// that finished successfully or were explicitly skipped by the operator.
 	CompletedModules []string   `json:"completed_modules"`
 	Error            string     `json:"error"`
 	StartedAt        *time.Time `json:"started_at"`
@@ -227,6 +227,21 @@ type TaskLog struct {
 	Module    string         `json:"module"`
 	Data      map[string]any `json:"data"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+type TaskPhase struct {
+	ID           int64      `json:"id"`
+	TaskID       string     `json:"task_id"`
+	PhaseIndex   int        `json:"phase_index"`
+	Module       string     `json:"module"`
+	Status       string     `json:"status"`
+	Reason       string     `json:"reason"`
+	AttemptCount int        `json:"attempt_count"`
+	DurationMS   int64      `json:"duration_ms"`
+	StartedAt    *time.Time `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type Screenshot struct {

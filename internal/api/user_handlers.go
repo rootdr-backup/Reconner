@@ -46,6 +46,10 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := h.auth.CreateUser(req.Username, req.Password, req.Role)
 	if err != nil {
+		if errors.Is(err, auth.ErrInvalidRole) {
+			h.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if errors.Is(err, auth.ErrUserExists) {
 			h.writeError(w, http.StatusConflict, "username already taken")
 			return
@@ -101,6 +105,8 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case errors.Is(err, auth.ErrNotFound):
 				h.writeError(w, http.StatusNotFound, "user not found")
+			case errors.Is(err, auth.ErrInvalidRole):
+				h.writeError(w, http.StatusBadRequest, err.Error())
 			case errors.Is(err, auth.ErrLastAdmin):
 				h.writeError(w, http.StatusConflict, err.Error())
 			default:

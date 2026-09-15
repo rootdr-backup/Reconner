@@ -1,4 +1,4 @@
-import React, { forwardRef } from 'react'
+import React, { forwardRef, useEffect, useId } from 'react'
 
 export function cn(...classes: (string | undefined | false | null)[]): string {
   return classes.filter(Boolean).join(' ')
@@ -40,23 +40,37 @@ export const Spinner = ({ className }: { className?: string }) => (
 )
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> { label?: string; error?: string }
-export const Input = forwardRef<HTMLInputElement, InputProps>(({ label, error, className, ...props }, ref) => (
-  <div className="w-full">
-    {label && <label className="label">{label}</label>}
-    <input ref={ref} className={cn('input', error ? 'border-severity-critical' : undefined, className)} {...props}/>
-    {error && <p className="mt-1 text-xs text-severity-critical">{error}</p>}
-  </div>
-))
+export const Input = forwardRef<HTMLInputElement, InputProps>(({ label, error, className, id, ...props }, ref) => {
+  const generatedID = useId()
+  const inputID = id || generatedID
+  const errorID = error ? `${inputID}-error` : undefined
+  return (
+    <div className="w-full">
+      {label && <label className="label" htmlFor={inputID}>{label}</label>}
+      <input ref={ref} id={inputID} aria-invalid={error ? true : undefined} aria-describedby={errorID}
+        className={cn('input', error ? 'border-severity-critical' : undefined, className)} {...props}/>
+      {error && <p id={errorID} className="mt-1 text-xs text-severity-critical">{error}</p>}
+    </div>
+  )
+})
 Input.displayName = 'Input'
 
 export const Modal = ({ open, onClose, title, children, width='md' }: { open: boolean; onClose: () => void; title?: string; children: React.ReactNode; width?: 'sm'|'md'|'lg'|'xl' }) => {
   const w = { sm:'max-w-sm', md:'max-w-md', lg:'max-w-2xl', xl:'max-w-4xl' }
+  const titleID = useId()
+  useEffect(() => {
+    if (!open) return
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [open, onClose])
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
-      <div className={cn('relative flex flex-col max-h-[92dvh] bg-surface-2 border border-border rounded-t-2xl sm:rounded-xl shadow-2xl w-full', w[width])}>
-        {title && <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-4 border-b border-border shrink-0"><h2 className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button onClick={onClose} className="grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] transition-colors shrink-0">✕</button></div>}
+      <button type="button" aria-label="Close dialog" tabIndex={-1} className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
+      <div role="dialog" aria-modal="true" aria-labelledby={title ? titleID : undefined}
+        className={cn('relative flex flex-col max-h-[92dvh] bg-surface-2 border border-border rounded-t-2xl sm:rounded-xl shadow-2xl w-full', w[width])}>
+        {title && <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-4 border-b border-border shrink-0"><h2 id={titleID} className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button type="button" onClick={onClose} aria-label="Close" className="grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] transition-colors shrink-0">✕</button></div>}
         <div className="p-4 sm:p-5 overflow-y-auto overscroll-contain">{children}</div>
       </div>
     </div>

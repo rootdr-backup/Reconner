@@ -43,8 +43,8 @@ var oastClient = newPooledClient(12*time.Second, false)
 func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	oob, ok := newOOBCapability(s.cfg)
 	if !ok {
-		logFn("warn", "oast", "Log4Shell/Shellshock OAST skipped — no callback URL configured (set blind_xss_callback_url to this app's public URL).")
-		return nil
+		logFn("warn", "oast", "Log4Shell/Shellshock OAST blocked — no callback URL configured (set blind_xss_callback_url to this app's public URL).")
+		return BlockedPhase("public OAST callback URL is not configured")
 	}
 
 	points := loadInsertionPoints(ctx, s.db, targetID, s.cfg.URLLimit())

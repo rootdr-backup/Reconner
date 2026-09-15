@@ -71,36 +71,16 @@ const (
 	ModuleSmuggling       = "smuggling"
 	ModuleVerify          = "verify"
 	ModuleMonitor         = "monitor"
-	ModuleNetwork         = "network"
-	ModuleNetworkBrute    = "network_brute"
-	// ModuleNetworkBackup runs backup/config-file discovery (the same engine
-	// as the web backup_discovery module) against a network target's
-	// discovered WEB endpoints — previously never ran for network targets at
-	// all, since those endpoints live in network_services, not http_services.
-	ModuleNetworkBackup = "network_backup"
-	// ModuleNetworkNucleiOnly re-runs just the nuclei CVE/exposure phase
-	// against ALREADY-discovered network services (see RunNucleiOnly) — no
-	// port scan, no service discovery, no brute-force. For re-scanning after
-	// a template update without repeating the slow discovery phase.
-	ModuleNetworkNucleiOnly = "network_nuclei_only"
-	// ModuleNetworkIngram runs the third-party Ingram IP-camera/DVR scanner
-	// (see NetworkScanner.RunIngram) against every live host found during
-	// discovery — extra vendor-specific weak-credential + known-CVE PoCs for
-	// camera/DVR/NVR gear that Reconner's own engines don't cover. Same
-	// active/opt-in posture as ModuleNetworkBrute.
-	ModuleNetworkIngram = "network_ingram"
-	// ModuleNetDevices audits network infrastructure gear (MikroTik, Cisco,
-	// PPTP/VPN, and modems/routers from Huawei/ZTE/TP-Link/D-Link/Netgear/Asus/
-	// Ubiquiti/Fortinet/… ) — the Ingram equivalent for routers. Fingerprint +
-	// exposure + firmware-CVE flagging always run; default-credential testing
-	// runs only when NetworkBruteforce is enabled (same posture as BruteRun).
-	ModuleNetDevices = "network_devices"
-	// ModuleNetworkInitialAccess runs the initial-access engine (see
-	// NetworkScanner.RunInitialAccess): active confirmation of every service
-	// that grants access with NO credentials (unauth Redis/Docker/K8s/Mongo/ES/
-	// etcd/Jenkins/Portainer/Jupyter, anon FTP/LDAP/rsync, no-auth VNC) plus a
-	// curated set of pre-auth file-read / auth-bypass CVEs on edge gear. Same
-	// active/opt-in posture as ModuleNetworkBrute/Ingram.
+	// Legacy network module tokens remain defined only so old queued tasks and
+	// API clients receive an explicit unsupported error. They are rejected at
+	// admission and are intentionally absent from AllModules in this web-only
+	// release; none of them has an executor.
+	ModuleNetwork              = "network"
+	ModuleNetworkBrute         = "network_brute"
+	ModuleNetworkBackup        = "network_backup"
+	ModuleNetworkNucleiOnly    = "network_nuclei_only"
+	ModuleNetworkIngram        = "network_ingram"
+	ModuleNetDevices           = "network_devices"
 	ModuleNetworkInitialAccess = "network_initial_access"
 )
 
@@ -598,6 +578,61 @@ func (s *Scheduler) CreateTaskTyped(targetID string, modules []string, priority 
 
 var ErrInvalidModuleSelection = errors.New("invalid module selection")
 
+// scanOptionToken identifies task-list entries that configure execution but are
+// not phases themselves. Keeping these tokens in tasks.modules is useful for
+// restart/resume fidelity, but they must never inflate tasks.total, appear as a
+// successful phase, or reach runModule's dispatcher.
+func scanOptionToken(module string) bool {
+	switch module {
+	case "speed_slow", "speed_normal", "speed_fast",
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint":
+		return true
+	default:
+		return false
+	}
+}
+
+func executableModules(modules []string) []string {
+	out := make([]string, 0, len(modules))
+	for _, module := range modules {
+		if !scanOptionToken(module) {
+			out = append(out, module)
+		}
+	}
+	return out
+}
+
+func applyPlanOptions(modules []string) []string {
+	if !containsModule(modules, "single_endpoint") {
+		return modules
+	}
+	// A single-endpoint scan and DNS-wide enumeration are mutually exclusive.
+	// Resolve the contradiction before persistence so total/modules/phase ledger
+	// all describe the same execution plan.
+	out := make([]string, 0, len(modules))
+	for _, module := range modules {
+		if module != ModuleSubdomainEnum {
+			out = append(out, module)
+		}
+	}
+	return out
+}
+
+// unsupportedNetworkToken covers the network controls that older clients and
+// the v2 UI could submit even though this source tree has no network executor.
+// Rejecting them at admission is intentionally strict: a visible error is far
+// safer than the previous finished/0-results task that had performed no scan.
+func unsupportedNetworkToken(module string) bool {
+	switch module {
+	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
+		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
+		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports":
+		return true
+	default:
+		return strings.HasPrefix(module, "network")
+	}
+}
+
 // normalizeRequestedModules makes the scheduler boundary authoritative. The UI
 // offers only supported modules, but API clients and stale frontends must not be
 // able to create a successful-looking task containing misspelled or retired
@@ -623,11 +658,14 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 	out := make([]string, 0, len(modules))
 	for _, raw := range modules {
 		module := strings.TrimSpace(raw)
-		if module == ModuleDOMXSS || module == ModulePortScan {
+		if module == ModuleDAST || module == ModuleDOMXSS || module == ModulePortScan {
 			return nil, fmt.Errorf("%w: module %q is retired", ErrInvalidModuleSelection, module)
 		}
 		if !known[module] {
 			return nil, fmt.Errorf("%w: unsupported module %q", ErrInvalidModuleSelection, module)
+		}
+		if unsupportedNetworkToken(module) {
+			return nil, fmt.Errorf("%w: network scanning is unavailable in this build (%q); no task was created", ErrInvalidModuleSelection, module)
 		}
 		if !seen[module] {
 			seen[module] = true
@@ -651,6 +689,13 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	if err != nil {
 		return nil, err
 	}
+	var targetKind string
+	if err := s.db.QueryRow(`SELECT COALESCE(kind,'web') FROM targets WHERE id=?`, targetID).Scan(&targetKind); err != nil {
+		return nil, fmt.Errorf("target not found: %w", err)
+	}
+	if targetKind == "network" || (targetKind == "mixed" && strings.TrimSpace(scopeOverride) == "") {
+		return nil, fmt.Errorf("%w: this legacy %s project requires the removed network executor; scan an individual web asset or convert it to a web project", ErrInvalidModuleSelection, targetKind)
+	}
 
 	// Capability planning: a selection of vulnerability OBJECTIVES is expanded into
 	// the complete pipeline needed to find them — each selected detector plus the
@@ -659,8 +704,8 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	// unrelated detector. This is what lets a user pick a single vulnerability and
 	// still get a full, vulnerability-specific scan. The user's original selection
 	// is remembered for the task TYPE label (the objective), while the expanded
-	// list is what actually executes. (No-op for the full default set and for
-	// network-only scans, which the planner passes through unchanged.)
+	// list is what actually executes. (No-op for the full default set; legacy
+	// network-only selections are rejected at admission above.)
 	objective := modules
 	// A watch pass is deliberately snapshot-first: ModuleMonitor must compare
 	// against the PREVIOUS HTTP/JS baseline before http_probe/js_analysis refresh
@@ -668,6 +713,11 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	// which erased status/title/JS changes and made monitoring miss real drift.
 	if typeTag != monitorWatchType && typeTag != "guided_capture" {
 		modules = PlanModules(modules)
+	}
+	modules = applyPlanOptions(modules)
+	executable := executableModules(modules)
+	if len(executable) == 0 {
+		return nil, fmt.Errorf("%w: select at least one executable module", ErrInvalidModuleSelection)
 	}
 
 	task := &models.Task{
@@ -677,7 +727,7 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 		Status:   "pending",
 		Priority: priority,
 		Modules:  modules,
-		Total:    len(modules),
+		Total:    len(executable),
 	}
 
 	if len(objective) == 1 {
@@ -688,12 +738,28 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	}
 
 	modulesJSON := models.StringSliceToJSON(modules)
-	_, err = s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("create task transaction: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`
 		INSERT INTO tasks (id, target_id, type, status, priority, modules, total, scope_override)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, task.ID, task.TargetID, task.Type, task.Status, task.Priority, modulesJSON, task.Total, scopeOverride)
 	if err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
+	}
+	if typeTag != "guided_capture" {
+		for phaseIndex, module := range executable {
+			if _, err := tx.Exec(`INSERT INTO task_phases(task_id,phase_index,module,status)
+				VALUES(?,?,?,'pending')`, task.ID, phaseIndex, module); err != nil {
+				return nil, fmt.Errorf("create task phase %q: %w", module, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit task: %w", err)
 	}
 
 	// Non-blocking enqueue: never let a full queue block the HTTP handler. A task
@@ -778,7 +844,9 @@ func shortID(id string) string {
 
 func (s *Scheduler) CancelTask(taskID string) error {
 	var targetID string
-	_ = s.db.QueryRow(`SELECT target_id FROM tasks WHERE id=?`, taskID).Scan(&targetID)
+	if err := s.db.QueryRow(`SELECT target_id FROM tasks WHERE id=?`, taskID).Scan(&targetID); err != nil {
+		return fmt.Errorf("task not found: %w", err)
+	}
 	s.mu.Lock()
 	cancel, ok := s.cancelMap[taskID]
 	// Free the concurrency slot RIGHT NOW. The scan goroutine's own defer also
@@ -793,13 +861,17 @@ func (s *Scheduler) CancelTask(taskID string) error {
 	if ok {
 		cancel()
 	}
+	s.clearTaskControls(taskID)
 
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		UPDATE tasks SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status IN ('running', 'pending')
+		WHERE id = ? AND status IN ('running', 'pending', 'paused', 'interrupted')
 	`, taskID)
 	if err != nil {
 		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return fmt.Errorf("task is already finished and cannot be cancelled")
 	}
 
 	s.hub.Broadcast("task_cancelled", map[string]string{"task_id": taskID})
@@ -813,19 +885,26 @@ func (s *Scheduler) CancelTask(taskID string) error {
 // (context-cancels the in-flight scan goroutine and marks the rows cancelled).
 // Called before a target is deleted so a scan can't keep running in the
 // background — the cause of "I deleted it but an hour later Telegram pinged me".
-func (s *Scheduler) CancelTasksForTarget(targetID string) {
-	rows, err := s.db.Query(`SELECT id FROM tasks WHERE target_id = ? AND status IN ('running','pending')`, targetID)
+func (s *Scheduler) CancelTasksForTarget(targetID string) error {
+	rows, err := s.db.Query(`SELECT id FROM tasks WHERE target_id = ? AND status IN ('running','pending','paused','interrupted')`, targetID)
 	if err != nil {
-		return
+		return err
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
 		}
+		ids = append(ids, id)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
 	// Cancel each task's context AND free its concurrency slot immediately, so a
 	// module that's slow to notice cancellation can't keep the target's scan (or
@@ -840,15 +919,36 @@ func (s *Scheduler) CancelTasksForTarget(targetID string) {
 		delete(s.taskTargets, id)
 	}
 	s.mu.Unlock()
+	for _, id := range ids {
+		s.clearTaskControls(id)
+	}
 
 	for _, id := range ids {
-		_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+		if _, err := s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND status IN ('running','pending','paused','interrupted')`, id); err != nil {
+			return err
+		}
 		s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id})
 	}
 	if len(ids) > 0 {
 		s.logger.Info("Cancelled running tasks for deleted target", "target", targetID, "count", len(ids))
 	}
 	s.refreshTargetScanStatus(targetID, "idle", false)
+	return nil
+}
+
+// clearTaskControls drops target-control state when a task is cancelled outside
+// its normal executeTask unwind path (notably paused scans and target deletion).
+// It prevents stale pause/skip entries from retaining task state indefinitely.
+func (s *Scheduler) clearTaskControls(taskID string) {
+	s.pauseMu.Lock()
+	if cancel := s.skipCancel[taskID]; cancel != nil {
+		cancel()
+	}
+	delete(s.paused, taskID)
+	delete(s.skipCancel, taskID)
+	delete(s.skipReq, taskID)
+	s.pauseMu.Unlock()
 }
 
 // runningTaskForTarget returns the id of the most recent running/paused task for
@@ -1009,14 +1109,13 @@ var expectedTools = []string{
 	// http / crawl / urls
 	"httpx", "gau", "waybackurls", "waymore", "katana", "hakrawler", "uro",
 	// scanning
-	"nuclei", "dalfox", "dirsearch", "feroxbuster",
-	// ports / intel / screenshots / takeover
-	"naabu", "nmap", "gowitness", "subzy", "hydra",
+	"nuclei", "dirsearch", "feroxbuster",
+	// takeover
+	"subzy",
 	// active verification
 	"sqlmap",
-	// Ingram (IP-camera/DVR scanner) needs Python 3 on PATH — the run_ingram.py
-	// script itself is a separate third-party install, not a PATH tool, so its
-	// presence is checked directly by RunIngram (ingram_path in config.json).
+	// dirsearch can also run through its Python module when no wrapper binary is
+	// present, so Python itself is part of the honest runtime inventory.
 	"python3",
 }
 
@@ -1236,16 +1335,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		return
 	}
 
-	// UNIFIED SCOPE: a target can carry web hosts AND network IP/CIDR ranges at
-	// once. Split the stored scope so web modules run against the web host(s) and
-	// the network scan runs against the IP/CIDR portion — the two halves are
-	// threaded to the right modules below (only ModuleNetwork / NucleiOnly consume
-	// the `domain` arg as a network scope; every other module reads the DB or uses
-	// the web host).
-	// Per-asset scans pin the scope to one asset's value (scope_override); the kind
-	// is then re-derived from THAT scope, so scanning a single IP asset runs the
-	// network pipeline and a domain asset runs the web pipeline, regardless of the
-	// parent target's overall kind.
+	// Scope may contain one or more web hosts or endpoint URLs. Legacy network and
+	// mixed projects are rejected before task creation because this build has no
+	// network executor; existing rows can still be reviewed/exported.
+	// Per-asset scans pin the scope to one asset's value (scope_override), but a
+	// legacy IP/CIDR override was rejected at admission and cannot reach here.
 	effectiveScope := target.Domain
 	if scopeOverride != "" {
 		effectiveScope = scopeOverride
@@ -1324,8 +1418,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 	sentModules := models.JSONToStringSlice(modulesJSON)
 	var modules []string
-	// Honor the per-scan speed tokens (slow/normal/fast); strip any legacy
-	// network/ingram pseudo-modules a stale client might still send.
+	// Honor per-scan behavior options and build the executable phase list.
 	speed := scanner.SpeedNormal
 	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
 	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
@@ -1334,6 +1427,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		switch m {
 		case "speed_slow":
 			speed = scanner.SpeedSlow
+		case "speed_normal":
+			speed = scanner.SpeedNormal
 		case "speed_fast":
 			speed = scanner.SpeedFast
 		case "no_subdomain_brute":
@@ -1345,10 +1440,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		case "single_endpoint":
 			singleEndpoint = true
 		default:
-			if !strings.HasPrefix(m, "network") && m != "nuclei_only" && m != "bruteforce" &&
-				m != "ingram" && m != "initial_access" && m != "full_ports" {
-				modules = append(modules, m)
-			}
+			modules = append(modules, m)
 		}
 	}
 	ctx = scanner.WithWebSpeed(ctx, speed)
@@ -1548,6 +1640,9 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			}
 			if len(group) > 1 {
 				logFn("info", "scheduler", fmt.Sprintf("Running %d modules in parallel: %v", len(group), group))
+				for _, groupModule := range group {
+					s.startTaskPhase(taskID, groupModule)
+				}
 				var wg sync.WaitGroup
 				var gmu sync.Mutex
 				type phaseResult struct {
@@ -1565,7 +1660,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 						gmu.Lock()
 						defer gmu.Unlock()
 						results = append(results, phaseResult{module: m, err: err, duration: time.Since(started)})
-						if err != nil && ctx.Err() == nil && modCtx.Err() == nil {
+						if err != nil && !scanner.IsPhaseBlocked(err) && ctx.Err() == nil && modCtx.Err() == nil {
 							logFn("error", m, fmt.Sprintf("Module failed: %v", err))
 							taskErr = err
 							return
@@ -1577,20 +1672,23 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				}
 				wg.Wait()
 				skipped, timedOut := finishPhase()
+				if skipped {
+					// A skipped parallel phase is one operator action over the whole
+					// group. Persist every member as handled even when cancellation made
+					// one of the workers return an error; otherwise ResumeTask would
+					// unexpectedly re-run part of a phase the operator explicitly skipped.
+					completedModules = markModulesCompleted(completedModules, group)
+				}
 				if s.notifier != nil {
 					for _, result := range results {
-						phaseStatus := "completed"
-						switch {
-						case timedOut:
-							phaseStatus = "timed_out"
-						case skipped:
-							phaseStatus = "skipped"
-						case ctx.Err() != nil:
-							phaseStatus = "cancelled"
-						case result.err != nil:
-							phaseStatus = "failed"
-						}
-						s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, result.module, phaseStatus, result.duration, len(completedModules), len(modules))
+						phaseStatus, reason := phaseOutcome(result.err, skipped, timedOut && result.err != nil, ctx.Err())
+						s.finishTaskPhase(taskID, result.module, phaseStatus, reason, result.duration)
+						s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, result.module, phaseStatus, result.duration, s.terminalTaskPhaseCount(taskID), len(modules))
+					}
+				} else {
+					for _, result := range results {
+						phaseStatus, reason := phaseOutcome(result.err, skipped, timedOut && result.err != nil, ctx.Err())
+						s.finishTaskPhase(taskID, result.module, phaseStatus, reason, result.duration)
 					}
 				}
 				if skipped {
@@ -1607,25 +1705,13 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			}
 		}
 
+		s.startTaskPhase(taskID, module)
 		err := runPlannedModule(modCtx, module)
 		skipped, timedOut := finishPhase()
+		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
+		s.finishTaskPhase(taskID, module, phaseStatus, phaseReason, time.Since(phaseStartedAt))
 		if s.notifier != nil {
-			phaseStatus := "completed"
-			switch {
-			case timedOut:
-				phaseStatus = "timed_out"
-			case skipped:
-				phaseStatus = "skipped"
-			case ctx.Err() != nil:
-				phaseStatus = "cancelled"
-			case err != nil:
-				phaseStatus = "failed"
-			}
-			phaseProgress := len(completedModules)
-			if err == nil && !skipped && !timedOut {
-				phaseProgress++
-			}
-			s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, module, phaseStatus, time.Since(phaseStartedAt), phaseProgress, len(modules))
+			s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, module, phaseStatus, time.Since(phaseStartedAt), s.terminalTaskPhaseCount(taskID), len(modules))
 		}
 		if timedOut {
 			taskErr = fmt.Errorf("phase %q exceeded its %s watchdog and was stopped; completed results were saved", module, watchdog)
@@ -1642,14 +1728,16 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			s.updateTargetStats(targetID)
 			continue
 		}
-		if err != nil {
+		if err != nil && !scanner.IsPhaseBlocked(err) {
 			taskErr = err
 			if ctx.Err() == nil {
 				logFn("error", module, fmt.Sprintf("Module failed: %v", err))
 			}
-		} else {
+		} else if err == nil {
 			completedModules = append(completedModules, module)
 			persistCompleted()
+		} else {
+			logFn("warn", module, err.Error())
 		}
 
 		s.updateTargetStats(targetID)
@@ -1672,6 +1760,23 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if persistedStatus == InterruptedStatus {
 		finalStatus = InterruptedStatus
 		finalError = ""
+	}
+
+	// Every ledger row must be terminal when its task becomes terminal. This is
+	// the final backstop against a green task with unexecuted capability rows.
+	switch finalStatus {
+	case "cancelled":
+		s.finishUnresolvedTaskPhases(taskID, "cancelled", "task cancelled before phase completed")
+	case InterruptedStatus:
+		s.finishUnresolvedTaskPhases(taskID, "blocked", "service stopped; remaining phases moved to the resume task")
+	case "failed":
+		s.finishUnresolvedTaskPhases(taskID, "blocked", "not reached because another phase failed or timed out")
+	case "finished":
+		if unresolved := s.unresolvedTaskPhaseCount(taskID); unresolved > 0 {
+			finalStatus = "failed"
+			finalError = fmt.Sprintf("internal phase ledger invariant failed: %d phase(s) never reached a terminal state", unresolved)
+			s.finishUnresolvedTaskPhases(taskID, "failed", finalError)
+		}
 	}
 
 	// Only a clean finish means "100% done" — on failure/cancel keep the real
@@ -2038,16 +2143,13 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 	case ModuleNuclei:
 		return s.nucleiScanner.Run(ctx, targetID, nil, nil, logFn)
 	case ModuleDAST:
-		return s.dastScanner.Run(ctx, targetID, logFn)
+		return scanner.BlockedPhase("legacy broad DAST module is retired; use the focused detector modules")
 	case ModuleXSS:
 		return s.dastScanner.RunXSS(ctx, targetID, logFn)
 	case ModuleVulnScan:
 		return s.vulnScanner.Run(ctx, targetID, domain, logFn)
 	case ModuleDOMXSS:
-		// dom_xss (headless Chromium) is retired — too heavy on the server. Any
-		// stale task still listing it skips cleanly instead of launching a browser.
-		logFn("info", "dom_xss", "dom_xss module is disabled — skipped.")
-		return nil
+		return scanner.BlockedPhase("legacy dom_xss module is retired; use the proof-based XSS or CSTI module")
 	case ModuleSQLi:
 		return s.sqliScanner.Run(ctx, targetID, logFn)
 	case ModuleSSRF:
@@ -2093,8 +2195,7 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 	case ModuleOriginIP:
 		return s.originIPScanner.Run(ctx, targetID, logFn)
 	case ModulePortScan:
-		logFn("info", "portscan", "portscan module is disabled — skipped.")
-		return nil
+		return scanner.BlockedPhase("legacy portscan module is retired; network execution is unavailable")
 	case ModuleShodan:
 		return s.shodanScanner.Run(ctx, targetID, logFn)
 	case ModuleRace:
@@ -2106,7 +2207,71 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 	case ModuleMonitor:
 		return s.monitorScanner.Run(ctx, targetID, logFn)
 	}
-	return nil
+	return fmt.Errorf("%w: %q", ErrInvalidModuleSelection, module)
+}
+
+func containsModule(modules []string, wanted string) bool {
+	for _, module := range modules {
+		if module == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func markModulesCompleted(completed, modules []string) []string {
+	for _, module := range modules {
+		if !containsModule(completed, module) {
+			completed = append(completed, module)
+		}
+	}
+	return completed
+}
+
+func phaseOutcome(moduleErr error, skipped, timedOut bool, taskErr error) (string, string) {
+	switch {
+	case skipped:
+		return "skipped", "skipped by operator"
+	case taskErr != nil:
+		return "cancelled", taskErr.Error()
+	case timedOut:
+		return "timed_out", "phase watchdog expired"
+	case scanner.IsPhaseBlocked(moduleErr):
+		return "blocked", strings.TrimPrefix(moduleErr.Error(), scanner.ErrPhaseBlocked.Error()+": ")
+	case moduleErr != nil:
+		return "failed", moduleErr.Error()
+	default:
+		return "completed", ""
+	}
+}
+
+func (s *Scheduler) startTaskPhase(taskID, module string) {
+	_, _ = s.db.Exec(`UPDATE task_phases SET status='running',reason='',attempt_count=attempt_count+1,
+		started_at=CURRENT_TIMESTAMP,finished_at=NULL,duration_ms=0,updated_at=CURRENT_TIMESTAMP
+		WHERE task_id=? AND module=? AND status='pending'`, taskID, module)
+}
+
+func (s *Scheduler) finishTaskPhase(taskID, module, status, reason string, duration time.Duration) {
+	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,duration_ms=?,finished_at=CURRENT_TIMESTAMP,
+		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=? AND status IN ('pending','running')`,
+		status, reason, duration.Milliseconds(), taskID, module)
+}
+
+func (s *Scheduler) terminalTaskPhaseCount(taskID string) int {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=? AND status NOT IN ('pending','running')`, taskID).Scan(&count)
+	return count
+}
+
+func (s *Scheduler) finishUnresolvedTaskPhases(taskID, status, reason string) {
+	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,finished_at=CURRENT_TIMESTAMP,
+		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status IN ('pending','running')`, status, reason, taskID)
+}
+
+func (s *Scheduler) unresolvedTaskPhaseCount(taskID string) int {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=? AND status IN ('pending','running')`, taskID).Scan(&count)
+	return count
 }
 
 func (s *Scheduler) updateTargetStats(targetID string) {
@@ -2214,7 +2379,7 @@ func (s *Scheduler) effectiveMaxConcurrent(running int) int {
 // resourceTargetCeiling estimates how many full web pipelines the box can make
 // forward progress on simultaneously. One slot per two CPUs and roughly 1GiB of
 // the configured memory budget is intentionally conservative because Chromium,
-// nuclei/dalfox and Go workers coexist inside a scan. At least one always runs.
+// nuclei and Go workers coexist inside a scan. At least one always runs.
 func resourceTargetCeiling(cpu, memoryBudgetMB, configured int) int {
 	if configured < 1 {
 		configured = 1
@@ -2266,12 +2431,21 @@ func currentMemoryLoad(configuredLimitMB int) memoryLoad {
 	if err != nil || vm.Total == 0 {
 		return memoryLoad{}
 	}
-	used, limit := int(vm.Used/1024/1024), int(vm.Total/1024/1024)
+	used, limit := boundedMemoryMB(vm.Used), boundedMemoryMB(vm.Total)
 	// On bare metal, gopsutil is host-wide: MaxMemoryMB is Reconner's own
 	// scheduling budget and cannot be compared with memory used by every other
 	// service on the machine. Use real host pressure here; resourceTargetCeiling
 	// separately applies the configured Reconner budget to scan concurrency.
 	return memoryLoad{usedMB: used, limitMB: limit, percent: float64(used) * 100 / float64(limit), source: "host", ok: true}
+}
+
+func boundedMemoryMB(bytes uint64) int {
+	value := bytes / 1024 / 1024
+	maxInt := uint64(^uint(0) >> 1)
+	if value > maxInt {
+		return int(maxInt)
+	}
+	return int(value)
 }
 
 func classifyMemoryPressure(percent float64) int {

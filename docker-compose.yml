@@ -36,11 +36,6 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
     volumes:
       - reconner-data:/data
-    # naabu / nmap raw-socket (SYN) scans need these capabilities. Drop them if
-    # you only run web-app scans and want a tighter container.
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
     # Chromium headless is happier with a little more shared memory.
     shm_size: "512m"
     healthcheck:

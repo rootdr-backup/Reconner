@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/scheduler"
+	"github.com/recon-platform/internal/secret"
 	"github.com/recon-platform/internal/websocket"
 	"github.com/recon-platform/pkg/logger"
 )
@@ -57,26 +59,6 @@ func boot() (*application, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	// Preserve the service's established runtime behavior while removing the old
-	// command dispatcher. These settings historically lived in a shared bootstrap
-	// used by the web service as well as command-line operations; dropping them
-	// would silently reduce throughput and re-enable a system-wide memory check
-	// that can force needless GC in containers. Process/cgroup-aware memory
-	// accounting should replace the unlimited setting in a dedicated change.
-	cfg.Limits.MaxMemoryMB = 0
-	cfg.Limits.ParallelModules = true
-	floor := func(value *int, minimum int) {
-		if *value < minimum {
-			*value = minimum
-		}
-	}
-	floor(&cfg.Workers.JSAnalysis, 16)
-	floor(&cfg.Workers.HTTPProbing, 40)
-	floor(&cfg.Workers.SubdomainEnumeration, 25)
-	floor(&cfg.Workers.DirectoryDiscovery, 6)
-	floor(&cfg.Workers.Nuclei, 6)
-	floor(&cfg.Workers.Crawling, 10)
-
 	log := logger.New("error")
 	db, err := database.New(cfg.DatabasePath)
 	if err != nil {
@@ -85,6 +67,21 @@ func boot() (*application, error) {
 	if err := database.RunMigrations(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
+	}
+	oldSecret, rotate, err := cfg.BeginLegacySecretRotation()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare deployment-secret rotation: %w", err)
+	}
+	if rotate {
+		if err := rotateStoredSecrets(db.DB, oldSecret, cfg.SessionSecret); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("rotate encrypted database values: %w", err)
+		}
+		if err := cfg.FinishLegacySecretRotation(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("finalize deployment-secret rotation: %w", err)
+		}
 	}
 
 	hub := websocket.NewHub()
@@ -203,6 +200,68 @@ func run() error {
 		listenErr = fmt.Errorf("shutdown server: %w", err)
 	}
 	return listenErr
+}
+
+type encryptedColumn struct {
+	table, key, column string
+}
+
+var encryptedDatabaseColumns = []encryptedColumn{
+	{"identities", "id", "headers_json"},
+	{"identities", "id", "storage_json"},
+	{"request_templates", "id", "encrypted_request"},
+	{"captured_responses", "id", "encrypted_response"},
+	{"guided_runs", "id", "encrypted_input"},
+	{"guided_runs", "id", "encrypted_report"},
+	{"telegram_config", "id", "encrypted_bot_token"},
+}
+
+func rotateStoredSecrets(db *sql.DB, oldSecret, newSecret string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, c := range encryptedDatabaseColumns {
+		query := fmt.Sprintf("SELECT %s,%s FROM %s WHERE %s<>''", c.key, c.column, c.table, c.column) // #nosec G201 -- identifiers are compile-time constants above
+		rows, err := tx.Query(query)
+		if err != nil {
+			return err
+		}
+		type update struct {
+			id    any
+			value string
+		}
+		var updates []update
+		for rows.Next() {
+			var item update
+			if err := rows.Scan(&item.id, &item.value); err != nil {
+				rows.Close()
+				return err
+			}
+			rotated, err := secret.Reencrypt(item.value, oldSecret, newSecret)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("%s.%s: %w", c.table, c.column, err)
+			}
+			item.value = rotated
+			updates = append(updates, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		statement := fmt.Sprintf("UPDATE %s SET %s=? WHERE %s=?", c.table, c.column, c.key) // #nosec G201 -- identifiers are compile-time constants above
+		for _, item := range updates {
+			if _, err := tx.Exec(statement, item.value, item.id); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 // detectPublicBaseURL asks public address-discovery services for the host's

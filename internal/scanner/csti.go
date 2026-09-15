@@ -40,8 +40,8 @@ func cstiEvaluationProven(raw, payload, expected, rendered string) bool {
 func (s *CSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	browser := getXSSBrowser()
 	if browser == nil {
-		logFn("info", "csti", "CSTI skipped: Chromium is unavailable, so client-side evaluation cannot be proven safely")
-		return nil
+		logFn("info", "csti", "CSTI blocked: Chromium is unavailable, so client-side evaluation cannot be proven safely")
+		return BlockedPhase("Chromium is unavailable for CSTI proof")
 	}
 	limit := 160
 	if s.cfg != nil && s.cfg.URLLimit() < limit {

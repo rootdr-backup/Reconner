@@ -8,10 +8,8 @@ import { timeAgo, cn } from '../lib/utils'
 import { ws } from '../lib/websocket'
 import type { Target } from '../types'
 
-// filterKind splits the unified target list back into its Web and Network
-// halves (item 2 — restore the visual network/web separation). A "mixed" target
-// (both domains and IP scope) shows under BOTH views, since it carries results
-// for each pipeline. Undefined = the combined "All" view.
+// filterKind remains for rendering legacy network projects. New v3 projects use
+// the supported web pipeline; old network rows stay visible for review/export.
 export default function Targets({ filterKind }: { filterKind?: 'web' | 'network' } = {}) {
   const navigate = useNavigate()
   const { addToast } = useUIStore()
@@ -244,7 +242,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             {filterKind === 'web' ? 'Web Projects' : filterKind === 'network' ? 'Network Projects' : 'Projects'}
           </h1>
           <p className="text-xs text-text-muted">
-            {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · group domains, URLs, JavaScript files, network scope, or a public bounty program
+            {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · group domains, URLs, JavaScript files, IP-hosted web URLs, or a public bounty program
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -304,7 +302,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
         ? <div className="flex items-center justify-center h-48"><Spinner /></div>
         : kindTargets.length === 0
           ? <Empty message={filterKind === 'web' ? 'No web targets yet — add a domain to start the web pipeline.'
-              : filterKind === 'network' ? 'No network targets yet — add an IP, CIDR or range to start the network pipeline.'
+              : filterKind === 'network' ? 'No legacy network projects.'
               : 'No targets yet.'} />
           : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -395,17 +393,17 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
           <Input label="Project name" placeholder="friendly label for this project (optional)"
             value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           <div>
-            <label className="label">Initial assets *</label>
-            <textarea className="input resize-none font-mono text-xs" rows={5}
-              placeholder={"One asset per line — domains, URLs/pages, JS files, IPs or CIDRs:\nexample.com\nhttps://app.example.com/account\nhttps://cdn.example.com/app.js\n10.10.0.0/24"}
+            <label className="label" htmlFor="project-assets">Initial assets *</label>
+            <textarea id="project-assets" className="input resize-none font-mono text-xs" rows={5}
+              placeholder={"One asset per line — domains, URLs/pages, JS files, or an IP-hosted URL:\nexample.com\nhttps://app.example.com/account\nhttps://cdn.example.com/app.js\nhttp://192.0.2.10"}
               value={form.domain} onChange={e => setForm({ ...form, domain: e.target.value })} />
             <p className="text-[10px] text-text-muted mt-1">
-              Reconner creates individually manageable assets. A full URL stays a page seed, a <span className="font-mono">.js</span> URL stays a JavaScript seed, and network ranges use the network pipeline.
+              Reconner creates individually manageable web assets. A full URL stays a page seed and a <span className="font-mono">.js</span> URL stays a JavaScript seed. CIDR/network scanning is not supported in this stability release.
             </p>
           </div>
           <div>
-            <label className="label">Exclude (out of scope) — optional</label>
-            <textarea className="input resize-none font-mono text-xs" rows={2}
+            <label className="label" htmlFor="project-exclude">Exclude (out of scope) — optional</label>
+            <textarea id="project-exclude" className="input resize-none font-mono text-xs" rows={2}
               placeholder={"never scan these: dev.example.com, *.staging.example.com, 10.0.0.0/24, https://admin.example.com/"}
               value={form.exclude} onChange={e => setForm({ ...form, exclude: e.target.value })} />
             <p className="text-[10px] text-text-muted mt-1">
@@ -421,8 +419,8 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             <Input label="User-Agent override" placeholder="Mozilla/5.0 … researcher-id / ywh-public"
               value={form.scanUserAgent} onChange={e => setForm({ ...form, scanUserAgent: e.target.value })} />
             <div>
-              <label className="label">Custom HTTP headers — one per line</label>
-              <textarea className="input resize-none font-mono text-xs" rows={3}
+              <label className="label" htmlFor="project-headers">Custom HTTP headers — one per line</label>
+              <textarea id="project-headers" className="input resize-none font-mono text-xs" rows={3}
                 placeholder={"X-Bug-Bounty: researcher@example.com\nbb-client: BookBeatApp\nbb-device: api ywh"}
                 value={form.scanHeaders} onChange={e => setForm({ ...form, scanHeaders: e.target.value })} />
             </div>
@@ -430,16 +428,16 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
           <Input label="Description" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           <Input label="Tags (comma separated)" placeholder="bug-bounty, prod" value={form.tags} onChange={e => setForm({ ...form, tags: e.target.value })} />
           <div>
-            <label className="label">Priority</label>
-            <select className="input" value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
+            <label className="label" htmlFor="project-priority">Priority</label>
+            <select id="project-priority" className="input" value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
               {['low', 'medium', 'high', 'critical'].map(p => (
                 <option key={p} value={p} className="bg-surface-3 capitalize">{p}</option>
               ))}
             </select>
           </div>
           <div>
-            <label className="label">Notes</label>
-            <textarea className="input resize-none" rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+            <label className="label" htmlFor="project-notes">Notes</label>
+            <textarea id="project-notes" className="input resize-none" rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
           </div>
           <div className="flex justify-end gap-2 pt-2 border-t border-border">
             <Button variant="ghost" onClick={() => { setCreateOpen(false); setEditTarget(null); setForm(emptyForm) }}>Cancel</Button>

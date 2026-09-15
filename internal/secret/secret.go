@@ -12,7 +12,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 )
 
 const prefix = "enc:v1:" // marks an encrypted value so decrypt is idempotent-safe
@@ -74,6 +76,56 @@ func (b *Box) Decrypt(enc string) string {
 		return ""
 	}
 	return string(plain)
+}
+
+func (b *Box) decryptStrict(enc string) (string, error) {
+	if !isEncrypted(enc) {
+		return enc, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(enc[len(prefix):])
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(b.key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("encrypted value is shorter than its nonce")
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// Reencrypt rotates one persisted value from oldPassphrase to newPassphrase.
+// It first tries the new key, making a partially/completely finished database
+// transaction safe to retry after a crash. Legacy plaintext is encrypted too.
+func Reencrypt(value, oldPassphrase, newPassphrase string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	newBox := New(newPassphrase)
+	if isEncrypted(value) {
+		if _, err := newBox.decryptStrict(value); err == nil {
+			return value, nil
+		}
+	}
+	plain, err := New(oldPassphrase).decryptStrict(value)
+	if err != nil {
+		return "", fmt.Errorf("decrypt value with previous key: %w", err)
+	}
+	rotated := newBox.Encrypt(plain)
+	if !strings.HasPrefix(rotated, prefix) {
+		return "", errors.New("encrypt value with replacement key")
+	}
+	return rotated, nil
 }
 
 func isEncrypted(s string) bool {
