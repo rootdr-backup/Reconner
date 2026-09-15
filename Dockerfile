@@ -336,7 +336,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
  && mkdir -p /data \
  && chown -R reconner:reconner /data /home/reconner /opt/reconner
 
-ENV RECON_CONFIG=/data/config.json \
+ENV HOME=/home/reconner \
+    RECON_CONFIG=/data/config.json \
     RECONNER_CHROME=/usr/bin/chromium \
     DATA_DIR=/data \
     PORT=8080 \
