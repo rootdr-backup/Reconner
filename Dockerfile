@@ -225,11 +225,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv --copies /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
+# dirsearch 0.5.0 unnecessarily pins pyOpenSSL 26.1.0 exactly. That release
+# caps cryptography below its security-fixed v50; pyOpenSSL 26.4.0 is the
+# compatible 26.x patch that officially supports cryptography 50.x. Install the
+# upstream graph first, apply that narrow metadata correction, then make
+# `pip check` prove the final environment is internally consistent.
 RUN pip install --no-cache-dir --upgrade \
       pip==26.2.1 setuptools==80.9.0 \
  && pip install --no-cache-dir \
-      cryptography==50.0.0 msgpack==1.2.1 \
       dirsearch==0.5.0 uro==1.0.2 waymore==8.9 \
+ && pip install --no-cache-dir --upgrade --no-deps \
+      cryptography==50.0.0 pyOpenSSL==26.4.0 msgpack==1.2.1 \
+ && sed -i 's/Requires-Dist: pyopenssl==26.1.0/Requires-Dist: pyopenssl>=26.4.0,<27/' \
+      /opt/venv/lib/python*/site-packages/dirsearch-0.5.0.dist-info/METADATA \
+ && pip check \
  && rm -f /opt/venv/lib/python*/site-packages/dirsearch/native/Cargo.lock
 # The user never needs pip or network access after the container starts: this
 # venv is fully self-contained and is copied verbatim into runtime.
