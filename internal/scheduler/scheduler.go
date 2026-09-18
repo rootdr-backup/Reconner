@@ -1011,7 +1011,7 @@ var expectedTools = []string{
 	// scanning
 	"nuclei", "dalfox", "dirsearch", "feroxbuster",
 	// ports / intel / screenshots / takeover
-	"naabu", "nmap", "gowitness", "subzy", "hydra",
+	"naabu", "nmap", "gowitness", "subzy", "subjackal", "hydra",
 	// active verification
 	"sqlmap",
 	// Ingram (IP-camera/DVR scanner) needs Python 3 on PATH — the run_ingram.py

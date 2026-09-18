@@ -2,11 +2,13 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,8 +77,64 @@ var takeoverFingerprints = []takeoverFingerprint{
 	{"Netlify", []string{"netlify.app", "netlify.com"}, "Not Found - Request ID", "medium"},
 }
 
+type subjackalScore struct {
+	CNAMEMatch     int `json:"CNAMEMatch"`
+	NXDOMAINBack   int `json:"NXDOMAINBack"`
+	HTTPMatch      int `json:"HTTPMatch"`
+	NSUnregistered int `json:"NSUnregistered"`
+}
+
+func (s subjackalScore) Total() int {
+	return s.CNAMEMatch + s.NXDOMAINBack + s.HTTPMatch + s.NSUnregistered
+}
+
+func (s subjackalScore) Level() string {
+	t := s.Total()
+	switch {
+	case t >= 120:
+		return "high"
+	case t >= 50:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+
+type subjackalSubdomain struct {
+	Domain           string         `json:"Domain"`
+	Root             string         `json:"Root"`
+	RecordType       string         `json:"RecordType"`
+	IPs              []string       `json:"IPs"`
+	CNAMEChain       []string       `json:"CNAMEChain"`
+	NSRecords        []string       `json:"NSRecords"`
+	IsWildcard       bool           `json:"IsWildcard"`
+	CNAMETarget      string         `json:"CNAMETarget"`
+	ServiceProvider  string         `json:"ServiceProvider"`
+	TakeoverPossible bool           `json:"TakeoverPossible"`
+	Confidence       string         `json:"Confidence"`
+	Score            subjackalScore `json:"Score"`
+	Fingerprint      string         `json:"Fingerprint"`
+	Status           string         `json:"Status"` // vulnerable | suspicious | dismissed | alive | nxdomain
+	Note             string         `json:"Note"`
+}
+
+func parseSubjackalJSON(r io.Reader) ([]subjackalSubdomain, error) {
+	var results []subjackalSubdomain
+	dec := json.NewDecoder(r)
+	for dec.More() {
+		var s subjackalSubdomain
+		if err := dec.Decode(&s); err != nil {
+			return results, err
+		}
+		results = append(results, s)
+	}
+	return results, nil
+}
+
 // Run resolves CNAMEs for every subdomain and flags any that point at an
-// unclaimed third-party service (subdomain takeover).
+// unclaimed third-party service (subdomain takeover). If Subjackal is installed,
+// it validates the entire set in batch; otherwise it uses the native CNAME fallback.
 func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "takeover", "Checking for subdomain takeovers...")
 
@@ -99,7 +157,218 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 		return nil
 	}
 
-	logFn("info", "takeover", fmt.Sprintf("Checking %d subdomains for dangling CNAMEs...", len(subs)))
+	if s.exec != nil && s.exec.IsToolAvailable("subjackal") {
+		return s.runSubjackalBatch(ctx, targetID, subs, logFn)
+	}
+
+	return s.runNativeFallback(ctx, targetID, subs, logFn)
+}
+
+func (s *TakeoverScanner) runSubjackalBatch(ctx context.Context, targetID string, subs []string, logFn LogFunc) error {
+	logFn("info", "takeover", fmt.Sprintf("Validating %d subdomains with Subjackal batch engine...", len(subs)))
+
+	var validSubs []string
+	for _, sub := range subs {
+		sub = strings.TrimSpace(sub)
+		if sub != "" && !strings.ContainsAny(sub, "\r\n\t ;|") {
+			validSubs = append(validSubs, sub)
+		}
+	}
+	if len(validSubs) == 0 {
+		return nil
+	}
+
+	tmpIn, err := os.CreateTemp("", "subjackal-subs-*.txt")
+	if err != nil {
+		return fmt.Errorf("create subjackal temp input: %w", err)
+	}
+	defer os.Remove(tmpIn.Name())
+
+	if _, err := tmpIn.WriteString(strings.Join(validSubs, "\n") + "\n"); err != nil {
+		_ = tmpIn.Close()
+		return fmt.Errorf("write subjackal input: %w", err)
+	}
+	_ = tmpIn.Close()
+
+	tmpOut, err := os.CreateTemp("", "subjackal-out-*.json")
+	if err != nil {
+		return fmt.Errorf("create subjackal temp output: %w", err)
+	}
+	defer os.Remove(tmpOut.Name())
+	_ = tmpOut.Close()
+
+	workers := 50
+	if s.cfg != nil && s.cfg.Limits.MaxToolExecutions > 0 && s.cfg.Limits.MaxToolExecutions < workers {
+		workers = s.cfg.Limits.MaxToolExecutions
+	}
+
+	args := []string{
+		"--subs", tmpIn.Name(),
+		"-o", tmpOut.Name(),
+		"--silent",
+		"--threads", fmt.Sprintf("%d", workers),
+		"--timeout", "3000",
+		"--http-timeout", "5000",
+	}
+
+	execRes, err := s.exec.Run(ctx, "subjackal", args...)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.logger.Warn("Subjackal execution error; falling back to native scanner", "error", err)
+		return s.runNativeFallback(ctx, targetID, subs, logFn)
+	}
+	if execRes != nil && execRes.ExitCode != 0 && s.logger != nil {
+		s.logger.Warn("Subjackal non-zero exit code", "code", execRes.ExitCode, "stderr", execRes.Stderr)
+	}
+
+	outFile, err := os.Open(tmpOut.Name())
+	if err != nil {
+		return fmt.Errorf("open subjackal output: %w", err)
+	}
+	defer outFile.Close()
+
+	parsed, err := parseSubjackalJSON(outFile)
+	if err != nil && s.logger != nil {
+		s.logger.Warn("Partial error reading subjackal output stream", "error", err)
+	}
+
+	var found atomic.Int64
+	for _, res := range parsed {
+		if ctx.Err() != nil {
+			break
+		}
+		s.recordSubjackalResult(targetID, res, &found, logFn)
+	}
+
+	logFn("info", "takeover", fmt.Sprintf("Subjackal analysis complete: processed %d subdomains, found %d confirmed takeover(s).", len(parsed), found.Load()))
+	return nil
+}
+
+func (s *TakeoverScanner) recordSubjackalResult(targetID string, sub subjackalSubdomain, found *atomic.Int64, logFn LogFunc) {
+	service := sub.ServiceProvider
+	if service == "" {
+		service = "Unknown Provider"
+	}
+	severity := "high"
+	for _, fp := range takeoverFingerprints {
+		if strings.EqualFold(fp.service, service) && fp.severity != "" {
+			severity = fp.severity
+			break
+		}
+	}
+
+	rawURL := "https://" + sub.Domain
+	cname := sub.CNAMETarget
+	if cname == "" && len(sub.CNAMEChain) > 0 {
+		cname = sub.CNAMEChain[len(sub.CNAMEChain)-1]
+	}
+
+	switch strings.ToLower(sub.Status) {
+	case "vulnerable":
+		// Confirmed takeover proven by Subjackal
+		conf := ConfMultiTool // 95
+		status := StatusFinding
+		evidence := fmt.Sprintf("Subjackal VALIDATED takeover: %s → %s (%s) — %s [%d%%]",
+			sub.Domain, cname, service, sub.Note, conf)
+		provenance := fmt.Sprintf("subjackal: status=vulnerable service=%s score=%d cname=%s note=%s",
+			service, sub.Score.Total(),
+			cname, sub.Note)
+
+		s.storeVulnClassified(targetID, "subdomain_takeover", severity, rawURL, "", cname, evidence, conf, status, provenance)
+		if found != nil {
+			found.Add(1)
+		}
+		s.logSubjackalFinding(sub, service, logFn)
+		if s.broadcast != nil {
+			s.broadcast("new_vuln_finding", map[string]any{
+				"target_id": targetID,
+				"type":      "subdomain_takeover",
+				"url":       rawURL,
+			})
+		}
+
+	case "suspicious":
+		// Suspicious/dangling infrastructure, but not yet verified as reclaimable
+		conf := ConfCandidateHi // 85
+		status := StatusCandidate
+		evidence := fmt.Sprintf("Subjackal SUSPICIOUS candidate: %s → %s (%s) — %s [%d%%]",
+			sub.Domain, cname, service, sub.Note, conf)
+		provenance := fmt.Sprintf("subjackal: status=suspicious service=%s score=%d cname=%s note=%s",
+			service, sub.Score.Total(),
+			cname, sub.Note)
+
+		s.storeVulnClassified(targetID, "subdomain_takeover", severity, rawURL, "", cname, evidence, conf, status, provenance)
+
+		confidence := strings.ToLower(sub.Confidence)
+		if confidence == "" {
+			confidence = sub.Score.Level()
+		}
+		if confidence == "" {
+			confidence = "medium"
+		}
+		logFn("info", "takeover", fmt.Sprintf("[TK] [SUSPICIOUS] %s — CNAME → %s (%s confidence, score: %d)",
+			sub.Domain, service, confidence, sub.Score.Total()))
+
+	case "dismissed":
+		// Dismissed: CNAME chain resolves to live IP. Suppressed completely (Issue #21 fix).
+		if s.logger != nil {
+			s.logger.Debug("Subjackal dismissed takeover candidate", "domain", sub.Domain, "note", sub.Note)
+		}
+
+	case "alive", "nxdomain":
+		// Live site or standard NXDOMAIN - no finding
+	}
+}
+
+func (s *TakeoverScanner) logSubjackalFinding(sub subjackalSubdomain, service string, logFn LogFunc) {
+	serviceWithStatus := service
+	if !strings.Contains(serviceWithStatus, "[") {
+		serviceWithStatus = fmt.Sprintf("%s [vulnerable]", serviceWithStatus)
+	}
+
+	confidence := strings.ToLower(sub.Confidence)
+	if confidence == "" {
+		confidence = sub.Score.Level()
+	}
+	if confidence == "" {
+		confidence = "high"
+	}
+
+	logFn("warn", "takeover", fmt.Sprintf("[TK] [VULNERABLE] %s", sub.Domain))
+	logFn("warn", "takeover", fmt.Sprintf("[TK]              service    : %s", serviceWithStatus))
+	logFn("warn", "takeover", fmt.Sprintf("[TK]              confidence : %s (score: %d)", confidence, sub.Score.Total()))
+	if sub.Note != "" {
+		logFn("warn", "takeover", fmt.Sprintf("[TK]              note       : %s", sub.Note))
+	}
+
+	finalTarget := sub.CNAMETarget
+	if finalTarget == "" && len(sub.CNAMEChain) > 0 {
+		finalTarget = sub.CNAMEChain[len(sub.CNAMEChain)-1]
+	}
+
+	if len(sub.CNAMEChain) > 0 || finalTarget != "" {
+		logFn("warn", "takeover", fmt.Sprintf("[TK] [VALIDATE] %s", sub.Domain))
+		logFn("warn", "takeover", "[TK]   │")
+		logFn("warn", "takeover", "[TK]   ├── CNAME chain")
+		for _, hop := range sub.CNAMEChain {
+			logFn("warn", "takeover", fmt.Sprintf("[TK]   │   → %s", hop))
+		}
+		if finalTarget != "" {
+			if len(sub.IPs) > 0 {
+				logFn("warn", "takeover", fmt.Sprintf("[TK]   │   → final: %s (✓ %s)", finalTarget, strings.Join(sub.IPs, ", ")))
+			} else {
+				logFn("warn", "takeover", fmt.Sprintf("[TK]   │   → final: %s (NXDOMAIN — dangling)", finalTarget))
+			}
+		}
+		logFn("warn", "takeover", "[TK]   │")
+	}
+}
+
+
+func (s *TakeoverScanner) runNativeFallback(ctx context.Context, targetID string, subs []string, logFn LogFunc) error {
+	logFn("info", "takeover", fmt.Sprintf("Checking %d subdomains for dangling CNAMEs (native fallback)...", len(subs)))
 
 	sem := make(chan struct{}, 20)
 	var wg sync.WaitGroup
@@ -160,7 +429,7 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 	}
 	wg.Wait()
 
-	logFn("info", "takeover", fmt.Sprintf("Takeover check done. Found %d potential takeovers.", found.Load()))
+	logFn("info", "takeover", fmt.Sprintf("Native takeover check done. Found %d potential takeovers.", found.Load()))
 	return nil
 }
 

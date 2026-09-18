@@ -54,6 +54,7 @@ var toolCatalog = map[string]toolSpec{
 	"hakrawler":   {methodGo, "github.com/hakluke/hakrawler@latest", "https://github.com/hakluke/hakrawler", ""},
 	"dalfox":      {methodGo, "github.com/hahwul/dalfox/v2@latest", "https://github.com/hahwul/dalfox", ""},
 	"subzy":       {methodGo, "github.com/PentestPad/subzy@latest", "https://github.com/PentestPad/subzy", ""},
+	"subjackal":   {methodGo, "github.com/AliMousaviSoft/subjackal@latest", "https://github.com/AliMousaviSoft/subjackal", ""},
 	"gowitness":   {methodGo, "github.com/sensepost/gowitness@latest", "https://github.com/sensepost/gowitness", ""},
 	"puredns":     {methodGo, "github.com/d3mondev/puredns/v2@latest", "https://github.com/d3mondev/puredns", "Also needs massdns on PATH."},
 	"scilla":      {methodGo, "github.com/edoardottt/scilla/cmd/scilla@latest", "https://github.com/edoardottt/scilla", ""},

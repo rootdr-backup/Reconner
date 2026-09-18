@@ -144,6 +144,9 @@ RUN go install github.com/hahwul/dalfox/v2@${DALFOX_VERSION}
 ARG SUBZY_VERSION=latest
 RUN go install github.com/PentestPad/subzy@${SUBZY_VERSION}
 
+ARG SUBJACKAL_VERSION=v0.10.0
+RUN go install github.com/AliMousaviSoft/subjackal@${SUBJACKAL_VERSION}
+
 ARG GOWITNESS_VERSION=latest
 RUN go install github.com/sensepost/gowitness@${GOWITNESS_VERSION}
 
@@ -158,13 +161,13 @@ RUN go install github.com/edoardottt/scilla/cmd/scilla@${SCILLA_VERSION}
 RUN set -eu; \
     for t in subfinder httpx nuclei katana naabu dnsx alterx asnmap uncover \
              shuffledns gau waybackurls assetfinder qsreplace hakrawler \
-             dalfox subzy gowitness puredns scilla; do \
+             dalfox subzy subjackal gowitness puredns scilla; do \
       if [ ! -x "/out/$t" ]; then \
         echo "BUILD FAILURE: /out/$t was not produced by go install" >&2; \
         exit 1; \
       fi; \
     done; \
-    echo "gotools: all 20 Go binaries present in /out"
+    echo "gotools: all 21 Go binaries present in /out"
 
 # ── stage 3: massdns (built from source — not packaged for Debian bookworm) ──
 # Root cause of the earlier `fatal error: stdint.h: No such file or directory`:
@@ -381,11 +384,11 @@ ENV RECON_CONFIG=/data/config.json \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN set -eu; \
-    echo "==> verifying all 30 required tools, plus Chromium and git, are on PATH"; \
+    echo "==> verifying all 31 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
       subfinder httpx nuclei katana naabu dnsx alterx asnmap uncover \
-      gau waybackurls assetfinder qsreplace dalfox subzy \
+      gau waybackurls assetfinder qsreplace dalfox subzy subjackal \
       gowitness hakrawler puredns scilla shuffledns \
       dirsearch feroxbuster findomain hydra sqlmap uro waymore \
       massdns nmap python3 \
@@ -414,6 +417,7 @@ RUN set -eu; \
     katana -version; \
     naabu -version; \
     dnsx -version; \
+    subjackal --help >/dev/null 2>&1 || { echo "BUILD FAILURE: subjackal not executable" >&2; exit 1; }; \
     dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \
     /opt/venv/bin/python3 -m dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not importable via its own venv python3" >&2; exit 1; }; \
     echo "==> tool-chain verification passed"
