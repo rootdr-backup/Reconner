@@ -19,6 +19,15 @@ cp -a "${module_dir}/." "$work_dir/"
 chmod -R u+w "$work_dir"
 cd "$work_dir"
 
+# A few deliberately pinned legacy tools (notably assetfinder v0.1.1) predate
+# Go modules.  The module cache can still resolve and verify their source, but
+# module-aware hardening commands below require a local go.mod.  Create one in
+# this disposable copy only; the downloaded source and upstream release remain
+# untouched.
+if [ ! -f go.mod ]; then
+	go mod init "$module"
+fi
+
 upgrade_if_present() {
 	dependency="$1"
 	fixed_version="$2"
