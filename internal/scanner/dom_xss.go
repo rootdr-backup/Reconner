@@ -93,6 +93,7 @@ var htmlInjectionSinks = []htmlInjectionSink{
 	// setHTML() intentionally sanitizes. setHTMLUnsafe() is the actual injection
 	// primitive and must not be confused with the safe API.
 	{"Element.setHTMLUnsafe", regexp.MustCompile(`\.setHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Document.parseHTMLUnsafe", regexp.MustCompile(`(?:Document\.)?parseHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
 	{"setAttribute(srcdoc/event)", regexp.MustCompile(`\.setAttribute\s*\(\s*['"](?:srcdoc|on[a-z]+)['"]\s*,\s*([^;\n)]{1,220})`)},
 	{"script.src", regexp.MustCompile(`(?:script|scriptEl|scriptTag|newScript)\.src\s*=\s*([^;\n]{1,220})`)},
 	{"location navigation", regexp.MustCompile(`(?:window\.)?location(?:\.href)?\s*=\s*([^;\n]{1,220})`)},
