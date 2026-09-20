@@ -123,6 +123,11 @@ Audit and harden these flows end to end:
 Exit gate: no silent success, stuck task, duplicate mutation/notification,
 cross-user/cross-target leak, or unrecoverable partial state in the fault matrix.
 
+Browser-backed cancellation specifically requires phase-linked CDP contexts,
+task-owned process-group termination, bounded allocator/profile cleanup and a
+scheduler grace boundary. A browser worker that ignores cancellation must not
+hold `current_module`, a navigation gate or a scheduler slot indefinitely.
+
 ## Phase 3 — Discovery and input-coverage truth
 
 Validate the producers before judging detector recall:
@@ -188,6 +193,9 @@ Automate the actual researcher workflows rather than only API functions:
   plus explicit unsupported-state validation for network/CIDR requests;
 - live scan state, logs, pause/resume/skip/cancel, reload, and restart recovery;
 - findings list/detail/evidence/deduplication/export/report flows;
+- custom corpus merge/deduplication/invalid-count/restore flows for every
+  supported wordlist and payload category, plus bounded in-scope target bundle
+  download with JavaScript chunk success/failure provenance;
 - Telegram configuration, multi-chat role changes, test message, controls, and
   phase/finding alerts;
 - empty/loading/error/offline/slow states, narrow screens, keyboard navigation,

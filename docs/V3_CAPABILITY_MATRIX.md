@@ -22,7 +22,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `param_reflection` | Discovery | Parameter inventory | MIME-aware reflected marker |
 | `paramfuzz` | Discovery | Stable live endpoint | Repeatable controlled differential |
 | `dir_discovery` | Detector | Live HTTP service | Soft-404/content-family differential |
-| `backup_discovery` | Detector | Live HTTP service | File-type signature beyond status or length |
+| `backup_discovery` | Detector | Live HTTP service | Archive/SQL signature or sensitive config-content schema beyond status/path |
 | `open_redirect` | Detector | Routable insertion point | External destination plus encoded/sibling controls |
 | `nuclei` | Detector | Nuclei binary and live target | Parsed template evidence with noise guards |
 | `xss` | Detector | HTML-capable insertion surface | Browser execution with independent marker |
@@ -69,6 +69,12 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
   empty provider result from a provider/request failure.
 - External-tool phases must report missing or failed tools. The runtime
   inventory is pinned and contains only tools called by supported web paths.
+- Operator corpora extend, but never replace, compiled defaults. Normalization,
+  deduplication and category-specific proof-template validation happen before a
+  custom entry becomes eligible for scanner use.
+- Target artifact export may fetch only URLs admitted by the target request
+  identity. Every redirect hop is scope-checked and failed assets remain visible
+  in the bundle manifest.
 
 ## Explicitly unsupported in v3.0.0 stability scope
 

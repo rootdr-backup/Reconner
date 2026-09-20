@@ -33,7 +33,14 @@ workflow built for triage—not another folder full of uncorrelated text files.
 - **Deep web coverage:** crawling, JavaScript analysis, parameters, APIs,
   reflected and DOM XSS, SQL injection, access control and server-side classes.
 - **Designed for long scans:** resumable tasks, persistent data, monitoring,
-  live logs, reports and resource-aware scheduling.
+  live logs, hard-cancellable browser phases, reports and resource-aware
+  scheduling.
+- **Operator-tunable coverage:** manage deduplicated wordlists and proof-safe
+  payload templates from the dashboard without rebuilding the image; every
+  category can be restored to its compiled defaults.
+- **Portable research bundles:** download a target's structured scan state,
+  evidence metadata, task ledger and current in-scope JavaScript/chunks as one
+  manifest-backed ZIP archive.
 - **Program-aware projects:** browse public HackerOne, Bugcrowd, Intigriti and
   YesWeHack programs, filter their declared scope, import only selected assets
   and review scope changes before Reconner expands a scan.
@@ -165,6 +172,12 @@ unattempted coverage is visible in the phase ledger. See the complete
 [v3 stability and release plan](docs/V3_STABILITY_RELEASE_PLAN.md) and the
 [supported capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
+> [!NOTE]
+> The hardening branch intentionally continues to report `2.5.0`. Passing
+> feature tests or pull-request CI alone does not make a stable v3 release. The
+> v3 version/tag is created only after the documented performance, 24-hour soak,
+> upgrade/rollback and release-candidate gates pass on the unchanged commit.
+
 ## Detection pipeline
 
 ```text
@@ -254,6 +267,46 @@ run stored-XSS injection as part of the general scan pipeline.
 Static JavaScript source-to-sink analysis is routing intelligence, not proof. It
 stays internal until Chromium observes a nonce payload execute; only then does a
 DOM-XSS row become a confirmed finding with an `alert(document.domain)` PoC.
+
+### Custom wordlists and payloads
+
+Administrators can open **System & updates → Wordlists & payloads** to extend
+every operator-facing fuzz/brute-force corpus: subdomains, virtual hosts,
+directories, backup/exposure/GraphQL/API-spec paths, file extensions, hidden
+parameters, JWT HMAC secrets, XSS, SQLi, LFI, SSRF, SSTI, CSTI, NoSQLi,
+command injection and open redirects.
+
+Imports accept pasted lines or a text file. Reconner normalizes category-specific
+syntax, deduplicates against both compiled defaults and earlier additions, and
+reports exact input, added, duplicate and invalid counts. Custom entries are
+stored separately under the persistent wordlist directory; **Restore default
+wordlist/payloads** removes only the custom layer.
+
+Payload additions cannot weaken verification. XSS templates still require a
+real Chromium nonce execution; SQLi and NoSQLi additions require a reproducible
+new database/driver error; template and command payloads retain their independent
+computed-marker contracts. An imported string is extra coverage, never proof by
+itself.
+
+### Target artifact bundles
+
+From a target page, open **Report → Download scan bundle — ZIP**. The archive
+contains a versioned `manifest.json`, structured JSON for the target's discovery,
+findings, evidence metadata and phase/task state, stored target screenshots, plus
+live-fetched snapshots of up to 2,000 known JavaScript assets under
+`javascript/`. Fetches reuse the target's request identity, reject every redirect
+that leaves scope, enforce bounded file/total budgets, and record individual
+failures instead of silently omitting an artifact. Treat the resulting archive
+as sensitive research material.
+
+### Skip Phase guarantees
+
+Skip cancels the phase context and, for Chromium-backed XSS work, terminates the
+task-owned browser process group and its temporary profile. The scheduler waits
+for a short cleanup grace, then records the phase as skipped and releases its
+execution slot even if a third-party goroutine ignores cancellation. A fresh
+browser lease is created for later work, so this safety net does not serialize
+or disable the existing parallel phase model.
 
 The evidence model, public-data prioritization and detector-by-detector upgrade
 plan are documented in the [vulnerability engine roadmap](docs/VULNERABILITY_ENGINE_ROADMAP.md).
