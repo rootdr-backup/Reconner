@@ -3,6 +3,7 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,6 +67,8 @@ func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 			t.Errorf("backup probe Range=%q", got)
 		}
 		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(body)-1, len(body)))
+		w.WriteHeader(http.StatusPartialContent)
 		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
@@ -92,11 +95,15 @@ func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 		t.Fatalf("/back/.env scheduled too late: request ordinal=%d", got)
 	}
 	var fileType string
-	if err := db.QueryRow(`SELECT file_type FROM backup_findings WHERE target_id='target' AND url=?`, srv.URL+"/back/.env").Scan(&fileType); err != nil {
+	var status, size int
+	if err := db.QueryRow(`SELECT file_type,status_code,content_length FROM backup_findings WHERE target_id='target' AND url=?`, srv.URL+"/back/.env").Scan(&fileType, &status, &size); err != nil {
 		t.Fatal(err)
 	}
 	if fileType != "env_file" {
 		t.Fatalf("stored file type=%q", fileType)
+	}
+	if status != http.StatusPartialContent || size != len(body) {
+		t.Fatalf("stored status/size=%d/%d", status, size)
 	}
 }
 
