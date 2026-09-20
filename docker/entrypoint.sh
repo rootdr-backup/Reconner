@@ -16,6 +16,25 @@ CFG="${RECON_CONFIG:-${DATA_DIR}/config.json}"
 PORT="${PORT:-8080}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 
+# Images before v3 persisted /data as root. Repair that legacy volume
+# automatically, then irrevocably drop privileges before touching config or
+# starting the service. The marker avoids an expensive recursive chown on every
+# restart while new files are already created by uid 10001.
+if [ "$(id -u)" = "0" ]; then
+  case "${DATA_DIR}" in
+    ""|"/") echo "ERROR: unsafe DATA_DIR '${DATA_DIR}'; refusing ownership migration." >&2; exit 1 ;;
+  esac
+  OWNERSHIP_MARKER="${DATA_DIR}/.reconner-owner-10001"
+  mkdir -p "${DATA_DIR}"
+  if [ ! -f "${OWNERSHIP_MARKER}" ]; then
+    echo "==> Migrating legacy /data ownership to uid/gid 10001 ..."
+    chown -R reconner:reconner "${DATA_DIR}"
+    touch "${OWNERSHIP_MARKER}"
+    chown reconner:reconner "${OWNERSHIP_MARKER}"
+  fi
+  exec gosu reconner:reconner "$0" "$@"
+fi
+
 if ! mkdir -p \
   "${DATA_DIR}" \
   "${DATA_DIR}/tools" \

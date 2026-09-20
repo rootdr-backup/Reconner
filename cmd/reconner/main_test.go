@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/recon-platform/internal/config"
@@ -139,5 +140,77 @@ func TestRotateStoredSecretsRekeysDatabaseAndIsRetrySafe(t *testing.T) {
 		if afterRetry[i] != beforeRetry[i] {
 			t.Fatal("retry changed ciphertext that was already encrypted with the new key")
 		}
+	}
+}
+
+func TestRotateStoredSecretsRecoversUndecryptableTelegramToken(t *testing.T) {
+	db, err := database.New(filepath.Join(t.TempDir(), "rotation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	const oldKey, newKey = "old-deployment-key", "new-deployment-key"
+	headers := secret.New(oldKey).Encrypt(`{"Cookie":"session=private"}`)
+	badToken := secret.New("unrelated-key").Encrypt("123456:bot-secret")
+	if _, err := db.Exec(`INSERT INTO targets(id,domain) VALUES('target-1','example.test')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identities(id,target_id,headers_json) VALUES('identity-1','target-1',?)`, headers); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO telegram_config(id,encrypted_bot_token,enabled) VALUES(1,?,1)`, badToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO telegram_chats(id,chat_id,label,role) VALUES('chat-1','1340857378','owner','admin')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rotateStoredSecrets(db.DB, oldKey, newKey); err != nil {
+		t.Fatal(err)
+	}
+	var token, lastError, rotatedHeaders string
+	var enabled, chats int
+	if err := db.QueryRow(`SELECT encrypted_bot_token,enabled,last_error FROM telegram_config WHERE id=1`).Scan(&token, &enabled, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT headers_json FROM identities WHERE id='identity-1'`).Scan(&rotatedHeaders); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM telegram_chats`).Scan(&chats); err != nil {
+		t.Fatal(err)
+	}
+	if token != "" || enabled != 0 || !strings.Contains(lastError, "enter it again") {
+		t.Fatalf("telegram recovery = token %q, enabled %d, error %q", token, enabled, lastError)
+	}
+	if secret.New(newKey).Decrypt(rotatedHeaders) != `{"Cookie":"session=private"}` {
+		t.Fatal("identity secret was not rotated")
+	}
+	if chats != 1 {
+		t.Fatalf("telegram chats = %d, want 1", chats)
+	}
+}
+
+func TestRotateStoredSecretsFailsClosedForIdentitySecrets(t *testing.T) {
+	db, err := database.New(filepath.Join(t.TempDir(), "rotation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	badHeaders := secret.New("unrelated-key").Encrypt(`{"Authorization":"private"}`)
+	if _, err := db.Exec(`INSERT INTO targets(id,domain) VALUES('target-1','example.test')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identities(id,target_id,headers_json) VALUES('identity-1','target-1',?)`, badHeaders); err != nil {
+		t.Fatal(err)
+	}
+	if err := rotateStoredSecrets(db.DB, "old-key", "new-key"); err == nil || !strings.Contains(err.Error(), "identities.headers_json") {
+		t.Fatalf("rotation error = %v, want fail-closed identity error", err)
 	}
 }

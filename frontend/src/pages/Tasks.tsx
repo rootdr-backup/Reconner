@@ -91,7 +91,7 @@ export default function Tasks() {
     <div className="flex flex-col lg:flex-row gap-4 min-h-0 lg:h-[calc(100dvh-9rem)]">
       <div className="flex flex-col w-full lg:w-80 lg:shrink-0 max-h-[46dvh] lg:max-h-none">
         <div className="flex items-center justify-between mb-3">
-          <div><h1 className="text-xl font-semibold">Scan activity</h1><p className="text-[11px] text-text-muted mt-0.5">Live progress, failures and resumable work</p></div>
+          <div><p className="page-kicker">Operations timeline</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Scan activity</h1><p className="page-lede mt-1">Live progress, failures and resumable work.</p></div>
           <Button size="sm" variant="ghost" onClick={() => load(statusFilter)}>↻</Button>
         </div>
         <div className="flex gap-2 mb-3">

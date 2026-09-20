@@ -150,11 +150,12 @@ export default function BountyPrograms() {
     <div className="space-y-5">
       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div>
+          <p className="page-kicker">Program intelligence</p>
           <div className="flex items-center gap-2 flex-wrap">
-            <h1 className="text-xl font-semibold">Bug bounty programs</h1>
+            <h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Bug bounty programs</h1>
             {running && <Badge variant="low">syncing official catalogs</Badge>}
           </div>
-          <p className="mt-1 text-xs text-text-muted max-w-2xl">Public HackerOne, Bugcrowd, Intigriti and YesWeHack programs in one searchable catalog. Scope details load only when needed; import only the assets you choose.</p>
+          <p className="page-lede mt-2 max-w-2xl">Public HackerOne, Bugcrowd, Intigriti and YesWeHack programs in one searchable catalog. Scope details load only when needed; import only the assets you choose.</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[11px] text-text-muted">{knownPrograms || total} cached programs</span>

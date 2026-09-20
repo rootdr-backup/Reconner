@@ -89,13 +89,13 @@ export const Sidebar = () => {
     <>
       {mobileNavOpen && <button type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"
         className="fixed inset-0 z-30 bg-black/65 backdrop-blur-sm md:hidden" />}
-      <aside className={cn('fixed md:relative z-40 md:z-10 flex flex-col w-[17rem] md:w-60 shrink-0 h-[100dvh] top-0 left-0 border-r border-border bg-surface-1/98 backdrop-blur-xl transition-transform duration-200',
+      <aside className={cn('app-sidebar fixed md:relative z-40 md:z-10 flex flex-col w-[18rem] md:w-[17rem] shrink-0 h-[100dvh] top-0 left-0 transition-transform duration-200',
         mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0')}>
-      <div className="flex items-center gap-3 px-5 h-16 border-b border-border">
+      <div className="flex items-center gap-3.5 px-5 h-[76px] border-b border-white/[.07]">
         <BrandMark size="sm" />
         <div className="leading-tight">
-          <div className="text-[15px] font-bold tracking-tight text-gradient">Reconner</div>
-          <div className="text-[10px] text-text-muted tracking-[.16em] uppercase">Attack surface intelligence</div>
+          <div className="text-[17px] font-bold tracking-[-.03em] text-white">Reconner <span className="ml-1 text-[9px] align-top font-mono tracking-normal text-accent">V3</span></div>
+          <div className="text-[9px] text-text-muted tracking-[.2em] uppercase">Security operations</div>
         </div>
         <button type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"
           className="ml-auto grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] md:hidden">✕</button>

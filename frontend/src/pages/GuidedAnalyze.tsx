@@ -85,7 +85,7 @@ export default function GuidedAnalyze() {
 
   return <div className="space-y-4 max-w-[1500px] mx-auto">
     <header className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-3">
-      <div><h1 className="text-xl font-bold">Guided Analyze</h1><p className="text-xs text-text-muted mt-1">Turn real browser or Burp traffic into a focused, automated security test plan.</p></div>
+      <div><p className="page-kicker">Traffic workbench</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Guided Analyze</h1><p className="page-lede mt-1">Turn real browser or Burp traffic into a focused, automated security test plan.</p></div>
       <div className="flex items-center gap-1 rounded-xl border border-border bg-surface-2 p-1">
         {steps.map(([title, detail], index) => <div key={title} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${index === phase ? 'bg-accent/10 text-text-primary' : index < phase ? 'text-severity-low' : 'text-text-muted'}`}>
           <span className={`grid h-5 w-5 place-items-center rounded-full text-[10px] font-bold ${index <= phase ? 'bg-accent text-surface-1' : 'bg-surface-3 border border-border'}`}>{index < phase ? '✓' : index + 1}</span>
