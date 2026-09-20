@@ -208,8 +208,18 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     } finally { setLoading(false) }
   }
 
+  const footer = (
+    <div className="flex items-center justify-end gap-2">
+      <Button variant="ghost" onClick={onClose}>Cancel</Button>
+      <Button variant="primary" loading={loading} disabled={planned.size === 0 || !idorReady} onClick={handleStart}
+        title={!idorReady ? 'IDOR/BOLA needs two identities — paste User A and User B above' : undefined}>
+        ▶ Start Scan ({planned.size} phases)
+      </Button>
+    </div>
+  )
+
   return (
-    <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="xl">
+    <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="xl" footer={footer}>
       <div className="space-y-4">
         {/* Scan profile presets (Acunetix/Burp-style). */}
         <div>
@@ -373,7 +383,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
 
         {/* The resolved pipeline is shown, including locked automatic dependencies.
             Internal legacy/composite dispatchers are intentionally not user-facing. */}
-        <div className="max-h-[52vh] overflow-y-auto pr-1 space-y-4 no-scrollbar">
+        <div className="space-y-4">
           {SCAN_GROUPS.map(group => {
             const mods = SCAN_MODULES.filter(m => m.group === group.id)
             const on = mods.filter(m => planned.has(m.id)).length
@@ -422,13 +432,6 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           })}
         </div>
 
-        <div className="flex justify-end gap-2 pt-3 border-t border-white/[.06]">
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={loading} disabled={planned.size === 0 || !idorReady} onClick={handleStart}
-            title={!idorReady ? 'IDOR/BOLA needs two identities — paste User A and User B above' : undefined}>
-            ▶ Start Scan ({planned.size} phases)
-          </Button>
-        </div>
       </div>
     </Modal>
   )
