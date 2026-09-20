@@ -20,7 +20,7 @@ func TestBrowserDOMSourceModesLive(t *testing.T) {
 		t.Skip("browser E2E disabled; set RECONNER_BROWSER_TEST=1 and RECONNER_CHROME")
 	}
 	if findChromePath() == "" {
-		t.Skip("no Chrome/Chromium binary available")
+		t.Fatal("browser DOM coverage was explicitly required but no Chrome/Chromium binary is available")
 	}
 
 	mux := http.NewServeMux()

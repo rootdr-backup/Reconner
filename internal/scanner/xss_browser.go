@@ -1176,15 +1176,14 @@ func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, va
 }
 
 func (b *browserXSSConfirmer) waitForExecution(ctx context.Context, nonce string) string {
-	// Trigger interaction-required javascript: URL vectors and autofocus handlers,
-	// then poll for async/hydrated sinks instead of using a fixed one-second sleep.
-	_ = chromedp.Run(ctx, chromedp.Sleep(250*time.Millisecond))
-	triggerXSSInteractions(ctx, nonce)
 	// Poll is a chromedp action and must run through chromedp.Run so the CDP
 	// executor is attached to the context. Calling Action.Do(ctx) directly panics
 	// in current chromedp (nil cdp.Executor), which previously crashed live XSS
-	// scans as soon as a Mac/Linux browser was actually available.
-	proofExpr := `(document.title === ` + strconv.Quote(nonce) + ` || window.` + xssProofResultKey + ` === ` + strconv.Quote(nonce) + `)`
+	// scans as soon as a Mac/Linux browser was actually available. The poll also
+	// repeats nonce-scoped interactions: this removes the old unconditional 250ms
+	// wait for synchronous proofs and still catches controls added later by SPA
+	// hydration (the former one-shot trigger missed those).
+	proofExpr := xssProofPollExpression(nonce)
 	_ = chromedp.Run(ctx, chromedp.Poll(proofExpr, nil,
 		chromedp.WithPollingInterval(100*time.Millisecond), chromedp.WithPollingTimeout(1250*time.Millisecond)))
 	var proof string
@@ -1193,11 +1192,9 @@ func (b *browserXSSConfirmer) waitForExecution(ctx context.Context, nonce string
 	return proof
 }
 
-func triggerXSSInteractions(ctx context.Context, nonce string) {
-	nonceJSON, _ := json.Marshal(nonce)
-	// Interact only with nodes whose inline handler/URL contains this scan's random
-	// nonce. That exercises focus/click/toggle/pointer payloads without clicking
-	// unrelated application controls or causing side effects on the target.
-	triggerJS := `(()=>{const n=` + string(nonceJSON) + `;for(const e of document.querySelectorAll('*')){for(const a of [...e.attributes]){if(!a.value.includes(n))continue;try{if(a.name==='href'&&a.value.toLowerCase().startsWith('javascript:'))e.click();else if(a.name==='autofocus')e.focus();else if(a.name.startsWith('on')){const t=a.name.slice(2);if(t==='focus')e.focus();else if(t==='click')e.click();else{e.dispatchEvent(new Event(t,{bubbles:true}))}}}catch(_){}}}})()`
-	_ = chromedp.Run(ctx, chromedp.Evaluate(triggerJS, nil))
+func xssProofPollExpression(nonce string) string {
+	quoted := strconv.Quote(nonce)
+	return `(()=>{const n=` + quoted + `;if(document.title===n||window.` + xssProofResultKey + `===n)return true;` +
+		`for(const e of document.querySelectorAll('*')){for(const a of [...e.attributes]){if(!a.value.includes(n))continue;try{if(a.name==='href'&&a.value.toLowerCase().startsWith('javascript:'))e.click();else if(a.name==='autofocus')e.focus();else if(a.name.startsWith('on')){const t=a.name.slice(2);if(t==='focus')e.focus();else if(t==='click')e.click();else e.dispatchEvent(new Event(t,{bubbles:true}))}}catch(_){}}}` +
+		`return document.title===n||window.` + xssProofResultKey + `===n})()`
 }

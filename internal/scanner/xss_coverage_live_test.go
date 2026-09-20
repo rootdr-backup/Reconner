@@ -22,29 +22,29 @@ func TestBrowserXSSContextCoverageLive(t *testing.T) {
 		t.Skip("browser E2E disabled; set RECONNER_BROWSER_TEST=1 and RECONNER_CHROME")
 	}
 	if findChromePath() == "" {
-		t.Skip("no Chrome/Chromium binary available")
+		t.Fatal("browser coverage was explicitly required but no Chrome/Chromium binary is available")
 	}
 
-	contexts := map[string]string{
-		"html-text":       `<html><title>clean</title><body><div>%s</div></body></html>`,
-		"double-attr":     `<html><title>clean</title><body><input value="%s"></body></html>`,
-		"single-attr":     `<html><title>clean</title><body><input value='%s'></body></html>`,
-		"unquoted-attr":   `<html><title>clean</title><body><input value=%s></body></html>`,
-		"textarea-rcdata": `<html><title>clean</title><body><textarea>%s</textarea></body></html>`,
-		"title-rcdata":    `<html><title>%s</title><body></body></html>`,
-		"style-rawtext":   `<html><title>clean</title><style>body{color:%s}</style><body></body></html>`,
-		"html-comment":    `<html><title>clean</title><body><!--%s--></body></html>`,
-		"js-single":       `<html><title>clean</title><script>window.seed='%s'</script></html>`,
-		"js-double":       `<html><title>clean</title><script>window.seed="%s"</script></html>`,
-		"js-template":     "<html><title>clean</title><script>window.seed=`%s`</script></html>",
-		"js-expression":   `<html><title>clean</title><script>window.seed=0%s</script></html>`,
-		"url-href":        `<html><title>clean</title><body><a href="%s">go</a></body></html>`,
+	contexts := []struct{ name, page string }{
+		{"html-text", `<html><title>clean</title><body><div>%s</div></body></html>`},
+		{"double-attr", `<html><title>clean</title><body><input value="%s"></body></html>`},
+		{"single-attr", `<html><title>clean</title><body><input value='%s'></body></html>`},
+		{"unquoted-attr", `<html><title>clean</title><body><input value=%s></body></html>`},
+		{"textarea-rcdata", `<html><title>clean</title><body><textarea>%s</textarea></body></html>`},
+		{"title-rcdata", `<html><title>%s</title><body></body></html>`},
+		{"style-rawtext", `<html><title>clean</title><style>body{color:%s}</style><body></body></html>`},
+		{"html-comment", `<html><title>clean</title><body><!--%s--></body></html>`},
+		{"js-single", `<html><title>clean</title><script>window.seed='%s'</script></html>`},
+		{"js-double", `<html><title>clean</title><script>window.seed="%s"</script></html>`},
+		{"js-template", "<html><title>clean</title><script>window.seed=`%s`</script></html>"},
+		{"js-expression", `<html><title>clean</title><script>window.seed=0%s</script></html>`},
+		{"url-href", `<html><title>clean</title><body><a href="%s">go</a></body></html>`},
 	}
 
 	mux := http.NewServeMux()
-	for name, page := range contexts {
-		page := page
-		mux.HandleFunc("/"+name, func(w http.ResponseWriter, r *http.Request) {
+	for _, fixture := range contexts {
+		page := fixture.page
+		mux.HandleFunc("/"+fixture.name, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprintf(w, page, r.URL.Query().Get("q"))
 		})
@@ -60,7 +60,8 @@ func TestBrowserXSSContextCoverageLive(t *testing.T) {
 	defer cancel()
 
 	passed := 0
-	for name := range contexts {
+	for _, fixture := range contexts {
+		name := fixture.name
 		t.Run(name, func(t *testing.T) {
 			probeURL := srv.URL + "/" + name + "?q=" + url.QueryEscape(xssProbe)
 			resp, err := http.Get(probeURL) // #nosec G107 -- loopback test server only
