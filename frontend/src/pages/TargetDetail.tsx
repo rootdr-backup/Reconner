@@ -243,6 +243,7 @@ function ReportMenu({ targetId }: { targetId: string }) {
           <a href={`${base}/report.html`} target="_blank" rel="noreferrer" className={item}>Full report — HTML</a>
           <a href={`${base}/report`} target="_blank" rel="noreferrer" className={item}>Export — Markdown</a>
           <a href={`${base}/report.pdf`} target="_blank" rel="noreferrer" className={item}>Export — PDF</a>
+          <a href={`${base}/artifacts.zip`} className={item}>Download scan bundle — ZIP</a>
         </div>
       )}
     </div>
@@ -525,39 +526,61 @@ export default function TargetDetail() {
   return (
     <ErrorBoundary>
     <div className={cn('space-y-5', isNetwork && 'flex flex-col')}>
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-3 min-w-0 flex-1">
-		  <button onClick={() => navigate('/targets')} className="text-text-muted hover:text-text-primary text-sm shrink-0">← Projects</button>
-          <span className={cn('w-2.5 h-2.5 rounded-full shrink-0', dot[target.scan_status] || 'bg-text-muted')} />
-          {/* A network target's "domain" is its whole scope — up to 65k IPs. Without
-              truncation the h1 renders the entire list and shoves the action buttons
-              (Scan/Report/Pause/Skip/Cancel) off-screen. Cap it; full value on hover. */}
-          <h1 className="text-xl font-semibold truncate min-w-0 max-w-[36ch] md:max-w-[52ch]" title={target.domain}>
-            {target.name || target.domain}
-          </h1>
-          {target.priority !== 'medium' && (
-            <Badge variant={target.priority === 'critical' ? 'critical' : target.priority === 'high' ? 'high' : 'low'}>
-              {target.priority}
-            </Badge>
-          )}
+      <section className="card overflow-visible">
+        <div className="relative rounded-t-lg border-b border-border px-4 py-4 sm:px-5">
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-accent/[.09] via-transparent to-transparent" aria-hidden />
+          <div className="relative flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="min-w-0 flex-1">
+              <button onClick={() => navigate('/targets')} className="mb-2 text-[10px] font-semibold uppercase tracking-[.16em] text-text-muted transition-colors hover:text-accent">← Project fleet</button>
+              <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', dot[target.scan_status] || 'bg-text-muted')} />
+                {/* A network target's domain may contain thousands of hosts. Keep the
+                    control deck stable and expose the complete scope in the tooltip. */}
+                <h1 className="min-w-0 max-w-[36ch] truncate text-xl font-semibold tracking-tight md:max-w-[52ch]" title={target.domain}>
+                  {target.name || target.domain}
+                </h1>
+                <span className="badge-neutral uppercase">{target.scan_status}</span>
+                {target.priority !== 'medium' && (
+                  <Badge variant={target.priority === 'critical' ? 'critical' : target.priority === 'high' ? 'high' : 'low'}>
+                    {target.priority}
+                  </Badge>
+                )}
+                {target.monitor_enabled && <span className="badge-low">Automated</span>}
+              </div>
+              {target.name && <p className="mt-1.5 max-w-3xl truncate font-mono text-[11px] text-text-muted" title={target.domain}>{target.domain}</p>}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+              <ReportMenu targetId={id!} />
+              {target.scan_status === 'running' && <button onClick={pauseScan} className="btn-secondary text-sm">Pause</button>}
+              {target.scan_status === 'running' && (
+                <button onClick={skipPhase} className="btn-secondary text-sm text-severity-medium" title="Force-stop the current phase and continue with the next one">Skip phase</button>
+              )}
+              {target.scan_status === 'paused' && <button onClick={resumeScan} className="btn-secondary text-sm text-severity-medium">Resume</button>}
+              {(target.scan_status === 'running' || target.scan_status === 'paused') && (
+                <button onClick={cancelScan} className="btn-danger text-sm" title="Stop the entire scan and every remaining phase">Cancel</button>
+              )}
+              <button onClick={() => setScanOpen(true)} className="btn-primary text-sm">Start scan</button>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-          <ReportMenu targetId={id!} />
-          {target.scan_status === 'running' && (
-            <button onClick={pauseScan} className="btn-secondary text-sm">Pause</button>
-          )}
-          {target.scan_status === 'running' && (
-            <button onClick={skipPhase} className="btn-secondary text-sm" title="Abort just the current phase and continue to the next">Skip phase</button>
-          )}
-          {(target.scan_status === 'running' || target.scan_status === 'paused') && (
-            <button onClick={cancelScan} className="btn-secondary text-sm text-severity-high" title="Stop the entire scan (all remaining phases)">Cancel</button>
-          )}
-          {target.scan_status === 'paused' && (
-            <button onClick={resumeScan} className="btn-secondary text-sm text-severity-medium">Resume</button>
-          )}
-          <button onClick={() => setScanOpen(true)} className="btn-primary text-sm">Scan</button>
-        </div>
-      </div>
+
+        <dl className="grid grid-cols-2 divide-x divide-y divide-border sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0">
+          {[
+            { label: 'Subdomains', value: target.subdomain_count },
+            { label: 'Alive surface', value: target.alive_host_count, color: 'text-severity-low' },
+            { label: 'Verified findings', value: target.finding_count, color: target.finding_count > 0 ? 'text-severity-high' : undefined },
+            { label: 'Automation', value: target.monitor_enabled ? `Every ${target.monitor_interval_hours || 12}h` : 'Manual' },
+            { label: 'Last scan', value: target.last_scan_at ? timeAgo(target.last_scan_at) : 'Never' },
+            { label: 'Asset type', value: target.kind || 'web' },
+          ].map(metric => (
+            <div key={metric.label} className="min-w-0 px-4 py-3.5">
+              <dt className="text-[9px] font-semibold uppercase tracking-[.14em] text-text-muted">{metric.label}</dt>
+              <dd className={cn('mt-1 truncate text-sm font-semibold tabular-nums text-text-primary', metric.color)} title={String(metric.value)}>{metric.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
 
 	  {scopeEvents.some(e => e.status === 'pending') && (
 		<div className="card border-severity-medium/30 overflow-hidden">
@@ -587,22 +610,6 @@ export default function TargetDetail() {
           )}
         </div>
       )}
-
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
-        {[
-          { label: 'Subdomains', value: target.subdomain_count },
-          { label: 'Alive', value: target.alive_host_count, color: 'text-severity-low' },
-          { label: 'Findings', value: target.finding_count, color: target.finding_count > 0 ? 'text-severity-high' : undefined },
-          { label: 'Priority', value: target.priority },
-          { label: 'Status', value: target.scan_status },
-          { label: 'Last Scan', value: target.last_scan_at ? timeAgo(target.last_scan_at) : 'Never' },
-        ].map(s => (
-          <div key={s.label} className="card p-3 text-center">
-            <p className={cn('text-base font-semibold', s.color || 'text-text-primary')}>{s.value}</p>
-            <p className="text-xs text-text-muted">{s.label}</p>
-          </div>
-        ))}
-      </div>
 
       {/* Assets — scan each one individually, add / remove / name them. */}
       <div className="card p-4">

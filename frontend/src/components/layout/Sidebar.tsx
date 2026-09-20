@@ -5,6 +5,7 @@ import { useAuthStore } from '../../store/auth'
 import { dashboard } from '../../lib/api'
 import { useUIStore } from '../../store/ui'
 import { useUpdateCenter } from './UpdateCenter'
+import { BrandMark } from '../brand/BrandMark'
 
 // Donation options. Iranian users have a local gateway; everyone else can send
 // crypto to these addresses. Nothing here is collected by the app — they're
@@ -91,14 +92,7 @@ export const Sidebar = () => {
       <aside className={cn('fixed md:relative z-40 md:z-10 flex flex-col w-[17rem] md:w-60 shrink-0 h-[100dvh] top-0 left-0 border-r border-border bg-surface-1/98 backdrop-blur-xl transition-transform duration-200',
         mobileNavOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0')}>
       <div className="flex items-center gap-3 px-5 h-16 border-b border-border">
-        <div className="grid place-items-center w-9 h-9 rounded-xl shrink-0 glow-accent"
-          style={{ backgroundImage: 'var(--grad-accent)' }}>
-          <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.9" />
-            <path d="M12 4v4M12 16v4M4 12h4M16 12h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-            <circle cx="12" cy="12" r="2" fill="currentColor" />
-          </svg>
-        </div>
+        <BrandMark size="sm" />
         <div className="leading-tight">
           <div className="text-[15px] font-bold tracking-tight text-gradient">Reconner</div>
           <div className="text-[10px] text-text-muted tracking-[.16em] uppercase">Attack surface intelligence</div>

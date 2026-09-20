@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/auth'
+import { BrandMark } from '../components/brand/BrandMark'
 
 export default function Login() {
   const [username, setUsername] = useState('admin')
@@ -18,14 +19,7 @@ export default function Login() {
       <div className="aurora" aria-hidden />
       <div className="relative z-10 w-full max-w-sm animate-[slideUp_.4s_ease-out]">
         <div className="flex flex-col items-center gap-4 mb-8">
-          <div className="grid place-items-center w-16 h-16 rounded-2xl glow-accent"
-            style={{ backgroundImage: 'var(--grad-accent)' }}>
-            <svg className="w-9 h-9 text-white" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.9"/>
-              <path d="M12 4v4M12 16v4M4 12h4M16 12h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"/>
-              <circle cx="12" cy="12" r="2" fill="currentColor"/>
-            </svg>
-          </div>
+          <BrandMark size="lg" />
           <div className="text-center">
             <div className="text-2xl font-bold tracking-tight text-gradient">Reconner</div>
             <div className="text-xs text-text-muted tracking-wider uppercase mt-0.5">Bug-Bounty Watchtower</div>

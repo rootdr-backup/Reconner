@@ -60,6 +60,17 @@ test('first boot, project CRUD, focused scan and phase ledger', async ({ page },
     await expect(telegram.getByText(chatID)).toHaveCount(0)
   }
 
+  await page.getByRole('tab', { name: 'Wordlists & payloads' }).click()
+  const backupCategory = page.getByRole('button', { name: /Backups & secrets/ })
+  await backupCategory.click()
+  await page.getByLabel('Paste one entry per line').fill('back/.env\n/back/.env')
+  await page.getByRole('button', { name: 'Add & deduplicate' }).click()
+  await expect(page.getByText('1 added · 1 duplicate · 0 invalid')).toBeVisible()
+  await expect(backupCategory).toContainText(/\d+ effective · 1 custom/)
+  page.once('dialog', dialog => dialog.accept())
+  await page.getByRole('button', { name: 'Restore default wordlist' }).click()
+  await expect(backupCategory).toContainText(/\d+ effective · 0 custom/)
+
   await page.getByRole('link', { name: /Projects/ }).click()
   await page.getByRole('button', { name: '+ New Project' }).click()
   const createDialog = page.getByRole('dialog', { name: 'Create Project' })

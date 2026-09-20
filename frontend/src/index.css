@@ -182,6 +182,21 @@
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .glow-accent { box-shadow: var(--glow); }
+  .brand-mark {
+    background:
+      radial-gradient(circle at 34% 24%, rgba(255,255,255,.22), transparent 28%),
+      linear-gradient(145deg, #0891b2 0%, #0d9488 58%, #0f766e 100%);
+    border: 1px solid rgba(103,232,249,.38);
+    box-shadow: 0 0 0 1px rgba(34,211,238,.08), 0 12px 28px -14px rgba(34,211,238,.75);
+  }
+  .brand-mark::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(115deg, transparent 22%, rgba(255,255,255,.16) 45%, transparent 67%);
+    transform: translateX(-120%);
+    animation: brandSweep 7s ease-in-out infinite;
+  }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
   /* Ambient accent wash — single hue, restrained (calm console, not a party). */
@@ -209,6 +224,7 @@
 @keyframes spin-slow { to { transform: rotate(360deg); } }
 .animate-spin-slow { animation: spin-slow 2s linear infinite; }
 @keyframes radarSpin { to { transform: rotate(360deg); } }
+@keyframes brandSweep { 0%,72%,100%{transform:translateX(-120%)} 84%{transform:translateX(120%)} }
 @keyframes fadeIn { from{opacity:0} to{opacity:1} }
 @keyframes slideUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
 @keyframes rowIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }

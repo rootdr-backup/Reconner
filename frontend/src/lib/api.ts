@@ -298,6 +298,25 @@ export interface ToolInstallResult {
   notes?: string; output?: string; message: string
 }
 
+export interface CorpusCategory {
+  id: string
+  label: string
+  kind: 'wordlist' | 'payload'
+  description: string
+  default_count: number
+  custom_count: number
+  total_count: number
+  preview: string[]
+}
+
+export interface CorpusMergeResult {
+  input: number
+  added: number
+  duplicates: number
+  invalid: number
+  total: number
+}
+
 export const system = {
   tools: () => req<Record<string, boolean>>('/tools/status'),
   toolCatalog: () => req<ToolCatalogEntry[]>('/tools/catalog'),
@@ -309,6 +328,11 @@ export const system = {
   getSettings: () => req<{ api_keys: ApiKeyState[] }>('/system/settings'),
   updateSettings: (patch: Record<string, string>) =>
     req<{ api_keys: ApiKeyState[] }>('/system/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  corpora: () => req<CorpusCategory[]>('/system/corpora'),
+  mergeCorpus: (category: string, text: string) =>
+    req<CorpusMergeResult>(`/system/corpora/${encodeURIComponent(category)}`, { method: 'POST', body: JSON.stringify({ text }) }),
+  restoreCorpus: (category: string) =>
+    req<{ removed: number }>(`/system/corpora/${encodeURIComponent(category)}/custom`, { method: 'DELETE' }),
   telegram: () => req<TelegramState>('/system/telegram'),
   updateTelegram: (patch: { bot_token?: string; enabled?: boolean }) =>
     req<TelegramState>('/system/telegram', { method: 'PATCH', body: JSON.stringify(patch) }),

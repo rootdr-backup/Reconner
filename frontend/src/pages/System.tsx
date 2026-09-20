@@ -7,12 +7,13 @@ import { useUIStore } from '../store/ui'
 import { useAuthStore } from '../store/auth'
 import { UsersAdmin } from '../components/system/UsersAdmin'
 import { TelegramIntegration } from '../components/system/TelegramIntegration'
+import { CorpusManager } from '../components/system/CorpusManager'
 import { useUpdateCenter } from '../components/layout/UpdateCenter'
 
 interface SystemLogLine { level: string; module: string; message: string; time: string }
 
 export default function System() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'integrations' | 'toolchain' | 'team'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'integrations' | 'corpora' | 'toolchain' | 'team'>('overview')
   const [tools, setTools] = useState<Record<string,boolean>>({})
   const [catalog, setCatalog] = useState<ToolCatalogEntry[]>([])
   const [installing, setInstalling] = useState<Record<string, boolean>>({})
@@ -119,9 +120,10 @@ export default function System() {
 
   if (loading) return <div className="flex items-center justify-center h-64"><Spinner className="w-10 h-10"/></div>
 
-  const tabs: { id: 'overview' | 'integrations' | 'toolchain' | 'team'; label: string; hidden?: boolean }[] = [
+  const tabs: { id: 'overview' | 'integrations' | 'corpora' | 'toolchain' | 'team'; label: string; hidden?: boolean }[] = [
     { id: 'overview', label: 'Overview' },
     { id: 'integrations', label: 'Integrations' },
+    { id: 'corpora', label: 'Wordlists & payloads', hidden: !isAdmin },
     { id: 'toolchain', label: 'Toolchain' },
     { id: 'team', label: 'Team', hidden: !isAdmin },
   ]
@@ -237,6 +239,8 @@ export default function System() {
           </div>
         </section>
       )}
+
+      {activeTab === 'corpora' && <CorpusManager />}
 
       {activeTab === 'toolchain' && (
         <section className="space-y-5 animate-fade-in">
