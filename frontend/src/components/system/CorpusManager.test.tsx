@@ -18,6 +18,13 @@ const category = (custom = 0) => ({
   preview: custom ? ['/back/.env', '/.env'] : ['/.env'],
 })
 
+const xssCategory = () => ({
+  id: 'xss', label: 'XSS', kind: 'payload',
+  description: 'Browser-proof templates.',
+  default_count: 20, custom_count: 0, total_count: 20,
+  preview: [`<svg onload="top.document.title='%s'">`],
+})
+
 describe('CorpusManager', () => {
   beforeEach(() => useUIStore.setState({ toasts: [] }))
 
@@ -54,5 +61,30 @@ describe('CorpusManager', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5))
     const toasts = useUIStore.getState().toasts
     expect(toasts[toasts.length - 1]?.message).toMatch(/1 custom entry removed/i)
+  })
+
+  it('explains the XSS proof format, loads examples and preserves rejected lines', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method || 'GET') === 'POST') {
+        return ok({ input: 2, added: 1, duplicates: 0, invalid: 1, total: 21 })
+      }
+      return ok([xssCategory()])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CorpusManager />)
+    await screen.findAllByText('XSS')
+    expect(screen.getByText('XSS imports require browser-proof templates')).toBeInTheDocument()
+    expect(screen.getByLabelText('Valid XSS template examples')).toHaveTextContent("top.document.title='%s'")
+
+    const editor = screen.getByLabelText('Paste one entry per line')
+    await user.type(editor, `<script>alert(1)</script>\n<svg onload="top.document.title='%s'">`)
+    expect(screen.getByText(/1 of 2 non-empty lines do not match/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add & deduplicate' }))
+
+    await screen.findByRole('alert')
+    expect(screen.getByRole('alert')).toHaveTextContent('Why was 1 line rejected?')
+    expect(editor).toHaveValue('<script>alert(1)</script>')
   })
 })
