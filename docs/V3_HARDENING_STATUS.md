@@ -1,8 +1,9 @@
 # Reconner v3 Hardening Status
 
-This document records implementation progress without declaring a stable v3
-release. `VERSION` remains `2.5.0`; no v3 tag is valid until Phases 6–8 of the
-[release plan](V3_STABILITY_RELEASE_PLAN.md) pass on the final unchanged commit.
+This document records the hardening scope promoted into the v3.0.0 release
+candidate. `VERSION` is now `3.0.0`; publication remains blocked until every
+required GitHub quality and native multi-architecture image gate passes on the
+final unchanged commit. See the [release audit](V3_RELEASE_AUDIT.md).
 
 ## Completed in the current hardening change set
 
@@ -28,14 +29,12 @@ release. `VERSION` remains `2.5.0`; no v3 tag is valid until Phases 6–8 of the
   target control deck that consolidates status, automation, scan controls,
   exports and high-value metrics instead of scattering them across cards.
 
-## Still required before any v3 tag
+## Release evidence and continuing validation
 
-- full performance comparison against the immutable v2.5.0 baseline;
-- repeated leak/resource measurements and the 24-hour mixed-workload soak;
-- production-image upgrade, interrupted-migration, backup, restore and rollback
-  evidence for every supported v2 database path;
-- final dependency/container/security evidence on both amd64 and arm64;
-- an unchanged release-candidate commit passing every required gate.
-
-Until those artifacts exist, a green pull request means **hardening candidate**,
-not `v3.0.0` stable.
+- deterministic correctness, race, migration, production-browser, dependency,
+  secret and container gates are enforced in CI;
+- amd64 and arm64 images must both pass before the manifest is published;
+- the owner-requested five-hour fast track is disclosed in the release audit
+  and does not misrepresent itself as a completed 24-hour pre-release soak;
+- extended production monitoring continues after publication and any observed
+  regression is handled as a patch release.
