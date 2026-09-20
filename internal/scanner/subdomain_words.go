@@ -66,7 +66,11 @@ func (s *SubdomainScanner) deepDNSWords(ctx context.Context, domain string, know
 		words = append(words, w)
 	}
 
-	for _, w := range bruteWords {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	for _, w := range LoadCorpus(corpusDir, "subdomain", bruteWords) {
 		add(w)
 	}
 	for _, w := range devToolWords {

@@ -1024,6 +1024,11 @@ func (s *Scheduler) SkipCurrentPhase(targetID string) error {
 		return fmt.Errorf("no phase is currently running to skip")
 	}
 	cancel()
+	// Browser-backed modules use a long-lived chromedp allocator whose process is
+	// outside the phase context. Kill it explicitly when it currently belongs to
+	// this task; AbortXSSBrowserOwner is a no-op for non-browser phases and for a
+	// task that is only waiting on the shared navigation gate.
+	scanner.AbortXSSBrowserOwner(taskID)
 	s.hub.Broadcast("phase_skipped", map[string]string{"task_id": taskID, "target_id": targetID})
 	return nil
 }
@@ -1037,6 +1042,7 @@ func (s *Scheduler) SkipCurrentPhase(targetID string) error {
 // a watchdog timeout.
 func (s *Scheduler) beginPhase(parent context.Context, taskID string, watchdog time.Duration) (context.Context, func() (skipped, timedOut bool)) {
 	modCtx, cancel := context.WithTimeout(parent, watchdog)
+	modCtx = scanner.WithXSSBrowserOwner(modCtx, taskID)
 	s.pauseMu.Lock()
 	s.skipCancel[taskID] = cancel
 	s.skipReq[taskID] = false
@@ -1054,6 +1060,64 @@ func (s *Scheduler) beginPhase(parent context.Context, taskID string, watchdog t
 		return skipped && parent.Err() == nil, timedOut && parent.Err() == nil
 	}
 	return modCtx, finish
+}
+
+const phaseStopGrace = 5 * time.Second
+
+var errPhaseStopGrace = errors.New("phase worker did not stop after cancellation grace")
+
+type phaseRunResult struct {
+	module   string
+	err      error
+	duration time.Duration
+}
+
+// collectPhaseResults preserves the existing parallel execution model but puts
+// a hard boundary around cancellation. Workers publish into a buffered channel
+// and never mutate scheduler state. If a third-party library ignores context,
+// Skip/watchdog/cancel waits only grace, synthesizes a terminal result for the
+// missing worker, and moves the scheduler forward without leaking a WaitGroup.
+func collectPhaseResults(ctx context.Context, modules []string, results <-chan phaseRunResult, grace time.Duration) ([]phaseRunResult, bool) {
+	pending := make(map[string]struct{}, len(modules))
+	for _, module := range modules {
+		pending[module] = struct{}{}
+	}
+	collected := make([]phaseRunResult, 0, len(modules))
+	done := ctx.Done()
+	var graceTimer *time.Timer
+	var graceC <-chan time.Time
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
+	for len(pending) > 0 {
+		select {
+		case result := <-results:
+			if _, ok := pending[result.module]; !ok {
+				continue
+			}
+			delete(pending, result.module)
+			collected = append(collected, result)
+		case <-done:
+			done = nil
+			if grace <= 0 {
+				graceC = time.After(0)
+			} else {
+				graceTimer = time.NewTimer(grace)
+				graceC = graceTimer.C
+			}
+		case <-graceC:
+			for module := range pending {
+				collected = append(collected, phaseRunResult{
+					module: module,
+					err:    fmt.Errorf("%w: %v", errPhaseStopGrace, ctx.Err()),
+				})
+			}
+			return collected, true
+		}
+	}
+	return collected, false
 }
 
 // ResumeTarget clears the pause gate so the scan continues from where it stopped.
@@ -1643,34 +1707,27 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				for _, groupModule := range group {
 					s.startTaskPhase(taskID, groupModule)
 				}
-				var wg sync.WaitGroup
-				var gmu sync.Mutex
-				type phaseResult struct {
-					module   string
-					err      error
-					duration time.Duration
-				}
-				results := make([]phaseResult, 0, len(group))
+				resultCh := make(chan phaseRunResult, len(group))
 				for _, gm := range group {
-					wg.Add(1)
 					go func(m string) {
-						defer wg.Done()
 						started := time.Now()
 						err := runPlannedModule(modCtx, m)
-						gmu.Lock()
-						defer gmu.Unlock()
-						results = append(results, phaseResult{module: m, err: err, duration: time.Since(started)})
-						if err != nil && !scanner.IsPhaseBlocked(err) && ctx.Err() == nil && modCtx.Err() == nil {
-							logFn("error", m, fmt.Sprintf("Module failed: %v", err))
-							taskErr = err
-							return
-						}
-						if err == nil {
-							completedModules = append(completedModules, m)
-						}
+						resultCh <- phaseRunResult{module: m, err: err, duration: time.Since(started)}
 					}(gm)
 				}
-				wg.Wait()
+				results, forced := collectPhaseResults(modCtx, group, resultCh, phaseStopGrace)
+				for _, result := range results {
+					if result.err != nil && !errors.Is(result.err, errPhaseStopGrace) && !scanner.IsPhaseBlocked(result.err) && ctx.Err() == nil && modCtx.Err() == nil {
+						logFn("error", result.module, fmt.Sprintf("Module failed: %v", result.err))
+						taskErr = result.err
+					}
+					if result.err == nil {
+						completedModules = append(completedModules, result.module)
+					}
+				}
+				if forced {
+					logFn("warn", "scheduler", fmt.Sprintf("Phase group %v did not stop within %s after cancellation; force-released scheduler ownership.", group, phaseStopGrace))
+				}
 				skipped, timedOut := finishPhase()
 				if skipped {
 					// A skipped parallel phase is one operator action over the whole
@@ -1706,7 +1763,16 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		}
 
 		s.startTaskPhase(taskID, module)
-		err := runPlannedModule(modCtx, module)
+		resultCh := make(chan phaseRunResult, 1)
+		go func() {
+			started := time.Now()
+			resultCh <- phaseRunResult{module: module, err: runPlannedModule(modCtx, module), duration: time.Since(started)}
+		}()
+		results, forced := collectPhaseResults(modCtx, []string{module}, resultCh, phaseStopGrace)
+		err := results[0].err
+		if forced {
+			logFn("warn", "scheduler", fmt.Sprintf("Phase %q did not stop within %s after cancellation; force-released scheduler ownership.", module, phaseStopGrace))
+		}
 		skipped, timedOut := finishPhase()
 		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
 		s.finishTaskPhase(taskID, module, phaseStatus, phaseReason, time.Since(phaseStartedAt))

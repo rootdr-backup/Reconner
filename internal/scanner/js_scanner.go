@@ -666,25 +666,30 @@ func jsRedirectInScope(finalURL, requested, parent, targetDomain string) bool {
 
 func fetchJSContent(ctx context.Context, jsURL string) ([]byte, string, *http.Client, error) {
 	client := &http.Client{Timeout: 20 * time.Second, Transport: sharedHTTPTransport}
+	content, finalURL, err := fetchJSContentWithClient(ctx, jsURL, client)
+	return content, finalURL, client, err
+}
+
+func fetchJSContentWithClient(ctx context.Context, jsURL string, client *http.Client) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", jsURL, nil)
 	if err != nil {
-		return nil, "", client, err
+		return nil, "", err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", client, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", client, fmt.Errorf("JS HTTP status %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("JS HTTP status %d", resp.StatusCode)
 	}
 	content, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024+1))
 	if err != nil {
-		return nil, "", client, err
+		return nil, "", err
 	}
 	if len(content) == 0 || len(content) > 10*1024*1024 || strings.TrimSpace(string(content)) == "" {
-		return nil, "", client, fmt.Errorf("empty or oversized JS body")
+		return nil, "", fmt.Errorf("empty or oversized JS body")
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	prefix := strings.ToLower(strings.TrimSpace(string(content[:minInt(len(content), 512)])))
@@ -692,9 +697,41 @@ func fetchJSContent(ctx context.Context, jsURL string) ([]byte, string, *http.Cl
 		strings.HasPrefix(ct, "image/") || strings.Contains(ct, "text/css") || strings.Contains(ct, "font/") ||
 		strings.HasPrefix(prefix, "<!doctype html") ||
 		strings.HasPrefix(prefix, "<html") || strings.HasPrefix(prefix, "<head") || strings.HasPrefix(prefix, "<body") {
-		return nil, "", client, fmt.Errorf("non-JavaScript HTML response")
+		return nil, "", fmt.Errorf("non-JavaScript HTML response")
 	}
-	return content, normalizeJSURL(resp.Request.URL.String()), client, nil
+	return content, normalizeJSURL(resp.Request.URL.String()), nil
+}
+
+// FetchJSArtifact retrieves a previously discovered JavaScript asset for an
+// operator-initiated export. Both the requested URL and the final redirect
+// destination must remain inside the target's configured scope; this keeps a
+// stale or tampered js_files row from turning the export endpoint into an SSRF
+// primitive or leaking a target identity to an unrelated host.
+func FetchJSArtifact(ctx context.Context, targetScope, jsURL string) ([]byte, string, error) {
+	if !requestURLInTargetScope(ctx, targetScope, jsURL) {
+		return nil, "", fmt.Errorf("JavaScript URL is outside target scope")
+	}
+	client := &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: sharedHTTPTransport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many JavaScript redirects")
+			}
+			if !requestURLInTargetScope(req.Context(), targetScope, req.URL.String()) {
+				return fmt.Errorf("JavaScript redirect left target scope")
+			}
+			return nil
+		},
+	}
+	content, finalURL, err := fetchJSContentWithClient(ctx, jsURL, client)
+	if err != nil {
+		return nil, "", err
+	}
+	if !requestURLInTargetScope(ctx, targetScope, finalURL) {
+		return nil, "", fmt.Errorf("JavaScript redirect left target scope")
+	}
+	return content, finalURL, nil
 }
 
 func parseBase(rawURL string) (string, error) {

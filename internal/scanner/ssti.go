@@ -120,8 +120,8 @@ func (s *SSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			}
 			firstToken := newXSSToken("rcnssti")
 			secondToken := newXSSToken("rcnssti")
-			first := sstiProbeSet(firstToken, 7, 7)
-			second := sstiProbeSet(secondToken, 8, 8)
+			first := append(sstiProbeSet(firstToken, 7, 7), s.customSSTIProbes(firstToken, 7, 7)...)
+			second := append(sstiProbeSet(secondToken, 8, 8), s.customSSTIProbes(secondToken, 8, 8)...)
 			for i, probe := range first {
 				body, status, _ := sendInjectedFull(ctx, sstiHTTPClient, ip, probe.payload, auth)
 				if body == "" || looksLikeBlockPage(status, body) || !strings.Contains(body, probe.expect) ||
@@ -153,6 +153,25 @@ func (s *SSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 
 	logFn("info", "ssti", fmt.Sprintf("SSTI check done. Found %d.", found.Load()))
 	return nil
+}
+
+func (s *SSTIScanner) customSSTIProbes(token string, a, b int) []sstiProbe {
+	if s.cfg == nil {
+		return nil
+	}
+	templates := CustomCorpus(s.cfg.WordlistsDir, "ssti")
+	if len(templates) > 64 {
+		templates = templates[:64]
+	}
+	out := make([]sstiProbe, 0, len(templates))
+	for _, template := range templates {
+		out = append(out, sstiProbe{
+			payload: token + fmt.Sprintf(template, a, b) + "z",
+			expect:  fmt.Sprintf("%s%dz", token, a*b),
+			engine:  "operator corpus",
+		})
+	}
+	return out
 }
 
 func (s *SSTIScanner) plantBlindSSTI(ctx context.Context, targetID string, points []insertionPoint, auth map[string]string, logFn LogFunc) {

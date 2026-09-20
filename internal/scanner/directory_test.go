@@ -2,9 +2,14 @@ package scanner
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
+
+	"github.com/recon-platform/internal/database"
 )
 
 func TestRealSizeUsesContentLength(t *testing.T) {
@@ -22,6 +27,61 @@ func TestRealSizeUsesContentLength(t *testing.T) {
 	resp3 := &http.Response{ContentLength: -1, Header: http.Header{}}
 	if got := realSize(resp3, 4321); got != 4321 {
 		t.Fatalf("fallback to body len: got %d", got)
+	}
+}
+
+func TestShortNestedEnvIsCredibleWithoutMinimumSizeHeuristic(t *testing.T) {
+	body := []byte("DB_PASSWORD=s3cr3t\nAPI_KEY=0123456789abcdef\n")
+	if len(body) >= 100 {
+		t.Fatal("fixture must exercise the former short-body false negative")
+	}
+	if got := detectFileType("/back/.env", body); got != "env_file" {
+		t.Fatalf("file type=%q", got)
+	}
+	if !credibleSensitiveBackup("env_file", body, "") {
+		t.Fatal("short, high-signal .env content was rejected")
+	}
+	if credibleSensitiveBackup("env_file", []byte("hello from the app"), "") {
+		t.Fatal("generic text must not be accepted only because the path ends in .env")
+	}
+	if credibleSensitiveBackup("archive", []byte("not really a zip"), "") {
+		t.Fatal("archive extension without a file signature must be rejected")
+	}
+}
+
+func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
+	withLoopbackAllowed(t)
+	body := "DB_PASSWORD=s3cr3t\nAPI_KEY=0123456789abcdef\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/back/.env" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	db, err := database.New(filepath.Join(t.TempDir(), "backup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO targets (id,domain) VALUES ('target','example.test')`); err != nil {
+		t.Fatal(err)
+	}
+	if found := scanBackupCandidatesWithCorpus(context.Background(), db, "target", []string{srv.URL}, "example.test", []string{"/back/.env"}); found < 1 {
+		t.Fatal("/back/.env was not discovered")
+	}
+	var fileType string
+	if err := db.QueryRow(`SELECT file_type FROM backup_findings WHERE target_id='target' AND url=?`, srv.URL+"/back/.env").Scan(&fileType); err != nil {
+		t.Fatal(err)
+	}
+	if fileType != "env_file" {
+		t.Fatalf("stored file type=%q", fileType)
 	}
 }
 

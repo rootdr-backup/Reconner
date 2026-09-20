@@ -28,9 +28,10 @@ func NewCSTIScanner(db *database.DB, _ *tools.Executor, cfg *config.Config, log 
 }
 
 type cstiCandidate struct {
-	ip    insertionPoint
-	probe sstiProbe
-	raw   string
+	ip       insertionPoint
+	probe    sstiProbe
+	template string
+	raw      string
 }
 
 func cstiEvaluationProven(raw, payload, expected, rendered string) bool {
@@ -70,18 +71,21 @@ func (s *CSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			token := newXSSToken("rcncsti")
-			probe := sstiProbeSet(token, 7, 7)[0] // existing benign {{7*7}} probe
-			resp := sendInjectedResponse(ctx, sstiHTTPClient, ip, probe.payload, auth)
-			if !browserRendersResponse(resp.Status, resp.ContentType, resp.Body, resp.NoSniff) ||
-				looksLikeBlockPage(resp.Status, resp.Body) ||
-				!strings.Contains(resp.Body, probe.payload) ||
-				strings.Contains(resp.Body, probe.expect) {
+			for _, template := range s.cstiTemplates() {
+				token := newXSSToken("rcncsti")
+				probe := cstiProbeFromTemplate(template, token, 7, 7)
+				resp := sendInjectedResponse(ctx, sstiHTTPClient, ip, probe.payload, auth)
+				if !browserRendersResponse(resp.Status, resp.ContentType, resp.Body, resp.NoSniff) ||
+					looksLikeBlockPage(resp.Status, resp.Body) ||
+					!strings.Contains(resp.Body, probe.payload) ||
+					strings.Contains(resp.Body, probe.expect) {
+					continue
+				}
+				mu.Lock()
+				candidates = append(candidates, cstiCandidate{ip: ip, probe: probe, template: template, raw: resp.Body})
+				mu.Unlock()
 				return
 			}
-			mu.Lock()
-			candidates = append(candidates, cstiCandidate{ip: ip, probe: probe, raw: resp.Body})
-			mu.Unlock()
 		}(ip)
 	}
 	wg.Wait()
@@ -105,7 +109,7 @@ func (s *CSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		// arithmetic expression. This makes the observations independent without
 		// expanding the payload set beyond {{7*7}}.
 		secondToken := newXSSToken("rcncsti")
-		second := sstiProbeSet(secondToken, 7, 7)[0]
+		second := cstiProbeFromTemplate(candidate.template, secondToken, 7, 7)
 		resp2 := sendInjectedResponse(ctx, sstiHTTPClient, candidate.ip, second.payload, auth)
 		rendered2 := browser.renderInsertion(ctx, candidate.ip, auth, second.payload)
 		if !browserRendersResponse(resp2.Status, resp2.ContentType, resp2.Body, resp2.NoSniff) ||
@@ -129,4 +133,23 @@ func (s *CSTIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	}
 	logFn("info", "csti", fmt.Sprintf("CSTI check done. Confirmed %d client-rendered template injection(s).", found))
 	return nil
+}
+
+func (s *CSTIScanner) cstiTemplates() []string {
+	templates := []string{"{{%d*%d}}"}
+	if s.cfg != nil {
+		templates = append(templates, CustomCorpus(s.cfg.WordlistsDir, "csti")...)
+	}
+	if len(templates) > 32 {
+		templates = templates[:32]
+	}
+	return templates
+}
+
+func cstiProbeFromTemplate(template, token string, a, b int) sstiProbe {
+	return sstiProbe{
+		payload: token + fmt.Sprintf(template, a, b) + "z",
+		expect:  fmt.Sprintf("%s%dz", token, a*b),
+		engine:  "client template",
+	}
 }

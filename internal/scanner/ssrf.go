@@ -129,6 +129,22 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	candidates := s.selectCandidates(ctx, targetID)
 	logFn("info", "ssrf", fmt.Sprintf("Selected %d SSRF-prone parameters", len(candidates)))
 	auth := loadAuthHeaders(ctx, s.db, targetID)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	configuredPayloads := LoadCorpus(corpusDir, "ssrf", nil)
+	payloads := append([]struct{ url, note string }{}, ssrfInbandPayloads...)
+	seenPayload := make(map[string]bool, len(payloads)+len(configuredPayloads))
+	for _, payload := range payloads {
+		seenPayload[payload.url] = true
+	}
+	for _, payload := range configuredPayloads {
+		if !seenPayload[payload] {
+			seenPayload[payload] = true
+			payloads = append(payloads, struct{ url, note string }{payload, "operator corpus"})
+		}
+	}
 	if len(candidates) == 0 {
 		// No in-band candidates, but blind (out-of-band) SSRF may still be planted
 		// on URL-prone params whose fetch produces no visible response signal.
@@ -161,7 +177,7 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 				return
 			}
 
-			for _, pl := range ssrfInbandPayloads {
+			for _, pl := range payloads {
 				body, status := s.fetch(ctx, ip, pl.url, auth)
 				if body == "" {
 					continue

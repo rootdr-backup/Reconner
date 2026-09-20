@@ -169,13 +169,17 @@ func checkOpenRedirectURL(rawURL, param string) (openRedirectResult, bool) {
 // never follows the browser onto evil.com: observing a Location/meta/JS target
 // whose parsed final host is our injected host is already the proof.
 func checkOpenRedirectPoint(ctx context.Context, ip insertionPoint, auth map[string]string) (openRedirectResult, bool) {
+	return checkOpenRedirectPointWithPayloads(ctx, ip, auth, openRedirectPayloads)
+}
+
+func checkOpenRedirectPointWithPayloads(ctx context.Context, ip insertionPoint, auth map[string]string, payloads []string) (openRedirectResult, bool) {
 	origin, err := url.Parse(ip.URL)
 	if err != nil {
 		return openRedirectResult{}, false
 	}
 	originHost := strings.ToLower(strings.TrimPrefix(origin.Hostname(), "www."))
 	var candidate *openRedirectResult
-	for _, payload := range openRedirectPayloads {
+	for _, payload := range payloads {
 		reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		req, err := buildInjectedRequest(reqCtx, ip, payload, auth)
 		if err != nil {

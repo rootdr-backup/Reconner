@@ -95,6 +95,11 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		return nil
 	}
 	auth := loadAuthHeaders(ctx, s.db, targetID)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	payloads := LoadCorpus(corpusDir, "lfi", lfiPayloads)
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -118,7 +123,7 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			if looksLikeBlockPage(baseStatus, baseBody) {
 				return
 			}
-			for _, pl := range lfiPayloads {
+			for _, pl := range payloads {
 				body, status, _ := sendInjectedFull(ctx, lfiHTTPClient, ip, pl, auth)
 				if body == "" {
 					continue

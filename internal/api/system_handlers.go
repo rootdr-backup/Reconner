@@ -93,6 +93,45 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.handleGetSettings(w, r)
 }
 
+// handleListCorpora exposes counts and a short effective preview, never a
+// server-side path. Corpus mutation is admin-only because these lists control
+// the requests every subsequent scan may send.
+func (h *Handler) handleListCorpora(w http.ResponseWriter, _ *http.Request) {
+	h.writeSuccess(w, scanner.CorpusCatalog(h.cfg.WordlistsDir))
+}
+
+func (h *Handler) handleMergeCorpus(w http.ResponseWriter, r *http.Request) {
+	category := mux.Vars(r)["category"]
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	var body struct {
+		Entries []string `json:"entries"`
+		Text    string   `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	input := append([]string{}, body.Entries...)
+	if body.Text != "" {
+		input = append(input, strings.Split(strings.ReplaceAll(body.Text, "\r\n", "\n"), "\n")...)
+	}
+	result, err := scanner.MergeCorpus(h.cfg.WordlistsDir, category, input)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.writeSuccess(w, result)
+}
+
+func (h *Handler) handleRestoreCorpus(w http.ResponseWriter, r *http.Request) {
+	removed, err := scanner.RestoreCorpus(h.cfg.WordlistsDir, mux.Vars(r)["category"])
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.writeSuccess(w, map[string]int{"removed": removed})
+}
+
 func (h *Handler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	stats := models.DashboardStats{}
 

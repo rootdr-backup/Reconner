@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -334,7 +335,11 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			len(services), totalAlive))
 	}
 	adaptiveWords := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
-	probePaths := append([]string{}, builtinWordlist...)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	probePaths := LoadCorpus(corpusDir, "directory", builtinWordlist)
 	probePaths = append(probePaths, adaptiveDirectoryPaths(adaptiveWords, 128)...)
 	probePaths = uniquePaths(probePaths)
 
@@ -463,9 +468,14 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		submitValidation(foundURL)
 	}
 
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	extensions := LoadCorpus(corpusDir, "extensions", corpusSpecs["extensions"].defaults())
 	args := []string{
 		"-u", svcURL, "--no-color", "-q",
-		"-e", "php,asp,aspx,jsp,html,txt,bak,zip,sql,tar,gz,rar,xml,json,yaml,env,js,pdf,cfg,conf,old,swp,inc",
+		"-e", strings.Join(extensions, ","),
 		"-i", "200,204,301,302,307,401,403,405",
 		"--timeout", "6", "--full-url", "-t", strconv.Itoa(s.directoryToolThreads()), "--max-time", "120",
 	}
@@ -487,7 +497,12 @@ func (s *DirScanner) runFeroxbuster(ctx context.Context, targetID, svcURL string
 	dctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
 	submitValidation, finishValidation := s.externalDirectoryRevalidator(dctx, targetID, svcURL, baseline)
-	args := []string{"-u", svcURL, "-q", "-t", strconv.Itoa(s.directoryToolThreads()), "--timeout", "8", "-x", "php,asp,aspx,jsp,html,txt,bak,zip", "--no-state"}
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	extensions := LoadCorpus(corpusDir, "extensions", corpusSpecs["extensions"].defaults())
+	args := []string{"-u", svcURL, "-q", "-t", strconv.Itoa(s.directoryToolThreads()), "--timeout", "8", "-x", strings.Join(extensions, ","), "--no-state"}
 	args = append(args, ToolRequestIdentityArgs(ctx, "feroxbuster")...)
 	err := s.exec.RunWithCallback(dctx, targetID, func(line string) {
 		line = strings.TrimSpace(line)
@@ -632,7 +647,12 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 	_ = s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id = ?`, targetID).Scan(&domain)
 
 	adaptiveWords := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
-	found := scanBackupCandidates(ctx, s.db, targetID, services, domain, adaptiveWords)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	patterns := LoadCorpus(corpusDir, "backup", backupPatterns)
+	found := scanBackupCandidatesWithCorpus(ctx, s.db, targetID, services, domain, patterns, adaptiveWords)
 	logFn("info", "backup_discovery", fmt.Sprintf("Backup discovery done. Found %d files.", found))
 	return nil
 }
@@ -646,13 +666,30 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 // network_services, not http_services, so RunBackupDiscovery above never saw
 // them), which is the gap this shared extraction closes.
 func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string, services []string, domain string, adaptiveWords ...[]string) int {
+	return scanBackupCandidatesWithCorpus(ctx, db, targetID, services, domain, backupPatterns, adaptiveWords...)
+}
+
+func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, targetID string, services []string, domain string, corpus []string, adaptiveWords ...[]string) int {
 	// Curated high-signal patterns + generated candidates (domain-derived names,
 	// config files with backup suffixes, dated variants, bounded wordlist).
-	patterns := append([]string{}, backupPatterns...)
+	patterns := append([]string{}, corpus...)
 	patterns = append(patterns, generateBackupCandidates(domain)...)
 	if len(adaptiveWords) > 0 {
 		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 24)...)
 	}
+	var observedURLs []string
+	rows, err := db.QueryContext(ctx, `SELECT url FROM directory_findings WHERE target_id=?
+		UNION SELECT url FROM parameters WHERE target_id=? LIMIT 400`, targetID, targetID)
+	if err == nil {
+		for rows.Next() {
+			var raw string
+			if rows.Scan(&raw) == nil {
+				observedURLs = append(observedURLs, raw)
+			}
+		}
+		rows.Close()
+	}
+	patterns = append(patterns, generateNestedBackupCandidates(observedURLs)...)
 	patterns = uniquePaths(patterns)
 
 	// Raised from 20: the wordlist merge (backup_magic.go) roughly 5x'd the
@@ -704,7 +741,7 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 					return
 				}
 
-				if resp.StatusCode == 200 && len(body) > 100 && !base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
+				if resp.StatusCode == 200 && !base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
 					magic := checkMagicBytes(body)
 					fileType := detectFileType(p, body)
 
@@ -713,7 +750,7 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 					// sensitive type (.sql/.env/.bak/.git/.log/.config). A plain
 					// non-HTML 200 (JSON API, JS/CSS, image, generic xml/yaml) is
 					// NOT a backup — skip it to kill the false positives.
-					if magic == "" && !sensitiveBackupType(fileType) {
+					if !credibleSensitiveBackup(fileType, body, magic) {
 						return
 					}
 					if magic != "" {
@@ -721,11 +758,18 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 					}
 					size := trueSize(resp, len(body))
 					id := uuid.New().String()
-					_, _ = db.Exec(`
+					result, err := db.Exec(`
 						INSERT INTO backup_findings (id, target_id, url, status_code, content_length, file_type)
 						VALUES (?, ?, ?, ?, ?, ?)
 						ON CONFLICT(target_id, url) DO NOTHING
 					`, id, targetID, targetURL, resp.StatusCode, size, fileType)
+					if err != nil {
+						return
+					}
+					inserted, _ := result.RowsAffected()
+					if inserted == 0 {
+						return
+					}
 					found.Add(1)
 					if magic != "" {
 						storeExposedBackup(db, targetID, targetURL, magic, size)
@@ -766,6 +810,11 @@ func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID stri
 	// JSON redirect sink before the verifier saw them.
 	items := loadRoutedInsertionPoints(ctx, s.db, targetID, ClassRedirect, limit, 32)
 	auth := loadAuthHeaders(ctx, s.db, targetID)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	payloads := LoadCorpus(corpusDir, "redirect", openRedirectPayloads)
 
 	logFn("info", "open_redirect", fmt.Sprintf("Testing %d potential redirect parameters...", len(items)))
 
@@ -783,7 +832,7 @@ func (s *DirScanner) RunOpenRedirectDiscovery(ctx context.Context, targetID stri
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if res, ok := checkOpenRedirectPoint(ctx, ip, auth); ok {
+			if res, ok := checkOpenRedirectPointWithPayloads(ctx, ip, auth, payloads); ok {
 				id := uuid.New().String()
 				verified := 0
 				status := StatusCandidate
@@ -830,12 +879,13 @@ func looksLikeHTML(body []byte) bool {
 
 func detectFileType(path string, body []byte) string {
 	lower := strings.ToLower(path)
+	base := pathpkgBase(lower)
 	switch {
 	case strings.HasSuffix(lower, ".sql"):
 		return "sql_dump"
 	case strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".tar") || strings.HasSuffix(lower, ".gz") || strings.HasSuffix(lower, ".rar"):
 		return "archive"
-	case strings.HasSuffix(lower, ".env"):
+	case base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasPrefix(base, "env."):
 		return "env_file"
 	case strings.HasSuffix(lower, ".git") || strings.Contains(lower, ".git/"):
 		return "git_repo"
@@ -859,6 +909,90 @@ func detectFileType(path string, body []byte) string {
 		}
 		return "unknown"
 	}
+}
+
+// pathpkgBase is kept tiny so detectFileType's path parameter can retain its
+// long-standing name without shadowing the imported path package at call sites.
+func pathpkgBase(value string) string { return path.Base(value) }
+
+// credibleSensitiveBackup validates content as well as a suggestive filename.
+// This both admits short, real secrets such as /back/.env and rejects a generic
+// text/JSON catch-all that happens to answer 200 for a sensitive-looking path.
+func credibleSensitiveBackup(fileType string, body []byte, magic string) bool {
+	if magic != "" {
+		return true
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return false
+	}
+	switch fileType {
+	case "env_file":
+		return looksLikeEnvContent(trimmed)
+	case "git_repo":
+		lower := strings.ToLower(trimmed)
+		return strings.HasPrefix(trimmed, "ref: refs/") || strings.Contains(lower, "repositoryformatversion") ||
+			(len(trimmed) >= 40 && len(trimmed) <= 128 && isHexString(strings.Fields(trimmed)[0]))
+	case "sql_dump", "archive":
+		// Archives and SQL dumps require their signature/SQL markers, represented
+		// by magic above. An extension alone is too weak to become a finding.
+		return false
+	case "config":
+		lower := strings.ToLower(trimmed)
+		return len(trimmed) >= 8 && (strings.Contains(trimmed, "=") || strings.Contains(trimmed, ":") ||
+			strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.Contains(lower, "<configuration"))
+	case "backup", "log_file":
+		return len(trimmed) >= 16
+	default:
+		return false
+	}
+}
+
+func looksLikeEnvContent(body string) bool {
+	assignments, highSignal := 0, false
+	for i, raw := range strings.Split(body, "\n") {
+		if i >= 80 {
+			break
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, _, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" || !validEnvKey(key) {
+			continue
+		}
+		assignments++
+		upper := strings.ToUpper(key)
+		for _, marker := range []string{"PASSWORD", "PASSWD", "SECRET", "TOKEN", "API_KEY", "APP_KEY", "DATABASE_URL", "DB_", "AWS_", "PRIVATE_KEY"} {
+			if strings.Contains(upper, marker) {
+				highSignal = true
+				break
+			}
+		}
+	}
+	return highSignal || assignments >= 2
+}
+
+func validEnvKey(value string) bool {
+	for i, r := range value {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isHexString(value string) bool {
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return value != ""
 }
 
 var builtinWordlist = func() []string {

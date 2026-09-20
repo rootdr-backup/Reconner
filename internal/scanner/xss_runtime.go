@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -70,7 +71,9 @@ func installRuntimeDOMInstrumentation(ctx, tab context.Context, marker string) (
 		return func() {}
 	}
 	return func() {
-		_ = chromedp.Run(tab, chromedp.ActionFunc(func(actionCtx context.Context) error {
+		cleanupCtx, cancel := context.WithTimeout(tab, 2*time.Second)
+		defer cancel()
+		_ = chromedp.Run(cleanupCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
 			return cdppage.RemoveScriptToEvaluateOnNewDocument(id).Do(actionCtx)
 		}))
 	}

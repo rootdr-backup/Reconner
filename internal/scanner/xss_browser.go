@@ -58,14 +58,20 @@ import (
 // itself and callers fall back to the browserless verifier, so a scan never fails
 // for lack of a browser.
 type browserXSSConfirmer struct {
-	chromePath string
-	dataDir    string // explicit user-data-dir we own and delete
+	chromePath  string
+	dataDir     string // active explicit user-data-dir we own and delete
+	profileBase string // non-empty for managed, restart-safe per-session profiles
+	profileSeq  uint64
 
 	mu          sync.Mutex
 	alloc       context.Context
 	allocCancel context.CancelFunc
 	tab         context.Context // the single reused tab
 	tabCancel   context.CancelFunc
+	process     *os.Process
+	activeOwner string
+	activeLease uint64
+	nextLease   uint64
 
 	// one navigation at a time: the single tab cannot be driven concurrently.
 	navGate chan struct{}
@@ -77,6 +83,7 @@ type browserXSSConfirmer struct {
 
 var (
 	xssBrowserOnce sync.Once
+	xssBrowserMu   sync.RWMutex
 	xssBrowserInst *browserXSSConfirmer
 	domReflectMemo = struct {
 		sync.Mutex
@@ -97,6 +104,26 @@ const (
 
 const xssProfilePrefix = "reconner-xss-"
 
+const xssBrowserAbortWait = 2 * time.Second
+
+type xssBrowserOwnerKey struct{}
+
+// WithXSSBrowserOwner associates browser work with one scheduler task. The
+// process-wide browser executes one navigation at a time, so this owner lets an
+// operator skip kill only the session currently serving that task. Waiting
+// tasks are left alone and rebuild a fresh session when they acquire the gate.
+func WithXSSBrowserOwner(ctx context.Context, owner string) context.Context {
+	if strings.TrimSpace(owner) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, xssBrowserOwnerKey{}, owner)
+}
+
+func xssBrowserOwner(ctx context.Context) string {
+	owner, _ := ctx.Value(xssBrowserOwnerKey{}).(string)
+	return owner
+}
+
 // getXSSBrowser returns the process-wide confirmer, or nil when disabled / no
 // browser is available. Enabled unless RECONNER_NO_XSS_BROWSER is set.
 func getXSSBrowser() *browserXSSConfirmer {
@@ -109,14 +136,19 @@ func getXSSBrowser() *browserXSSConfirmer {
 			return
 		}
 		sweepStaleBrowserProfiles() // clean anything a prior hard-kill orphaned
-		dir := filepath.Join(os.TempDir(), xssProfilePrefix+strconv.Itoa(os.Getpid()))
+		base := filepath.Join(os.TempDir(), xssProfilePrefix+strconv.Itoa(os.Getpid()))
+		xssBrowserMu.Lock()
 		xssBrowserInst = &browserXSSConfirmer{
-			chromePath: p,
-			dataDir:    dir,
-			navGate:    make(chan struct{}, 1),
+			chromePath:  p,
+			profileBase: base,
+			navGate:     make(chan struct{}, 1),
 		}
+		xssBrowserMu.Unlock()
 	})
-	return xssBrowserInst
+	xssBrowserMu.RLock()
+	browser := xssBrowserInst
+	xssBrowserMu.RUnlock()
+	return browser
 }
 
 // sweepStaleBrowserProfiles removes reconner XSS browser profiles left in TempDir
@@ -182,19 +214,26 @@ func browserBinaryWorks(path string) bool {
 	return cmd.Run() == nil && ctx.Err() == nil
 }
 
-// ensureTab lazily starts the single shared browser + tab, rebuilding if it died.
-func (b *browserXSSConfirmer) ensureTab() (context.Context, bool) {
+// ensureTab lazily starts the single shared browser + tab, rebuilding if it
+// died. Browser startup deliberately happens without b.mu held: allocator
+// startup is external process I/O and may wedge, while Skip must always be able
+// to acquire the mutex, detach the lease, and cancel/kill the session.
+func (b *browserXSSConfirmer) ensureTab(lease uint64) (context.Context, bool) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if b.tab != nil && b.tab.Err() == nil {
-		return b.tab, true
+		tab := b.tab
+		b.mu.Unlock()
+		return tab, true
 	}
+	oldTabCancel := b.tabCancel
 	if b.tabCancel != nil {
-		b.tabCancel()
 		b.tab, b.tabCancel = nil, nil
 	}
 	if b.alloc == nil || b.alloc.Err() != nil {
+		if b.dataDir == "" {
+			b.profileSeq++
+			b.dataDir = fmt.Sprintf("%s-%d", b.profileBase, b.profileSeq)
+		}
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.ExecPath(b.chromePath),
 			chromedp.UserDataDir(b.dataDir), // explicit → Chromium makes no auto temp dir
@@ -206,15 +245,21 @@ func (b *browserXSSConfirmer) ensureTab() (context.Context, bool) {
 			chromedp.Flag("no-first-run", true),
 			chromedp.Flag("disable-background-networking", true),
 			chromedp.NoDefaultBrowserCheck,
+			chromedp.ModifyCmdFunc(configureXSSBrowserProcess),
 		)
 		b.alloc, b.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
+	}
+	alloc := b.alloc
+	b.mu.Unlock()
+	if oldTabCancel != nil {
+		oldTabCancel()
 	}
 
 	// Silence chromedp's CDP event logger: a newer Chromium emits enum values (e.g.
 	// network IPAddressSpace "Loopback") that this cdproto version can't unmarshal,
 	// which is harmless but would otherwise spam scan logs with ERROR lines.
 	noop := func(string, ...interface{}) {}
-	tabCtx, tabCancel := chromedp.NewContext(b.alloc,
+	tabCtx, tabCancel := chromedp.NewContext(alloc,
 		chromedp.WithErrorf(noop), chromedp.WithLogf(noop))
 	chromedp.ListenTarget(tabCtx, func(event any) {
 		if _, ok := event.(*cdppage.EventJavascriptDialogOpening); !ok {
@@ -237,8 +282,166 @@ func (b *browserXSSConfirmer) ensureTab() (context.Context, bool) {
 		tabCancel()
 		return nil, false
 	}
+	b.mu.Lock()
+	// Abort may have detached this allocator/lease while startup was in flight.
+	// Never publish that stale browser as the session for a later phase.
+	if b.alloc != alloc || b.activeLease != lease {
+		b.mu.Unlock()
+		tabCancel()
+		return nil, false
+	}
 	b.tab, b.tabCancel = tabCtx, tabCancel
-	return b.tab, true
+	if c := chromedp.FromContext(tabCtx); c != nil && c.Browser != nil {
+		b.process = c.Browser.Process()
+	}
+	tab := b.tab
+	b.mu.Unlock()
+	return tab, true
+}
+
+// acquireNavigation serializes access to the reusable tab and records which
+// scheduler task currently owns it. Abort replaces the gate, so even a broken
+// chromedp goroutine holding the old gate cannot block future phases forever.
+func (b *browserXSSConfirmer) acquireNavigation(parent context.Context) (chan struct{}, uint64, bool) {
+	if b == nil {
+		return nil, 0, false
+	}
+	for {
+		b.mu.Lock()
+		if b.navGate == nil {
+			b.navGate = make(chan struct{}, 1)
+		}
+		gate := b.navGate
+		b.mu.Unlock()
+		select {
+		case gate <- struct{}{}:
+		case <-parent.Done():
+			return nil, 0, false
+		}
+
+		b.mu.Lock()
+		if gate != b.navGate {
+			b.mu.Unlock()
+			<-gate
+			continue
+		}
+		b.nextLease++
+		lease := b.nextLease
+		b.activeLease = lease
+		b.activeOwner = xssBrowserOwner(parent)
+		b.mu.Unlock()
+		return gate, lease, true
+	}
+}
+
+func (b *browserXSSConfirmer) releaseNavigation(gate chan struct{}, lease uint64) {
+	b.mu.Lock()
+	if b.activeLease == lease {
+		b.activeLease = 0
+		b.activeOwner = ""
+	}
+	b.mu.Unlock()
+	<-gate
+}
+
+// operationContext keeps chromedp's executor from the long-lived tab while
+// linking cancellation to the scheduler phase. The same hard deadline also
+// destroys the browser process: cancelling a CDP command alone is not enough
+// when Chromium or its transport is wedged.
+func (b *browserXSSConfirmer) operationContext(parent, tab context.Context, timeout time.Duration, lease uint64) (context.Context, func()) {
+	ctx, cancel := context.WithTimeout(tab, timeout)
+	owner := xssBrowserOwner(parent)
+	abort := func() {
+		cancel()
+		b.abortSession(owner, lease)
+	}
+	stopParent := context.AfterFunc(parent, abort)
+	hardTimer := time.AfterFunc(timeout, abort)
+	return ctx, func() {
+		stopParent()
+		hardTimer.Stop()
+		cancel()
+	}
+}
+
+// AbortXSSBrowserOwner force-stops the active Chromium process only when it is
+// currently serving owner. It is safe to call from the scheduler's Skip path;
+// a scan merely waiting for the navigation gate has no process to kill.
+func AbortXSSBrowserOwner(owner string) bool {
+	if strings.TrimSpace(owner) == "" {
+		return false
+	}
+	xssBrowserMu.RLock()
+	browser := xssBrowserInst
+	xssBrowserMu.RUnlock()
+	if browser == nil {
+		return false
+	}
+	return browser.abortSession(owner, 0)
+}
+
+// abortSession is deliberately hard and non-blocking after process cleanup.
+// chromedp's allocator cancel waits for cmd.Wait and has historically hung when
+// Chromium was unhealthy, so it runs behind a bounded wait after the entire
+// isolated process group has received SIGKILL.
+func (b *browserXSSConfirmer) abortSession(owner string, lease uint64) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	if lease != 0 && b.activeLease != lease {
+		b.mu.Unlock()
+		return false
+	}
+	if owner != "" && b.activeOwner != owner {
+		b.mu.Unlock()
+		return false
+	}
+	tabCancel, allocCancel := b.tabCancel, b.allocCancel
+	process, dataDir := b.process, b.dataDir
+	b.tab, b.tabCancel = nil, nil
+	b.alloc, b.allocCancel = nil, nil
+	b.process = nil
+	if b.profileBase != "" {
+		b.dataDir = ""
+	}
+	// Detach future work from a goroutine that might never release the old gate.
+	b.navGate = make(chan struct{}, 1)
+	b.activeLease = 0
+	b.activeOwner = ""
+	b.mu.Unlock()
+
+	killXSSBrowserProcess(process)
+	if tabCancel != nil || allocCancel != nil {
+		done := make(chan struct{})
+		go func() {
+			var wg sync.WaitGroup
+			if tabCancel != nil {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					tabCancel()
+				}()
+			}
+			if allocCancel != nil {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					allocCancel()
+				}()
+			}
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(xssBrowserAbortWait):
+		}
+	}
+	if dataDir != "" {
+		_ = os.RemoveAll(dataDir)
+	}
+	return tabCancel != nil || allocCancel != nil || process != nil
 }
 
 // Close tears down the browser/allocator and removes the profile dir. Idempotent.
@@ -246,23 +449,13 @@ func (b *browserXSSConfirmer) Close() {
 	if b == nil {
 		return
 	}
+	b.abortSession("", 0)
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.tabCancel != nil {
-		b.tabCancel()
-		b.tab, b.tabCancel = nil, nil
-	}
-	if b.allocCancel != nil {
-		b.allocCancel()
-		b.alloc, b.allocCancel = nil, nil
-	}
-	if b.dataDir != "" {
-		_ = os.RemoveAll(b.dataDir)
-	}
 	if b.loaderClose != nil {
 		b.loaderClose()
 		b.loaderClose = nil
 	}
+	b.mu.Unlock()
 }
 
 func (b *browserXSSConfirmer) scriptLoaderPage() string {
@@ -432,10 +625,32 @@ func browserFormValues(ip insertionPoint, value string) url.Values {
 // context. Passing the context avoids cross-context browser payload spray while
 // preserving the full ladder for DOM-only/unknown sinks.
 func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysis(parent context.Context, ip insertionPoint, auth map[string]string, a *ReflectionAnalysis) (payload string, ok bool) {
+	return b.ConfirmInsertionWithAnalysisAndTemplates(parent, ip, auth, a, nil)
+}
+
+// ConfirmInsertionWithAnalysisAndTemplates appends validated operator templates
+// to the context-aware built-ins. Every custom template is still subject to the
+// same real-browser random-title proof; adding a payload cannot weaken the XSS
+// verifier into a reflection-only detector.
+func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysisAndTemplates(parent context.Context, ip insertionPoint, auth map[string]string, a *ReflectionAnalysis, custom []string) (payload string, ok bool) {
 	if b == nil {
 		return "", false
 	}
-	for _, tmpl := range xssBrowserPayloadsForAnalysis(a) {
+	templates := xssBrowserPayloadsForAnalysis(a)
+	seen := make(map[string]bool, len(templates)+len(custom))
+	for _, template := range templates {
+		seen[template] = true
+	}
+	if len(custom) > 64 {
+		custom = custom[:64]
+	}
+	for _, template := range custom {
+		if validCorpusValue("xss", template) && !seen[template] {
+			seen[template] = true
+			templates = append(templates, template)
+		}
+	}
+	for _, tmpl := range templates {
 		if parent.Err() != nil {
 			return "", false
 		}
@@ -584,17 +799,16 @@ func (b *browserXSSConfirmer) DOMReflectsInsertion(parent context.Context, ip in
 		return reflected
 	}
 	canary := randNonce()
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 12*time.Second, lease)
 	defer cancel()
 	removeInstrumentation := installRuntimeDOMInstrumentation(ctx, tab, canary)
 	defer removeInstrumentation()
@@ -635,17 +849,16 @@ func (b *browserXSSConfirmer) renderInsertion(parent context.Context, ip inserti
 		(method != "" && method != "GET" && method != "POST") {
 		return ""
 	}
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return ""
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 12*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{ip.URL}, auth)
 	defer stopHeaders()
@@ -673,17 +886,16 @@ func (b *browserXSSConfirmer) renderInsertion(parent context.Context, ip inserti
 }
 
 func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, rawURL string, headers map[string]string, canary string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 12*time.Second, lease)
 	defer cancel()
 	removeInstrumentation := installRuntimeDOMInstrumentation(ctx, tab, canary)
 	defer removeInstrumentation()
@@ -801,17 +1013,16 @@ func (b *browserXSSConfirmer) ConfirmDOMSource(parent context.Context, pageURL, 
 }
 
 func (b *browserXSSConfirmer) fireWindowName(parent context.Context, pageURL, payload string, headers map[string]string, nonce string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
 	defer stopHeaders()
@@ -828,17 +1039,16 @@ func (b *browserXSSConfirmer) fireWindowName(parent context.Context, pageURL, pa
 // model and could false-confirm guarded code; a real child frame postMessage keeps
 // the proof faithful to what an external origin can deliver.
 func (b *browserXSSConfirmer) firePostMessage(parent context.Context, pageURL, payload string, headers map[string]string, nonce string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
 	defer stopHeaders()
@@ -863,19 +1073,18 @@ func (b *browserXSSConfirmer) fire(parent context.Context, url, nonce string) bo
 }
 
 func (b *browserXSSConfirmer) fireWithHeaders(parent context.Context, rawURL string, headers map[string]string, nonce string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
+	defer b.releaseNavigation(gate, lease)
 
-	tab, ok := b.ensureTab()
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(tab, 12*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 12*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{rawURL}, headers)
 	defer stopHeaders()
@@ -886,17 +1095,16 @@ func (b *browserXSSConfirmer) fireWithHeaders(parent context.Context, rawURL str
 }
 
 func (b *browserXSSConfirmer) fireScriptResource(parent context.Context, resourceURL string, headers map[string]string, nonce string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{resourceURL}, headers)
 	defer stopHeaders()
@@ -914,17 +1122,16 @@ func (b *browserXSSConfirmer) fireScriptResource(parent context.Context, resourc
 }
 
 func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, values url.Values, headers map[string]string, nonce string) bool {
-	select {
-	case b.navGate <- struct{}{}:
-		defer func() { <-b.navGate }()
-	case <-parent.Done():
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
 		return false
 	}
-	tab, ok := b.ensureTab()
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
 	if !ok {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(tab, 15*time.Second)
+	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{action}, headers)
 	defer stopHeaders()

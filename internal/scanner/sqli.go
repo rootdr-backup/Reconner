@@ -455,6 +455,9 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	// single payload containing every quote type is easy for a WAF to block and can
 	// be syntactically invalid in a way that hides the engine's useful error.
 	base, baseStatus, baseDuration := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
+	if kind, evidence := s.customSQLiErrorProbe(ctx, ip, auth, base, baselineValue); kind != "" {
+		return kind, evidence
+	}
 	for _, suffix := range []string{"'", `"`, "`", "')", `\")`, "\\"} {
 		injected := baselineValue + suffix
 		errResp, errStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, injected, auth)
@@ -691,6 +694,38 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 
 	// Statistical time-based detection runs as a separate, low-concurrency pass;
 	// this fast stage returns only deterministic error/extraction proofs.
+	return "", ""
+}
+
+// customSQLiErrorProbe gives operator payloads a deliberately narrow proof
+// contract: a database-specific error must be absent from a fresh baseline and
+// reproduced by the same payload. Native boolean/arithmetic/OAST logic remains
+// authoritative for payloads that do not produce a deterministic DB error.
+func (s *SQLiScanner) customSQLiErrorProbe(ctx context.Context, ip insertionPoint, auth map[string]string, base, baselineValue string) (string, string) {
+	if s.cfg == nil {
+		return "", ""
+	}
+	payloads := CustomCorpus(s.cfg.WordlistsDir, "sqli")
+	if len(payloads) > 128 {
+		payloads = payloads[:128]
+	}
+	for _, payload := range payloads {
+		body, status, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, payload, auth)
+		if looksLikeBlockPage(status, body) {
+			continue
+		}
+		for _, sig := range sqlErrorSignatures {
+			if !sig.MatchString(body) || sig.MatchString(base) {
+				continue
+			}
+			base2, _, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, baselineValue, auth)
+			body2, status2, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, payload, auth)
+			if !sig.MatchString(body2) || sig.MatchString(base2) || looksLikeBlockPage(status2, body2) {
+				continue
+			}
+			return "error_based", fmt.Sprintf("DB error triggered by operator corpus payload %q (reproduced; absent from two baselines)", payload)
+		}
+	}
 	return "", ""
 }
 

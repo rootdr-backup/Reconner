@@ -125,13 +125,11 @@ func (s *ExposureScanner) runConfigLeaks(ctx context.Context, targetID string, l
 	logFn("info", "exposure", "Checking for exposed .env / config files + .DS_Store...")
 	bases := s.loadServiceBases(ctx, targetID, 200)
 
-	configPaths := []string{
-		"/.env", "/.env.local", "/.env.production", "/.env.dev", "/.env.staging",
-		"/appsettings.json", "/appsettings.Production.json",
-		"/application.properties", "/application.yml", "/application.yaml",
-		"/config.php.bak", "/config.json", "/config.yml", "/secrets.json",
-		"/.aws/credentials", "/.npmrc", "/.dockercfg", "/database.yml",
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
 	}
+	configPaths := LoadCorpus(corpusDir, "exposure", exposureConfigPaths)
 
 	sem := make(chan struct{}, 15)
 	var wg sync.WaitGroup
@@ -347,6 +345,14 @@ var jwtWeakSecrets = []string{
 	"MIGfMA0GCSqGSIb3DQEB", "verysecret", "topsecret", "nosecret", "randomsecret",
 }
 
+var exposureConfigPaths = []string{
+	"/.env", "/.env.local", "/.env.production", "/.env.dev", "/.env.staging",
+	"/appsettings.json", "/appsettings.Production.json",
+	"/application.properties", "/application.yml", "/application.yaml",
+	"/config.php.bak", "/config.json", "/config.yml", "/secrets.json",
+	"/.aws/credentials", "/.npmrc", "/.dockercfg", "/database.yml",
+}
+
 // sensitiveClaimKeys are JWT payload fields that shouldn't be exposed — a JWT is
 // only base64, so anyone holding it can read these.
 var sensitiveClaimKeys = map[string]bool{
@@ -414,6 +420,10 @@ func (s *ExposureScanner) runJWTChecks(ctx context.Context, targetID string, log
 	}
 
 	logFn("info", "exposure", fmt.Sprintf("Analyzing %d JWTs for weaknesses...", len(tokens)))
+	secrets := jwtWeakSecrets
+	if s.cfg != nil {
+		secrets = LoadCorpus(s.cfg.WordlistsDir, "jwt_secrets", jwtWeakSecrets)
+	}
 	found := 0
 	for _, tok := range tokens {
 		parts := strings.Split(tok, ".")
@@ -451,7 +461,7 @@ func (s *ExposureScanner) runJWTChecks(ctx context.Context, targetID string, log
 
 		// Weak HMAC secret (crackable → full forgery).
 		if alg == "hs256" || alg == "hs384" || alg == "hs512" {
-			if secret := crackJWT(tok, parts, alg); secret != "" {
+			if secret := crackJWTWithSecrets(tok, parts, alg, secrets); secret != "" {
 				s.store(targetID, "jwt_weak_secret", "critical", id, "",
 					fmt.Sprintf("JWT signed with weak/guessable HMAC secret %q — tokens can be forged for any user.", secret))
 				found++
@@ -513,6 +523,10 @@ func (s *ExposureScanner) runJWTChecks(ctx context.Context, targetID string, log
 // crackJWT tries a small dictionary of weak HMAC secrets against the token,
 // using the hash that matches the token's alg (HS256/384/512).
 func crackJWT(token string, parts []string, alg string) string {
+	return crackJWTWithSecrets(token, parts, alg, jwtWeakSecrets)
+}
+
+func crackJWTWithSecrets(token string, parts []string, alg string, secrets []string) string {
 	signingInput := parts[0] + "." + parts[1]
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
@@ -527,7 +541,7 @@ func crackJWT(token string, parts []string, alg string) string {
 	default: // hs256
 		h = sha256.New
 	}
-	for _, secret := range jwtWeakSecrets {
+	for _, secret := range secrets {
 		mac := hmac.New(h, []byte(secret))
 		mac.Write([]byte(signingInput))
 		if hmac.Equal(mac.Sum(nil), sig) {
@@ -545,7 +559,11 @@ func (s *ExposureScanner) runGraphQL(ctx context.Context, targetID string, logFn
 	logFn("info", "exposure", "Probing for exposed GraphQL introspection...")
 
 	bases := s.loadServiceBases(ctx, targetID, 200)
-	paths := []string{"/graphql", "/api/graphql", "/v1/graphql", "/graphql/console", "/query", "/gql", "/graphiql"}
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	paths := LoadCorpus(corpusDir, "graphql", graphqlPaths)
 
 	sem := make(chan struct{}, 15)
 	var wg sync.WaitGroup
@@ -602,11 +620,11 @@ func (s *ExposureScanner) runAPISpec(ctx context.Context, targetID string, logFn
 	logFn("info", "exposure", "Looking for exposed API specs (Swagger/OpenAPI)...")
 
 	bases := s.loadServiceBases(ctx, targetID, 200)
-	paths := []string{
-		"/swagger.json", "/openapi.json", "/v1/swagger.json", "/api/swagger.json",
-		"/api-docs", "/v2/api-docs", "/swagger/v1/swagger.json", "/openapi.yaml",
-		"/swagger-ui.html", "/api/openapi.json", "/.well-known/openapi.json",
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
 	}
+	paths := LoadCorpus(corpusDir, "api_spec", apiSpecPaths)
 
 	sem := make(chan struct{}, 15)
 	var wg sync.WaitGroup

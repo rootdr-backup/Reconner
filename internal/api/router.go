@@ -125,6 +125,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/targets/bulk-delete", h.requireAuth(h.handleBulkDeleteTarget)).Methods("POST")
 	api.HandleFunc("/targets/import", h.requireAuth(h.handleImportTargets)).Methods("POST")
 	api.HandleFunc("/targets/{id}/export", h.requireAuth(h.handleExportTarget)).Methods("GET")
+	api.HandleFunc("/targets/{id}/artifacts.zip", h.requireAuth(h.handleTargetArtifacts)).Methods("GET")
 	api.HandleFunc("/targets/{id}/scan", h.requireAuth(h.handleStartScan)).Methods("POST")
 	api.HandleFunc("/targets/{id}/assets", h.requireAuth(h.handleListAssets)).Methods("GET")
 	api.HandleFunc("/targets/{id}/assets", h.requireAuth(h.handleAddAsset)).Methods("POST")
@@ -208,6 +209,9 @@ func (h *Handler) Router() http.Handler {
 	// System
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleGetSettings)).Methods("GET")
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleUpdateSettings)).Methods("PATCH")
+	api.HandleFunc("/system/corpora", h.requireAdmin(h.handleListCorpora)).Methods("GET")
+	api.HandleFunc("/system/corpora/{category}", h.requireAdmin(h.handleMergeCorpus)).Methods("POST")
+	api.HandleFunc("/system/corpora/{category}/custom", h.requireAdmin(h.handleRestoreCorpus)).Methods("DELETE")
 	api.HandleFunc("/system/stats", h.requireAuth(h.handleSystemStats)).Methods("GET")
 	api.HandleFunc("/system/update-templates", h.requireAuth(h.handleUpdateNucleiTemplates)).Methods("POST")
 	api.HandleFunc("/system/update-check", h.requireAuth(h.handleUpdateCheck)).Methods("GET")

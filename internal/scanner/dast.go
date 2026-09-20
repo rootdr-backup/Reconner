@@ -605,7 +605,11 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 	// performed the browser proof that actually decided the verdict.
 	if b := getXSSBrowser(); b != nil {
 		if browserBudget.take() {
-			if pl, ok := b.ConfirmInsertionWithAnalysis(ctx, ip, auth, &a); ok {
+			var custom []string
+			if s.cfg != nil {
+				custom = CustomCorpus(s.cfg.WordlistsDir, "xss")
+			}
+			if pl, ok := b.ConfirmInsertionWithAnalysisAndTemplates(ctx, ip, auth, &a, custom); ok {
 				return pl, "browser", 99, true
 			}
 		}

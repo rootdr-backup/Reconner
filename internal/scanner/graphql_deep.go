@@ -106,7 +106,11 @@ func (s *ExposureScanner) runGraphQLDeep(ctx context.Context, targetID string, l
 // respond like a real GraphQL server (valid __typename query yields data).
 func (s *ExposureScanner) discoverGraphQLEndpoints(ctx context.Context, targetID string) []string {
 	bases := s.loadServiceBases(ctx, targetID, 200)
-	paths := []string{"/graphql", "/api/graphql", "/v1/graphql", "/query", "/gql", "/graphiql", "/api/graphql/v1"}
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	paths := LoadCorpus(corpusDir, "graphql", graphqlPaths)
 
 	sem := make(chan struct{}, 15)
 	var wg sync.WaitGroup

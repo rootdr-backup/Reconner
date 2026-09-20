@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/recon-platform/internal/database"
 )
@@ -985,6 +986,16 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 	if len(pages) == 0 {
 		return
 	}
+	// Browser proof must be broad, but it must never occupy js_analysis forever.
+	// Scale the cap with the discovered surface and bound it at two hours; every
+	// individual CDP operation has its own much shorter kill deadline as well.
+	verificationBudget := 30*time.Minute + time.Duration(len(pages))*15*time.Second
+	if verificationBudget > 2*time.Hour {
+		verificationBudget = 2 * time.Hour
+	}
+	phaseCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, verificationBudget)
+	defer cancel()
 	logFn("info", "dom_xss", fmt.Sprintf("Page-level DOM verification has %d eligible route(s), independent of parameter discovery.", len(pages)))
 	if ctx.Err() != nil {
 		return
@@ -1107,6 +1118,10 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 				Confidence: 99, Verdict: VerifyVerified,
 			})
 		}
+	}
+	if ctx.Err() == context.DeadlineExceeded && phaseCtx.Err() == nil {
+		logFn("warn", "dom_xss", fmt.Sprintf("DOM XSS browser verification reached its %s hard budget after %d source attempt(s); %d execution-confirmed finding(s) were retained.", verificationBudget, 600-budget, confirmed))
+		return
 	}
 	logFn("warn", "dom_xss", fmt.Sprintf("DOM XSS browser verification done. %d CONFIRMED (executing) DOM XSS finding(s).", confirmed))
 }

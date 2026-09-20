@@ -86,6 +86,11 @@ func (s *CmdiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		return nil
 	}
 	auth := loadAuthHeaders(ctx, s.db, targetID)
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	payloads := LoadCorpus(corpusDir, "cmdi", cmdiEchoPayloads)
 
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
@@ -108,7 +113,7 @@ func (s *CmdiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 				// The app already emits the marker (e.g. contains "1337"): skip to
 				// avoid any chance of a coincidental match.
 			} else {
-				for _, pl := range cmdiEchoPayloads {
+				for _, pl := range payloads {
 					body, _ := sendInjected(ctx, cmdiHTTPClient, ip, "x"+pl, auth)
 					if !strings.Contains(body, cmdiEchoMarker) {
 						continue

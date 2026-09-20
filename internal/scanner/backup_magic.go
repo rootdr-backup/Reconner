@@ -3,6 +3,8 @@ package scanner
 import (
 	"bytes"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -209,6 +211,81 @@ func generateAdaptiveBackupCandidates(words []string, limit int) []string {
 				seen[p] = true
 				out = append(out, p)
 			}
+		}
+	}
+	return out
+}
+
+const (
+	nestedBackupDirectoryBudget = 18
+	nestedBackupCandidateBudget = 256
+)
+
+// generateNestedBackupCandidates covers high-signal sensitive files below a
+// small set of common or already-observed directories. It deliberately does not
+// form a Cartesian product of the full backup corpus: the hard directory and
+// request budgets keep this extension predictable even on a very large target.
+// Static priorities include /back, so /back/.env is always covered.
+func generateNestedBackupCandidates(observedURLs []string) []string {
+	directories := []string{
+		"back", "backup", "backups", "old", "archive", "archives", "private",
+		"config", "configs", "conf", "data", "db", "database", "dump", "tmp", "temp",
+	}
+	seenDir := map[string]bool{}
+	orderedDirs := make([]string, 0, nestedBackupDirectoryBudget)
+	addDir := func(raw string) {
+		raw = strings.Trim(strings.TrimSpace(raw), "/")
+		if raw == "" || seenDir[raw] || strings.Contains(raw, "..") || len(orderedDirs) >= nestedBackupDirectoryBudget {
+			return
+		}
+		for _, segment := range strings.Split(raw, "/") {
+			if segment == "" || strings.ContainsAny(segment, `?#\\`) {
+				return
+			}
+		}
+		seenDir[raw] = true
+		orderedDirs = append(orderedDirs, raw)
+	}
+	for _, directory := range directories {
+		addDir(directory)
+	}
+	// Observed application prefixes receive the remaining two budget slots.
+	// This can cover app-specific layouts such as /portal/config/.env without
+	// allowing crawl cardinality to multiply the backup request count.
+	for _, raw := range observedURLs {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		clean := strings.Trim(path.Clean(parsed.Path), "/")
+		if clean == "" || clean == "." {
+			continue
+		}
+		parts := strings.Split(clean, "/")
+		if len(parts) > 2 {
+			parts = parts[:2]
+		}
+		// A final segment with a dot is likely a file rather than a directory.
+		if len(parts) > 0 && strings.Contains(parts[len(parts)-1], ".") {
+			parts = parts[:len(parts)-1]
+		}
+		if len(parts) > 0 {
+			addDir(strings.Join(parts, "/"))
+		}
+	}
+
+	leaves := []string{
+		".env", ".env.local", ".env.production", ".env.backup", ".git/HEAD",
+		"config.php", "config.php.bak", "wp-config.php", "wp-config.php.bak",
+		"database.yml", "appsettings.json", "db.sql", "dump.sql", "backup.zip",
+	}
+	out := make([]string, 0, min(nestedBackupCandidateBudget, len(orderedDirs)*len(leaves)))
+	for _, directory := range orderedDirs {
+		for _, leaf := range leaves {
+			if len(out) >= nestedBackupCandidateBudget {
+				return out
+			}
+			out = append(out, "/"+directory+"/"+leaf)
 		}
 	}
 	return out

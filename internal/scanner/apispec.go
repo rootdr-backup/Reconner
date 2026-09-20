@@ -26,11 +26,11 @@ import (
 
 // apiSpecPaths are the conventional locations these documents live at.
 var apiSpecPaths = []string{
-	"/swagger.json", "/openapi.json",
+	"/swagger.json", "/openapi.json", "/openapi.yaml", "/v1/swagger.json",
 	"/v2/api-docs", "/v3/api-docs", "/api-docs",
 	"/swagger/v1/swagger.json", "/swagger/doc.json",
 	"/api/swagger.json", "/api/openapi.json", "/api/v1/swagger.json",
-	"/openapi/v3/api-docs", "/api-docs/swagger.json",
+	"/openapi/v3/api-docs", "/api-docs/swagger.json", "/swagger-ui.html", "/.well-known/openapi.json",
 }
 
 var pathParamRE = regexp.MustCompile(`\{[^}]+\}`)
@@ -71,11 +71,16 @@ func (s *ParamScanner) harvestAPISpecs(ctx context.Context, targetID string, tar
 	}
 
 	endpoints, stored := 0, 0
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	paths := LoadCorpus(corpusDir, "api_spec", apiSpecPaths)
 	for origin := range origins {
 		if ctx.Err() != nil {
 			break
 		}
-		for _, sp := range apiSpecPaths {
+		for _, sp := range paths {
 			body := s.fetchSpec(ctx, client, origin+sp)
 			if body == nil {
 				continue

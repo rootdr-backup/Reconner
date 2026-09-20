@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
@@ -46,7 +47,11 @@ func scopedBrowserHeaderSession(runCtx, tabCtx, identityCtx context.Context, sco
 		URLPattern:   "*",
 		RequestStage: fetch.RequestStageRequest,
 	}})
-	cleanup := func() { _ = chromedp.Run(tabCtx, fetch.Disable()) }
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(tabCtx, 2*time.Second)
+		defer cancel()
+		_ = chromedp.Run(cleanupCtx, fetch.Disable())
+	}
 	return []chromedp.Action{enable}, cleanup
 }
 

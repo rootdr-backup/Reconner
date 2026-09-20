@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -60,5 +61,36 @@ func TestPhaseWatchdogReportsTimeoutSeparatelyFromSkip(t *testing.T) {
 	skipped, timedOut := finish()
 	if skipped || !timedOut {
 		t.Fatalf("expired phase reported skipped=%v timedOut=%v", skipped, timedOut)
+	}
+}
+
+func TestCollectPhaseResultsForceReleasesStuckWorkerAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan phaseRunResult, 1)
+	cancel()
+	started := time.Now()
+	got, forced := collectPhaseResults(ctx, []string{"js_analysis"}, results, 20*time.Millisecond)
+	if !forced {
+		t.Fatal("stuck worker was not force-released")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("force-release exceeded its cancellation grace")
+	}
+	if len(got) != 1 || got[0].module != "js_analysis" || !errors.Is(got[0].err, errPhaseStopGrace) {
+		t.Fatalf("forced result=%+v", got)
+	}
+}
+
+func TestCollectPhaseResultsAcceptsWorkerThatStopsWithinGrace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan phaseRunResult, 1)
+	cancel()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		results <- phaseRunResult{module: "js_analysis", err: context.Canceled}
+	}()
+	got, forced := collectPhaseResults(ctx, []string{"js_analysis"}, results, time.Second)
+	if forced || len(got) != 1 || got[0].module != "js_analysis" {
+		t.Fatalf("results=%+v forced=%v", got, forced)
 	}
 }

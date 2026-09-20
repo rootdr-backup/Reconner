@@ -101,6 +101,9 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 		return false
 	}
 	baseLower := strings.ToLower(baseBody)
+	if s.customErrorProbe(ctx, targetID, ip, auth, isJSON, baseLower, logFn) {
+		return true
+	}
 
 	// 1) Error-based: a bare quote/brace surfaces a driver error.
 	_, errBody := s.send(ctx, ip, valueErr, "", auth, isJSON)
@@ -139,6 +142,31 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 		s.store(targetID, "high", ip,
 			fmt.Sprintf("NoSQL boolean injection ($regex): a match-all [$regex '.*'] response (%dB) differs materially from a match-none [$regex '^…$'] (%dB), reproduced with a stable direction — the regex operator was interpreted by the database (Rocket.Chat CVE-2021-22911 class).", tl, fl), 80)
 		s.report(targetID, ip, logFn, "boolean-regex", 80)
+		return true
+	}
+	return false
+}
+
+func (s *NoSQLiScanner) customErrorProbe(ctx context.Context, targetID string, ip insertionPoint, auth map[string]string, isJSON bool, baseline string, logFn LogFunc) bool {
+	if s.cfg == nil {
+		return false
+	}
+	payloads := CustomCorpus(s.cfg.WordlistsDir, "nosqli")
+	if len(payloads) > 64 {
+		payloads = payloads[:64]
+	}
+	for _, payload := range payloads {
+		_, body := s.send(ctx, ip, payload, "", auth, isJSON)
+		sig := firstNewSignature(strings.ToLower(body), baseline, nosqlErrorSignatures)
+		if sig == "" || bodyLooksLikeWAFBlock(body) {
+			continue
+		}
+		_, replay := s.send(ctx, ip, payload, "", auth, isJSON)
+		if !strings.Contains(strings.ToLower(replay), sig) || bodyLooksLikeWAFBlock(replay) {
+			continue
+		}
+		s.store(targetID, "critical", ip, fmt.Sprintf("NoSQL driver error triggered by operator corpus payload %q; response leaked %q twice and the signature was absent from baseline", payload, sig), 95)
+		s.report(targetID, ip, logFn, "custom-error", 95)
 		return true
 	}
 	return false

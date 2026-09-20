@@ -123,8 +123,9 @@ func (s *ParamFuzzScanner) Run(ctx context.Context, targetID string, logFn LogFu
 		adaptive = adaptive[:100]
 	}
 	extra = append(extra, adaptive...)
+	staticWords := s.parameterCorpus()
 	logFn("info", "paramfuzz", fmt.Sprintf("Fuzzing %d endpoints × (%d static + %d discovered) candidate params...",
-		len(endpoints), len(paramFuzzWords), len(extra)))
+		len(endpoints), len(staticWords), len(extra)))
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -257,8 +258,9 @@ func (s *ParamFuzzScanner) mine(ctx context.Context, endpoint pfEndpoint, auth m
 // buildWordlist merges the static wordlist with candidate parameter names mined
 // from the endpoint's own response (the param-miner idea). Bounded and deduped.
 func (s *ParamFuzzScanner) buildWordlist(ctx context.Context, endpoint string, auth map[string]string, extra []string) []string {
-	seen := make(map[string]bool, len(paramFuzzWords)+len(extra)+64)
-	out := make([]string, 0, len(paramFuzzWords)+len(extra)+64)
+	staticWords := s.parameterCorpus()
+	seen := make(map[string]bool, len(staticWords)+len(extra)+64)
+	out := make([]string, 0, len(staticWords)+len(extra)+64)
 	add := func(n string) {
 		n = strings.TrimSpace(n)
 		key := n // HTTP parameter names may be case-sensitive.
@@ -268,7 +270,7 @@ func (s *ParamFuzzScanner) buildWordlist(ctx context.Context, endpoint string, a
 		seen[key] = true
 		out = append(out, n)
 	}
-	for _, w := range paramFuzzWords {
+	for _, w := range staticWords {
 		add(w)
 	}
 	// Cross-URL names discovered elsewhere on the target (JS, historical URLs).
@@ -299,6 +301,14 @@ func (s *ParamFuzzScanner) buildWordlist(ctx context.Context, endpoint string, a
 		}
 	}
 	return out
+}
+
+func (s *ParamFuzzScanner) parameterCorpus() []string {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	return LoadCorpus(corpusDir, "parameters", paramFuzzWords)
 }
 
 // discoveredParamNames returns the distinct parameter names already found

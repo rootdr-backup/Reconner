@@ -50,11 +50,16 @@ func (s *ParamScanner) harvestGraphQL(ctx context.Context, targetID string, targ
 	}
 
 	ops, stored := 0, 0
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	paths := LoadCorpus(corpusDir, "graphql", graphqlPaths)
 	for origin := range origins {
 		if ctx.Err() != nil {
 			break
 		}
-		for _, gp := range graphqlPaths {
+		for _, gp := range paths {
 			endpoint := origin + gp
 			body := s.introspect(ctx, client, endpoint)
 			if body == nil {
