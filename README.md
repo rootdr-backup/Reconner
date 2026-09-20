@@ -173,10 +173,11 @@ unattempted coverage is visible in the phase ledger. See the complete
 [supported capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
 > [!NOTE]
-> The hardening branch intentionally continues to report `2.5.0`. Passing
-> feature tests or pull-request CI alone does not make a stable v3 release. The
-> v3 version/tag is created only after the documented performance, 24-hour soak,
-> upgrade/rollback and release-candidate gates pass on the unchanged commit.
+> Reconner v3.0.0 is published only from a commit that passes the required
+> correctness, race, migration, production-browser, security and native
+> amd64/arm64 image gates. The final evidence and the explicitly disclosed
+> fast-track constraint are recorded in the
+> [v3 release audit](docs/V3_RELEASE_AUDIT.md).
 
 ## Detection pipeline
 

@@ -1,5 +1,11 @@
 # Reconner v3 Stability Release Plan
 
+> Release decision (2026-09-20): the repository owner authorized an accelerated
+> five-hour final audit for v3.0.0. All automated correctness, race, migration,
+> browser, security and native multi-architecture gates remain mandatory. The
+> literal 24-hour pre-release soak was explicitly waived and is not claimed as
+> completed; see [V3_RELEASE_AUDIT.md](V3_RELEASE_AUDIT.md).
+
 ## Release thesis
 
 Reconner v3.0.0 is a stability, correctness, coverage, and performance release.
