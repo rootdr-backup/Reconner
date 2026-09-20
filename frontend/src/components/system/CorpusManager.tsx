@@ -4,6 +4,18 @@ import { useUIStore } from '../../store/ui'
 import { Button, Spinner } from '../ui'
 import { cn } from '../../lib/utils'
 
+const XSS_TEMPLATE_EXAMPLES = [
+  `<svg onload="top.document.title='%s'">`,
+  `"><img src=x onerror="top.document.title='%s'">`,
+  `</script><script>top.document.title='%s'</script>`,
+]
+
+function validXSSTemplate(value: string) {
+  const trimmed = value.trim()
+  return trimmed !== '' && trimmed.length <= 8192 &&
+    (trimmed.match(/%s/g)?.length || 0) === 1 && trimmed.includes('top.document.title')
+}
+
 export function CorpusManager() {
   const [categories, setCategories] = useState<CorpusCategory[]>([])
   const [selectedId, setSelectedId] = useState('')
@@ -30,6 +42,10 @@ export function CorpusManager() {
   useEffect(() => { load(false) }, [])
   const visible = useMemo(() => kind === 'all' ? categories : categories.filter(c => c.kind === kind), [categories, kind])
   const selected = categories.find(c => c.id === selectedId) || visible[0]
+  const xssDraftLines = selected?.id === 'xss'
+    ? draft.split(/\r?\n/).map(value => value.trim()).filter(Boolean)
+    : []
+  const invalidXSSLines = xssDraftLines.filter(value => !validXSSTemplate(value))
 
   useEffect(() => {
     if (visible.length && !visible.some(c => c.id === selectedId)) setSelectedId(visible[0].id)
@@ -41,9 +57,12 @@ export function CorpusManager() {
     try {
       const merged = await system.mergeCorpus(selected.id, draft)
       setResult(merged)
-      setDraft('')
+      // Keep rejected XSS rows in the editor so the operator can fix them. The
+      // backend intentionally rejects ordinary alert/reflection payloads because
+      // they cannot provide the random browser-execution proof Reconner needs.
+      setDraft(selected.id === 'xss' && merged.invalid > 0 ? invalidXSSLines.join('\n') : '')
       await load()
-      addToast('success', `${merged.added} added · ${merged.duplicates} duplicate${merged.duplicates === 1 ? '' : 's'} · ${merged.invalid} invalid`)
+      addToast(merged.invalid > 0 ? 'info' : 'success', `${merged.added} added · ${merged.duplicates} duplicate${merged.duplicates === 1 ? '' : 's'} · ${merged.invalid} invalid${selected.id === 'xss' && merged.invalid > 0 ? ' — XSS templates need one %s nonce and top.document.title' : ''}`)
     } catch (e) {
       addToast('error', e instanceof Error ? e.message : 'Could not add entries')
     } finally { setSaving(false) }
@@ -119,6 +138,28 @@ export function CorpusManager() {
         </div>
 
         <div className="mt-5">
+          {selected.id === 'xss' && <div className="mb-4 rounded-xl border border-accent/30 bg-accent/[.06] p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-xs font-semibold text-text-primary">XSS imports require browser-proof templates</p>
+                <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-text-secondary">
+                  Each line must contain exactly one <code className="code">%s</code> placeholder and set <code className="code">top.document.title</code>.
+                  Reconner replaces <code className="code">%s</code> with a random nonce and accepts a finding only when Chromium observes that exact title change. Plain payloads such as <code className="code">&lt;script&gt;alert(1)&lt;/script&gt;</code> are rejected to prevent false positives.
+                </p>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => setDraft(current => current.trim() ? `${current.replace(/\s+$/, '')}\n${XSS_TEMPLATE_EXAMPLES.join('\n')}` : XSS_TEMPLATE_EXAMPLES.join('\n'))}>
+                Load valid examples
+              </Button>
+            </div>
+            <div className="mt-3 space-y-1.5" aria-label="Valid XSS template examples">
+              {XSS_TEMPLATE_EXAMPLES.map(example => <code key={example} className="block overflow-x-auto rounded-lg border border-border bg-black/20 px-3 py-2 text-[10px] text-accent-hover">{example}</code>)}
+            </div>
+            {xssDraftLines.length > 0 && <p className={cn('mt-3 text-[11px] font-medium', invalidXSSLines.length ? 'text-severity-high' : 'text-severity-low')}>
+              {invalidXSSLines.length
+                ? `${invalidXSSLines.length} of ${xssDraftLines.length} non-empty lines do not match this format. Rejected lines will stay in the editor so you can correct them.`
+                : `All ${xssDraftLines.length} non-empty lines match the required proof format.`}
+            </p>}
+          </div>}
           <label htmlFor="corpus-entries" className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Paste one entry per line</label>
           <textarea id="corpus-entries" value={draft} onChange={e => setDraft(e.target.value)} rows={12} spellCheck={false}
             placeholder={selected.kind === 'payload' ? 'Paste payload templates here…' : 'Paste words or paths here…'}
@@ -137,6 +178,11 @@ export function CorpusManager() {
           {[['Added', result.added, 'text-severity-low'], ['Duplicates', result.duplicates, 'text-severity-medium'], ['Invalid', result.invalid, 'text-severity-critical'], ['Effective total', result.total, 'text-accent']].map(([label, value, tone]) => (
             <div key={String(label)} className="rounded-lg border border-border bg-black/10 p-3"><p className="text-[10px] uppercase tracking-wide text-text-muted">{label}</p><p className={cn('mt-1 text-xl font-semibold tabular-nums', String(tone))}>{value}</p></div>
           ))}
+        </div>}
+
+        {selected.id === 'xss' && result && result.invalid > 0 && <div role="alert" className="mt-3 rounded-lg border border-severity-high/30 bg-severity-high/[.06] p-3 text-[11px] leading-relaxed text-text-secondary">
+          <b className="text-severity-high">Why {result.invalid === 1 ? 'was 1 line' : `were ${result.invalid} lines`} rejected?</b>{' '}
+          They were empty, too long, missing <code className="code">top.document.title</code>, or did not contain exactly one <code className="code">%s</code> nonce placeholder. The rejected lines remain above for editing; nothing invalid was saved.
         </div>}
 
         <div className="mt-5 border-t border-border pt-4">
