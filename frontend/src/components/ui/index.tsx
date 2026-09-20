@@ -1,4 +1,5 @@
-import React, { forwardRef, useEffect, useId } from 'react'
+import React, { forwardRef, useEffect, useId, useRef } from 'react'
+import { createPortal } from 'react-dom'
 
 export function cn(...classes: (string | undefined | false | null)[]): string {
   return classes.filter(Boolean).join(' ')
@@ -55,25 +56,42 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ label, error, c
 })
 Input.displayName = 'Input'
 
-export const Modal = ({ open, onClose, title, children, width='md' }: { open: boolean; onClose: () => void; title?: string; children: React.ReactNode; width?: 'sm'|'md'|'lg'|'xl' }) => {
+export const Modal = ({ open, onClose, title, children, footer, width='md', bodyClassName }: {
+  open: boolean
+  onClose: () => void
+  title?: string
+  children: React.ReactNode
+  footer?: React.ReactNode
+  width?: 'sm'|'md'|'lg'|'xl'
+  bodyClassName?: string
+}) => {
   const w = { sm:'max-w-sm', md:'max-w-md', lg:'max-w-2xl', xl:'max-w-4xl' }
   const titleID = useId()
+  const bodyRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    bodyRef.current?.scrollTo({ top: 0 })
     document.addEventListener('keydown', closeOnEscape)
-    return () => document.removeEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.body.style.overflow = previousOverflow
+    }
   }, [open, onClose])
   if (!open) return null
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center overflow-hidden p-2 sm:p-4">
       <button type="button" aria-label="Close dialog" tabIndex={-1} className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
       <div role="dialog" aria-modal="true" aria-labelledby={title ? titleID : undefined}
-        className={cn('relative flex flex-col max-h-[92dvh] bg-surface-2 border border-border rounded-t-2xl sm:rounded-xl shadow-2xl w-full', w[width])}>
+        className={cn('relative flex min-h-0 max-h-[calc(100dvh-1rem)] w-full flex-col overflow-hidden rounded-2xl border border-border bg-surface-2 shadow-2xl sm:max-h-[calc(100dvh-2rem)]', w[width])}>
         {title && <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-4 border-b border-border shrink-0"><h2 id={titleID} className="text-base font-semibold truncate min-w-0" title={title}>{title}</h2><button type="button" onClick={onClose} aria-label="Close" className="grid place-items-center w-8 h-8 rounded-lg text-text-muted hover:text-text-primary hover:bg-white/[.05] transition-colors shrink-0">✕</button></div>}
-        <div className="p-4 sm:p-5 overflow-y-auto overscroll-contain">{children}</div>
+        <div ref={bodyRef} data-modal-scroll-region className={cn('min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5', bodyClassName)}>{children}</div>
+        {footer && <div className="shrink-0 border-t border-border bg-surface-2 px-4 py-3 sm:px-5">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
