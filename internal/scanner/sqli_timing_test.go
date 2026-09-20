@@ -1,7 +1,12 @@
 package scanner
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,6 +39,40 @@ func TestTimingScalingConfirmed(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: timingScalingConfirmed = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestTimingSamplesRequireQuorum(t *testing.T) {
+	ms := time.Millisecond
+	if _, _, _, ok := summarizeTTFBSamples([]time.Duration{100 * ms}, 3); ok {
+		t.Fatal("one successful request must not stand in for a three-sample distribution")
+	}
+	median, min, max, ok := summarizeTTFBSamples([]time.Duration{300 * ms, 100 * ms}, 3)
+	if !ok || median != 300*ms || min != 100*ms || max != 300*ms {
+		t.Fatalf("quorum summary=(%s,%s,%s,%v)", median, min, max, ok)
+	}
+}
+
+func TestTimingConfirmationReusesScreeningSample(t *testing.T) {
+	withLoopbackAllowed(t)
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+
+	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET", Location: "query"}
+	seed := 5 * time.Second
+	median, min, max, ok := sampleTTFBSeeded(context.Background(), ip, "1", nil, 3, time.Second, []time.Duration{seed})
+	if !ok {
+		t.Fatal("seeded distribution did not reach quorum")
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("confirmation made %d requests, want 2 after reusing the screen", got)
+	}
+	if max != seed || median <= 0 || min <= 0 {
+		t.Fatalf("unexpected distribution median=%s min=%s max=%s", median, min, max)
 	}
 }
 
