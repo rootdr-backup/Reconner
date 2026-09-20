@@ -353,6 +353,7 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	var found atomic.Int64
 	baselines := make(map[string]soft404, len(services))
 	logFn("info", "dir_discovery", fmt.Sprintf("Probing common paths on %d services...", len(services)))
+
 	for _, svcURL := range services {
 		if ctx.Err() != nil {
 			break
@@ -670,13 +671,6 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 }
 
 func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, targetID string, services []string, domain string, corpus []string, adaptiveWords ...[]string) int {
-	// Curated high-signal patterns + generated candidates (domain-derived names,
-	// config files with backup suffixes, dated variants, bounded wordlist).
-	patterns := append([]string{}, corpus...)
-	patterns = append(patterns, generateBackupCandidates(domain)...)
-	if len(adaptiveWords) > 0 {
-		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 24)...)
-	}
 	var observedURLs []string
 	rows, err := db.QueryContext(ctx, `SELECT url FROM directory_findings WHERE target_id=?
 		UNION SELECT url FROM parameters WHERE target_id=? LIMIT 400`, targetID, targetID)
@@ -689,7 +683,18 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 		}
 		rows.Close()
 	}
-	patterns = append(patterns, generateNestedBackupCandidates(observedURLs)...)
+	// Order is part of discovery quality. Context-derived nested candidates and
+	// adaptive product names must run before the much larger generic cross-product;
+	// otherwise a phase deadline can expire before high-signal paths such as
+	// /back/.env are ever scheduled. Deduplication preserves the first (highest
+	// priority) occurrence, so this changes time-to-signal without dropping any
+	// candidate from the former plan.
+	patterns := generateNestedBackupCandidates(observedURLs)
+	if len(adaptiveWords) > 0 {
+		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 24)...)
+	}
+	patterns = append(patterns, corpus...)
+	patterns = append(patterns, generateBackupCandidates(domain)...)
 	patterns = uniquePaths(patterns)
 
 	// Raised from 20: the wordlist merge (backup_magic.go) roughly 5x'd the
@@ -698,6 +703,7 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 	var wg sync.WaitGroup
 	var found atomic.Int64
 
+serviceLoop:
 	for _, svcURL := range services {
 		if ctx.Err() != nil {
 			break
@@ -713,8 +719,12 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 			if ctx.Err() != nil {
 				break
 			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				break serviceLoop
+			}
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(b, p string, base soft404) {
 				defer wg.Done()
 				defer func() { <-sem }()
@@ -724,6 +734,11 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 					return
 				}
 				req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
+				// Backup validation only needs the leading bytes (magic signatures,
+				// SQL markers, env/config evidence). Asking for a bounded range avoids
+				// downloading multi-gigabyte dumps while still accepting servers that
+				// ignore Range and answer 200.
+				req.Header.Set("Range", "bytes=0-262143")
 				resp, err := dirHTTPClient.Do(req)
 				if err != nil {
 					return
@@ -741,7 +756,8 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 					return
 				}
 
-				if resp.StatusCode == 200 && !base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
+				if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) &&
+					!base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
 					magic := checkMagicBytes(body)
 					fileType := detectFileType(p, body)
 
@@ -756,7 +772,7 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 					if magic != "" {
 						fileType = magic + " (confirmed)"
 					}
-					size := trueSize(resp, len(body))
+					size := backupResponseSize(resp, len(body))
 					id := uuid.New().String()
 					result, err := db.Exec(`
 						INSERT INTO backup_findings (id, target_id, url, status_code, content_length, file_type)
@@ -781,6 +797,27 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 
 	wg.Wait()
 	return int(found.Load())
+}
+
+// backupResponseSize reports the full object size when the server supplies it,
+// without draining a large/chunked response merely to count bytes. For a 206,
+// Content-Length is the slice length, while Content-Range carries the real size.
+// When neither is known, the validated prefix is an honest lower bound.
+func backupResponseSize(resp *http.Response, observed int) int {
+	if resp == nil {
+		return observed
+	}
+	if raw := strings.TrimSpace(resp.Header.Get("Content-Range")); raw != "" {
+		if slash := strings.LastIndexByte(raw, '/'); slash >= 0 && slash+1 < len(raw) {
+			if total, err := strconv.ParseInt(strings.TrimSpace(raw[slash+1:]), 10, 64); err == nil && total >= 0 {
+				return int(total)
+			}
+		}
+	}
+	if resp.StatusCode != http.StatusPartialContent && resp.ContentLength >= 0 {
+		return int(resp.ContentLength)
+	}
+	return observed
 }
 
 // storeExposedBackup raises a high-severity finding for a magic-byte-CONFIRMED

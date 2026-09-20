@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/recon-platform/internal/database"
@@ -52,10 +53,17 @@ func TestShortNestedEnvIsCredibleWithoutMinimumSizeHeuristic(t *testing.T) {
 func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 	withLoopbackAllowed(t)
 	body := "DB_PASSWORD=s3cr3t\nAPI_KEY=0123456789abcdef\n"
+	var requestOrdinal atomic.Int64
+	var findingOrdinal atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ordinal := requestOrdinal.Add(1)
 		if r.URL.Path != "/back/.env" {
 			http.NotFound(w, r)
 			return
+		}
+		findingOrdinal.CompareAndSwap(0, ordinal)
+		if got := r.Header.Get("Range"); got != "bytes=0-262143" {
+			t.Errorf("backup probe Range=%q", got)
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, body)
@@ -73,8 +81,15 @@ func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO targets (id,domain) VALUES ('target','example.test')`); err != nil {
 		t.Fatal(err)
 	}
-	if found := scanBackupCandidatesWithCorpus(context.Background(), db, "target", []string{srv.URL}, "example.test", []string{"/back/.env"}); found < 1 {
-		t.Fatal("/back/.env was not discovered")
+	// No injected corpus entry: this proves the default contextual plan itself
+	// covers /back/.env, instead of merely testing a caller-provided exact path.
+	if found := scanBackupCandidatesWithCorpus(context.Background(), db, "target", []string{srv.URL}, "example.test", nil); found < 1 {
+		t.Fatal("/back/.env was not discovered by the default plan")
+	}
+	// Two requests establish the soft-404 baseline; /back/.env is then in the
+	// first high-signal batch rather than behind thousands of generic candidates.
+	if got := findingOrdinal.Load(); got == 0 || got > 42 {
+		t.Fatalf("/back/.env scheduled too late: request ordinal=%d", got)
 	}
 	var fileType string
 	if err := db.QueryRow(`SELECT file_type FROM backup_findings WHERE target_id='target' AND url=?`, srv.URL+"/back/.env").Scan(&fileType); err != nil {
@@ -82,6 +97,27 @@ func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 	}
 	if fileType != "env_file" {
 		t.Fatalf("stored file type=%q", fileType)
+	}
+}
+
+func TestBackupResponseSizeUsesContentRangeWithoutDraining(t *testing.T) {
+	resp := &http.Response{
+		StatusCode:    http.StatusPartialContent,
+		ContentLength: 256 * 1024,
+		Header:        http.Header{"Content-Range": {"bytes 0-262143/987654321"}},
+		Body:          io.NopCloser(bytes.NewReader(make([]byte, 1024*1024))),
+	}
+	if got := backupResponseSize(resp, 256*1024); got != 987654321 {
+		t.Fatalf("size=%d", got)
+	}
+	remaining, _ := io.ReadAll(resp.Body)
+	if len(remaining) != 1024*1024 {
+		t.Fatal("backupResponseSize drained the response body")
+	}
+
+	unknown := &http.Response{StatusCode: http.StatusOK, ContentLength: -1, Header: http.Header{}}
+	if got := backupResponseSize(unknown, 12345); got != 12345 {
+		t.Fatalf("unknown size=%d", got)
 	}
 }
 
