@@ -13,7 +13,7 @@ async function authenticate(page: Page) {
     await page.getByLabel('Password').fill(password)
     const [response] = await Promise.all([
       page.waitForResponse(value => value.url().endsWith('/api/auth/login') && value.request().method() === 'POST'),
-      page.getByRole('button', { name: 'Sign In' }).click(),
+      page.getByRole('button', { name: /Sign in/i }).click(),
     ])
     if (response.ok()) {
       loggedIn = true
@@ -39,11 +39,11 @@ async function authenticate(page: Page) {
     expect(response.ok(), 'first-boot password rotation must succeed').toBeTruthy()
     await expect(passwordHeading).toBeHidden()
   }
-  await expect(page.getByRole('heading', { name: 'Attack surface overview' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Your attack surface, under control.' })).toBeVisible()
 }
 
 const routes = [
-  ['/', 'Attack surface overview'],
+  ['/', 'Your attack surface, under control.'],
   ['/bounty-programs', 'Bug bounty programs'],
   ['/targets', 'Projects'],
   ['/analyze', 'Guided Analyze'],

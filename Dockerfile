@@ -317,6 +317,7 @@ RUN apt-get update \
       python3 \
       git \
       curl \
+      gosu \
       tini \
  && rm -rf /var/lib/apt/lists/*
 
@@ -370,14 +371,12 @@ ENV HOME=/home/reconner \
 
 # All build-time command checks below run with the same restricted identity as
 # production. This catches tools that accidentally require root before publish.
-USER reconner:reconner
-
 # ── build-time verification ──────────────────────────────────────────────────
 # Every tool Reconner can invoke MUST be present and actually executable in
 # the finished image — this is not a "does the file exist" check, each
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
-RUN set -eu; \
+RUN gosu reconner:reconner sh -c 'set -eu; \
     echo "==> verifying all 23 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
@@ -410,7 +409,7 @@ RUN set -eu; \
     dnsx -version; \
     dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \
     /opt/venv/bin/python3 -m dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not importable via its own venv python3" >&2; exit 1; }; \
-    echo "==> tool-chain verification passed"
+    echo "==> tool-chain verification passed"'
 
 # The runtime receives no extra Linux capabilities. Network/CIDR targets are
 # rejected by this build, so advertising raw-socket scanning or granting

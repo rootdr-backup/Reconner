@@ -48,9 +48,8 @@ export default function Findings() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-xl font-semibold">Findings</h1>
-        <span className="text-xs text-text-muted">across all targets</span>
+      <div className="flex items-end gap-3 flex-wrap">
+        <div><p className="page-kicker">Evidence desk</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Findings</h1><p className="page-lede mt-1">Verified issues and candidates across every project.</p></div>
         <div className="ml-auto flex items-center gap-1 text-xs">
           <button onClick={() => { setStatus('finding'); setSevFilter(null) }}
             className={cn('px-3 py-1.5 rounded border', status === 'finding' ? 'border-accent text-accent' : 'border-border text-text-muted')}>

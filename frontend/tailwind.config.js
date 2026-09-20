@@ -15,32 +15,32 @@ export default {
         // Deep, slightly cool neutrals (0 = app background, higher = raised).
         // Values pinned to the committed design spec.
         surface: {
-          DEFAULT: '#07090d', // bg-app
-          1: '#0a0c10',       // bg-sidebar
-          2: '#0f1218',       // bg-card
-          3: '#151a22',       // bg-elevated (popovers / menus)
-          4: '#1b212b',
-          5: '#232b37',
-          alt: '#0c0f14',     // bg-input
+          DEFAULT: '#070a12',
+          1: '#0a0e19',
+          2: '#101522',
+          3: '#171d2c',
+          4: '#20283a',
+          5: '#2a3449',
+          alt: '#0c111d',
         },
         border: {
-          DEFAULT: '#1e2530',
-          subtle: '#161c24',
-          strong: '#2a3341',
+          DEFAULT: '#222b3d',
+          subtle: '#182033',
+          strong: '#34405a',
           accent: 'rgba(139,92,246,0.25)',
         },
         // The single committed accent — teal-500.
         accent: {
-          DEFAULT: '#22d3ee',
-          hover: '#67e8f9',
-          muted: 'rgba(34,211,238,0.12)',
-          glow: 'rgba(34,211,238,0.35)',
+          DEFAULT: '#8b7cff',
+          hover: '#aca2ff',
+          muted: 'rgba(139,124,255,0.13)',
+          glow: 'rgba(139,124,255,0.38)',
         },
         text: {
-          primary: '#e8edf4',
-          secondary: '#8b9cb3',
-          muted: '#5a6a7e',
-          inverse: '#04140f',
+          primary: '#f3f5fb',
+          secondary: '#a2aec3',
+          muted: '#647189',
+          inverse: '#0a0b16',
         },
         // Severity — always shown with a text label in the UI.
         severity: {
@@ -53,9 +53,9 @@ export default {
         },
         // Chart/series palette — accent-led, distinct hues for graphs.
         series: {
-          1: '#22d3ee',
-          2: '#14b8a6',
-          3: '#67e8f9',
+          1: '#8b7cff',
+          2: '#4fd1c5',
+          3: '#60a5fa',
           4: '#f97316',
           5: '#f472b6',
           6: '#eab308',
@@ -68,10 +68,10 @@ export default {
         mono: ['JetBrains Mono', 'Fira Code', 'ui-monospace', 'monospace'],
       },
       borderRadius: {
-        DEFAULT: '8px',
-        sm: '6px',
-        lg: '10px',
-        xl: '14px',
+        DEFAULT: '10px',
+        sm: '8px',
+        lg: '14px',
+        xl: '18px',
       },
       animation: {
         'fade-in': 'fadeIn 0.18s ease-out',

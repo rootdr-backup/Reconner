@@ -93,11 +93,11 @@ function GlobalSearch() {
 
   return (
     <div className="relative hidden sm:block" ref={boxRef}>
-      <div className="flex items-center gap-2 w-64 px-3 py-1.5 rounded-lg bg-surface-alt border border-border focus-within:border-accent/50 transition-colors">
+      <div className="flex items-center gap-2 w-72 px-3.5 py-2 rounded-xl bg-black/20 border border-white/[.09] focus-within:border-accent/60 focus-within:bg-black/30 transition-all">
         <svg className="w-4 h-4 text-text-muted shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
           <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
         </svg>
-        <input value={q} onFocus={() => { loadOnce(); setOpen(true) }} onChange={e => { setQ(e.target.value); setOpen(true) }}
+        <input name="reconner-target-search" autoComplete="off" value={q} onFocus={() => { loadOnce(); setOpen(true) }} onChange={e => { setQ(e.target.value); setOpen(true) }}
           onKeyDown={e => { if (e.key === 'Enter' && results[0]) go(results[0]); if (e.key === 'Escape') setOpen(false) }}
           placeholder="Search targets…" className="bg-transparent outline-none text-sm text-text-primary placeholder-text-muted w-full" />
       </div>
@@ -181,7 +181,7 @@ export const TopBar = () => {
 
   return (
     <>
-      <header className="h-16 flex items-center justify-between gap-3 px-3 sm:px-5 lg:px-6 border-b border-border bg-surface-1/80 backdrop-blur-xl shrink-0">
+      <header className="app-topbar h-[76px] flex items-center justify-between gap-3 px-3 sm:px-6 xl:px-8 shrink-0">
         {/* Breadcrumbs */}
         <div className="flex items-center gap-2 min-w-0">
           <button type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"

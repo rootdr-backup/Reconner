@@ -204,16 +204,20 @@ func run() error {
 
 type encryptedColumn struct {
 	table, key, column string
+	// Optional, operator-replaceable integration credentials may be cleared when
+	// a historical config/database mismatch makes recovery cryptographically
+	// impossible. Scan identities and evidence always remain fail-closed.
+	resetIfUndecryptable bool
 }
 
 var encryptedDatabaseColumns = []encryptedColumn{
-	{"identities", "id", "headers_json"},
-	{"identities", "id", "storage_json"},
-	{"request_templates", "id", "encrypted_request"},
-	{"captured_responses", "id", "encrypted_response"},
-	{"guided_runs", "id", "encrypted_input"},
-	{"guided_runs", "id", "encrypted_report"},
-	{"telegram_config", "id", "encrypted_bot_token"},
+	{table: "identities", key: "id", column: "headers_json"},
+	{table: "identities", key: "id", column: "storage_json"},
+	{table: "request_templates", key: "id", column: "encrypted_request"},
+	{table: "captured_responses", key: "id", column: "encrypted_response"},
+	{table: "guided_runs", key: "id", column: "encrypted_input"},
+	{table: "guided_runs", key: "id", column: "encrypted_report"},
+	{table: "telegram_config", key: "id", column: "encrypted_bot_token", resetIfUndecryptable: true},
 }
 
 func rotateStoredSecrets(db *sql.DB, oldSecret, newSecret string) error {
@@ -231,6 +235,7 @@ func rotateStoredSecrets(db *sql.DB, oldSecret, newSecret string) error {
 		type update struct {
 			id    any
 			value string
+			reset bool
 		}
 		var updates []update
 		for rows.Next() {
@@ -241,8 +246,12 @@ func rotateStoredSecrets(db *sql.DB, oldSecret, newSecret string) error {
 			}
 			rotated, err := secret.Reencrypt(item.value, oldSecret, newSecret)
 			if err != nil {
-				rows.Close()
-				return fmt.Errorf("%s.%s: %w", c.table, c.column, err)
+				if !c.resetIfUndecryptable {
+					rows.Close()
+					return fmt.Errorf("%s.%s: %w", c.table, c.column, err)
+				}
+				rotated = ""
+				item.reset = true
 			}
 			item.value = rotated
 			updates = append(updates, item)
@@ -258,6 +267,13 @@ func rotateStoredSecrets(db *sql.DB, oldSecret, newSecret string) error {
 		for _, item := range updates {
 			if _, err := tx.Exec(statement, item.value, item.id); err != nil {
 				return err
+			}
+			if item.reset && c.table == "telegram_config" {
+				if _, err := tx.Exec(`UPDATE telegram_config SET enabled=0,
+					last_error='Stored BotFather token could not be decrypted after upgrade; enter it again.'
+					WHERE id=?`, item.id); err != nil {
+					return err
+				}
 			}
 		}
 	}

@@ -33,7 +33,7 @@ test('first boot, project CRUD, focused scan and phase ledger', async ({ page },
     await page.getByLabel('Confirm new password').fill(NEW_PASSWORD)
     await page.getByRole('button', { name: 'Set password' }).click()
   }
-  await expect(page.getByRole('heading', { name: 'Attack surface overview' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Your attack surface, under control.' })).toBeVisible()
   // The initial anonymous /auth/me probe intentionally returns 401 so the app
   // redirects to login; Chromium reports that expected response as a console
   // resource error. Product-console assertions start after authentication.

@@ -19,6 +19,9 @@ services:
     image: ghcr.io/rootdr-backup/reconner:latest
     container_name: reconner
     restart: unless-stopped
+    # The entrypoint uses root only for the one-time ownership migration of
+    # pre-v3 volumes, then drops permanently to uid/gid 10001 before startup.
+    user: "0:0"
     # Bound the entire container, including Chromium and external scanner child
     # processes. Override these in .env for the host sizes documented in
     # README.Docker.md; Go's internal memory budget auto-detects this cgroup.

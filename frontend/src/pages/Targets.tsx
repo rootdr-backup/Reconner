@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { targets as targetsApi } from '../lib/api'
-import { Button, Input, Modal, Spinner, Empty, Badge } from '../components/ui'
+import { Button, Input, Modal, Spinner, EmptyState, Badge } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { useUIStore } from '../store/ui'
 import { timeAgo, cn } from '../lib/utils'
@@ -238,10 +238,11 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     <div className="space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">
+          <p className="page-kicker">Scope control</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">
             {filterKind === 'web' ? 'Web Projects' : filterKind === 'network' ? 'Network Projects' : 'Projects'}
           </h1>
-          <p className="text-xs text-text-muted">
+          <p className="page-lede mt-1">
             {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · group domains, URLs, JavaScript files, IP-hosted web URLs, or a public bounty program
           </p>
         </div>
@@ -257,7 +258,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
         </div>
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
+      <div className="card flex items-center gap-3 flex-wrap p-3">
         <Input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} className="sm:max-w-xs" />
         <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} aria-label="Filter by priority"
           className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary">
@@ -301,9 +302,12 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
       {loading
         ? <div className="flex items-center justify-center h-48"><Spinner /></div>
         : kindTargets.length === 0
-          ? <Empty message={filterKind === 'web' ? 'No web targets yet — add a domain to start the web pipeline.'
-              : filterKind === 'network' ? 'No legacy network projects.'
-              : 'No targets yet.'} />
+          ? <div className="card mt-2 min-h-[340px] grid place-items-center"><EmptyState
+              icon={<svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M22 12h-3M12 22v-3M2 12h3"/></svg>}
+              title={filterKind === 'network' ? 'No legacy network projects' : 'Build your first attack surface'}
+              description={filterKind === 'web' ? 'Add a domain to start discovery, crawling, JavaScript analysis and verification.' : 'Create a project from a domain, URL, JavaScript file, or a public bounty program.'}
+              action={<Button variant="primary" onClick={() => setCreateOpen(true)}>+ Create first project</Button>}
+            /></div>
           : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {sortedTargets.map(t => (

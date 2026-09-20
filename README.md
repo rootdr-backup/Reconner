@@ -114,15 +114,22 @@ docker compose up -d --no-deps reconner
 docker compose ps
 ```
 
-The hardened image runs as uid/gid `10001` instead of root. A new named volume
-gets the correct ownership automatically. If an older volume was created by a
-root-running image and startup reports that `/data` is not writable, repair its
-ownership once, then start Reconner again:
+The service runs as uid/gid `10001` instead of root. Starting with v3.0.1, the
+Compose entrypoint repairs ownership of a pre-v3 root-owned volume once and
+then drops privileges before Reconner starts. No manual migration is normally
+needed. If a custom orchestrator forces the container user and bypasses that
+init step, repair ownership once, then start Reconner again:
 
 ```bash
 docker compose run --rm --user 0 --entrypoint chown reconner -R 10001:10001 /data
 docker compose up -d --no-deps reconner
 ```
+
+If an old deployment's `config.json` and database contain mismatched encryption
+keys, v3.0.1 preserves scan identities and evidence fail-closed. The optional
+Telegram BotFather token is the only recoverable exception: Reconner clears and
+disables that unusable token, keeps the chat allowlist, and asks an administrator
+to enter the token again instead of crash-looping the whole service.
 
 For a local source build:
 

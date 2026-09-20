@@ -135,9 +135,9 @@ export default function System() {
     <div className="space-y-5">
       <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-accent">Platform control</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">System &amp; updates</h1>
-          <p className="mt-1 text-xs text-text-muted">Release health, integrations, scanner tools and team access.</p>
+          <p className="page-kicker">Platform control</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">System &amp; updates</h1>
+          <p className="page-lede mt-1">Release health, integrations, scanner tools and team access.</p>
         </div>
         <div className="flex items-center gap-2">
           {activeTab === 'toolchain' && (

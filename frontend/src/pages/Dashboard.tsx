@@ -80,11 +80,17 @@ function Sparkline({ data }: { data: { date: string; scans: number }[] }) {
   )
 }
 
-function Stat({ label, value, tone }: { label: string; value: number | string; tone?: string }) {
+function Stat({ label, value, tone, hint }: { label: string; value: number | string; tone?: string; hint?: string }) {
   return (
-    <div className="card p-3.5">
-      <p className="text-[11px] text-text-muted mb-1">{label}</p>
-      <p className={cn('text-2xl font-semibold tabular-nums', tone)}>{value}</p>
+    <div className="metric-card">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[.14em] text-text-muted">{label}</p>
+          <p className={cn('mt-2 text-[30px] leading-none font-semibold tracking-[-.04em] tabular-nums', tone)}>{value}</p>
+        </div>
+        <span className="mt-1 h-8 w-8 rounded-xl border border-white/[.06] bg-white/[.025]" />
+      </div>
+      {hint && <p className="mt-3 text-[10px] text-text-muted">{hint}</p>}
     </div>
   )
 }
@@ -115,9 +121,9 @@ function RecentActivity() {
     return () => { alive = false; clearInterval(i) }
   }, [])
   return (
-    <div className="card p-4">
+    <div className="card p-5">
       <div className="flex items-center justify-between mb-3">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Recent activity</p>
+        <p className="panel-heading">Recent activity</p>
         <button onClick={() => nav('/tasks')} className="text-[11px] text-accent hover:underline">View all →</button>
       </div>
       {rows === null ? (
@@ -167,42 +173,48 @@ export default function Dashboard() {
   const maxBar = Math.max(1, ...topTargets.map(t => t[topSort] || 0))
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+    <div className="space-y-5 sm:space-y-6">
+      <section className="hero-panel p-5 sm:p-7 xl:p-8">
+      <div className="relative z-[1] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-accent">Command center</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Attack surface overview</h1>
-          <p className="mt-1 text-xs text-text-muted">{stats.targets} target(s) · {totalVulns} finding(s) · {critHigh} critical/high</p>
+          <p className="page-kicker">Live command center</p>
+          <h1 className="mt-2 text-3xl sm:text-4xl font-semibold tracking-tight">Your attack surface,<br className="hidden sm:block"/> under control.</h1>
+          <p className="page-lede mt-3 max-w-xl">See what changed, what is exposed, and what needs verification—without digging through raw tool output.</p>
+          <div className="mt-5 flex items-center gap-4 text-[11px] text-text-muted">
+            <span className="inline-flex items-center gap-2"><span className="dot-online" /> Platform ready</span>
+            <span>{stats.running_tasks} active scan{stats.running_tasks === 1 ? '' : 's'}</span>
+            <span>{critHigh} urgent</span>
+          </div>
         </div>
-        {/* Quick actions */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={() => nav('/targets')} className="btn-primary text-xs">+ New target</button>
-          <button onClick={() => nav('/findings')} className="btn-secondary text-xs">Review findings</button>
-          <button onClick={() => nav('/tasks')} className="btn-secondary text-xs">Scan activity</button>
-          <button onClick={load} className="btn-ghost text-xs" title="Refresh">↻</button>
+        <div className="grid grid-cols-2 gap-2 lg:min-w-[340px]">
+          <button onClick={() => nav('/targets')} className="btn-primary justify-center px-5 py-2.5">+ Add project</button>
+          <button onClick={() => nav('/tasks')} className="btn-secondary justify-center px-4 py-2.5">Open operations</button>
+          <button onClick={() => nav('/findings')} className="btn-ghost justify-center px-4 py-2.5">Triage findings</button>
+          <button onClick={load} className="btn-ghost justify-center px-3 py-2.5" title="Refresh">Refresh ↻</button>
         </div>
       </div>
+      </section>
 
       {/* Hero KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat label="Targets" value={stats.targets} />
-        <Stat label="Alive hosts" value={stats.alive_hosts.toLocaleString()} tone="text-severity-low" />
-        <Stat label="Findings" value={totalVulns} tone={totalVulns > 0 ? 'text-severity-high' : undefined} />
-        <Stat label="Critical / High" value={critHigh} tone={critHigh > 0 ? 'text-severity-critical' : undefined} />
+        <Stat label="Projects" value={stats.targets} hint="Defined scopes" />
+        <Stat label="Live services" value={stats.alive_hosts.toLocaleString()} tone="text-severity-low" hint="Reachable now" />
+        <Stat label="Verified findings" value={totalVulns} tone={totalVulns > 0 ? 'text-severity-high' : undefined} hint="Evidence attached" />
+        <Stat label="Urgent" value={critHigh} tone={critHigh > 0 ? 'text-severity-critical' : undefined} hint="Critical + high" />
       </div>
 
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="card p-4">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Findings by severity</p>
+        <div className="card p-5">
+          <p className="panel-heading mb-4">Findings by severity</p>
           {totalVulns > 0 ? <SeverityDonut data={sev} /> : <p className="text-xs text-text-muted py-8 text-center">No findings yet.</p>}
         </div>
-        <div className="card p-4">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Vulnerabilities by type</p>
+        <div className="card p-5">
+          <p className="panel-heading mb-4">Vulnerabilities by type</p>
           {byType.length > 0 ? <BarList data={byType} colorClass="bg-severity-high" /> : <p className="text-xs text-text-muted py-8 text-center">No typed vulns yet.</p>}
         </div>
-        <div className="card p-4">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-3">Scan activity (30d)</p>
+        <div className="card p-5">
+          <p className="panel-heading mb-4">Scan velocity · 30 days</p>
           <Sparkline data={charts?.scans_over_time || []} />
           <div className="grid grid-cols-2 gap-2 mt-4">
             <Stat label="Running" value={stats.running_tasks} tone={stats.running_tasks > 0 ? 'text-accent' : undefined} />
@@ -213,9 +225,9 @@ export default function Dashboard() {
 
       {/* Top targets + recent activity */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <div className="card p-4 lg:col-span-2">
+      <div className="card p-5 lg:col-span-2">
         <div className="flex items-center justify-between mb-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Top targets</p>
+          <p className="panel-heading">Priority projects</p>
           <select value={topSort} onChange={e => setTopSort(e.target.value as typeof topSort)}
             className="bg-surface-alt border border-border rounded px-2 py-1 text-[11px] text-text-primary">
             <option value="findings" className="bg-surface-3">by findings</option>
@@ -247,7 +259,7 @@ export default function Dashboard() {
 
       {/* Recon detail */}
       <div>
-        <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">Recon surface</p>
+        <p className="panel-heading mb-3">Coverage inventory</p>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat label="Subdomains" value={stats.subdomains.toLocaleString()} />
           <Stat label="HTTP services" value={stats.http_services.toLocaleString()} />
