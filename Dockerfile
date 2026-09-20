@@ -411,6 +411,12 @@ RUN gosu reconner:reconner sh -c 'set -eu; \
     /opt/venv/bin/python3 -m dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not importable via its own venv python3" >&2; exit 1; }; \
     echo "==> tool-chain verification passed"'
 
+# Keep the OCI image safe-by-default for direct `docker run` consumers.
+# docker compose explicitly overrides this to root only while the entrypoint
+# repairs a legacy volume, then the entrypoint immediately drops to this same
+# unprivileged identity before starting Reconner.
+USER reconner:reconner
+
 # The runtime receives no extra Linux capabilities. Network/CIDR targets are
 # rejected by this build, so advertising raw-socket scanning or granting
 # NET_RAW/NET_ADMIN would be both misleading and an unnecessary attack surface.
