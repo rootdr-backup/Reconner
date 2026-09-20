@@ -296,11 +296,19 @@ new database/driver error; template and command payloads retain their independen
 computed-marker contracts. An imported string is extra coverage, never proof by
 itself.
 
-The v3.0.3 verifier also observes nonce proof messages from cross-origin frames,
+The v3.1 verifier also observes nonce proof messages from cross-origin frames,
 traces modern injection sinks such as `setHTMLUnsafe()` and
 `Document.parseHTMLUnsafe()`, and runs a real-Chromium 13-context coverage matrix
 in CI. Passing that named matrix is a concrete regression guarantee, not a
 universal detection percentage for every application or CSP policy.
+
+Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
+bounded Range validation, and retains the complete generic corpus behind those
+high-signal candidates. SQLi timing requires a successful sample quorum and
+linear baseline/sleep(0)/sleep(2)/sleep(5) evidence. Browser XSS proof uses
+adaptive polling rather than a fixed delay, so synchronous execution returns
+quickly while late SPA hydration remains covered. See the reproducible scope and
+results in [scanner quality evidence](docs/QUALITY_EVIDENCE_REVIEW.md).
 
 ### Target artifact bundles
 
