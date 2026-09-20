@@ -239,13 +239,17 @@ RUN pip install --no-cache-dir --upgrade \
  && sed -i 's/Requires-Dist: pyopenssl==26.1.0/Requires-Dist: pyopenssl>=26.4.0,<27/' \
       /opt/venv/lib/python*/site-packages/dirsearch-0.5.0.dist-info/METADATA \
  && pip check \
+ && pip uninstall --yes pip setuptools wheel \
  && rm -f /opt/venv/lib/python*/site-packages/dirsearch/native/Cargo.lock
-# The user never needs pip or network access after the container starts: this
-# venv is fully self-contained and is copied verbatim into runtime.
+# The user never needs pip, setuptools, wheel, or network access after the
+# container starts. Removing those build-only packages also keeps their
+# independently versioned vendored libraries out of the runtime attack surface.
+# Execute every entrypoint after removal so the image cannot ship a tool that
+# accidentally depended on build tooling at runtime.
 RUN /opt/venv/bin/python3 -c "import sys; print(sys.version)" \
- && test -x /opt/venv/bin/dirsearch \
- && test -x /opt/venv/bin/uro \
- && test -x /opt/venv/bin/waymore
+ && /opt/venv/bin/dirsearch --help >/dev/null \
+ && /opt/venv/bin/uro --help >/dev/null \
+ && /opt/venv/bin/waymore --help >/dev/null
 
 # ── stage 6: backend (Reconner Go binary, CGO + embedded SQLite) ────────────
 FROM golang:${GO_VERSION} AS backend
