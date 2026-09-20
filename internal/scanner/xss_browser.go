@@ -479,7 +479,10 @@ func (b *browserXSSConfirmer) scriptLoaderPage() string {
 	return b.loaderURL
 }
 
-const xssBrowserProofExpression = `(top.document.title='%s',alert('reconner'))`
+// top.postMessage is permitted across origins, unlike top.document.title. This
+// keeps the title proof while removing a systematic false negative for payloads
+// that execute inside a cross-origin child frame.
+const xssBrowserProofExpression = `(document.title='%[1]s',top.postMessage({__reconnerXSSProof:'%[1]s'},'*'),alert('reconner'))`
 
 func addXSSPopupProof(templates []string) []string {
 	out := make([]string, 0, len(templates))
@@ -506,8 +509,14 @@ func xssBrowserPayloads() []string {
 		`"><input autofocus onfocus="top.document.title='%s'">`,
 		`</textarea><svg onload="top.document.title='%s'">`,
 		`</title><svg onload="top.document.title='%s'">`,
+		`</noscript><svg onload="top.document.title='%s'">`,
+		`</xmp><svg onload="top.document.title='%s'">`,
+		`</noembed><svg onload="top.document.title='%s'">`,
+		`</iframe><svg onload="top.document.title='%s'">`,
 		`</style><svg onload="top.document.title='%s'">`,
 		`--><svg onload="top.document.title='%s'">`,
+		`<iframe srcdoc="<svg onload=top.document.title='%s'>"></iframe>`,
+		`<video><source onerror="top.document.title='%s'">`,
 		// JavaScript string/expression/template contexts.
 		`";top.document.title='%s';//`,
 		"${top.document.title='%s'}",
@@ -645,9 +654,16 @@ func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysisAndTemplates(parent co
 		custom = custom[:64]
 	}
 	for _, template := range custom {
-		if validCorpusValue("xss", template) && !seen[template] {
-			seen[template] = true
-			templates = append(templates, template)
+		if !validCorpusValue("xss", template) {
+			continue
+		}
+		// Keep the stable stored/UI contract, but give custom templates the
+		// same popup and cross-frame proof channel at execution time. Deduplicate
+		// after this normalization so an operator cannot replay a built-in.
+		runtimeTemplate := strings.ReplaceAll(template, `top.document.title='%s'`, xssBrowserProofExpression)
+		if !seen[runtimeTemplate] {
+			seen[runtimeTemplate] = true
+			templates = append(templates, runtimeTemplate)
 		}
 	}
 	for _, tmpl := range templates {
@@ -1024,6 +1040,8 @@ func (b *browserXSSConfirmer) fireWindowName(parent context.Context, pageURL, pa
 	}
 	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
 	defer stopHeaders()
 	payloadJSON, _ := json.Marshal(payload)
@@ -1050,6 +1068,8 @@ func (b *browserXSSConfirmer) firePostMessage(parent context.Context, pageURL, p
 	}
 	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{pageURL}, headers)
 	defer stopHeaders()
 	actions := append(headerActions, chromedp.Navigate(pageURL))
@@ -1086,6 +1106,8 @@ func (b *browserXSSConfirmer) fireWithHeaders(parent context.Context, rawURL str
 
 	ctx, cancel := b.operationContext(parent, tab, 12*time.Second, lease)
 	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{rawURL}, headers)
 	defer stopHeaders()
 	actions := append(headerActions, chromedp.Navigate(rawURL))
@@ -1106,6 +1128,8 @@ func (b *browserXSSConfirmer) fireScriptResource(parent context.Context, resourc
 	}
 	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{resourceURL}, headers)
 	defer stopHeaders()
 	resourceJSON, _ := json.Marshal(resourceURL)
@@ -1133,6 +1157,8 @@ func (b *browserXSSConfirmer) fireForm(parent context.Context, action string, va
 	}
 	ctx, cancel := b.operationContext(parent, tab, 15*time.Second, lease)
 	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
 	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{action}, headers)
 	defer stopHeaders()
 	parsed, err := url.Parse(action)
@@ -1158,11 +1184,13 @@ func (b *browserXSSConfirmer) waitForExecution(ctx context.Context, nonce string
 	// executor is attached to the context. Calling Action.Do(ctx) directly panics
 	// in current chromedp (nil cdp.Executor), which previously crashed live XSS
 	// scans as soon as a Mac/Linux browser was actually available.
-	_ = chromedp.Run(ctx, chromedp.Poll(`document.title === `+strconv.Quote(nonce), nil,
+	proofExpr := `(document.title === ` + strconv.Quote(nonce) + ` || window.` + xssProofResultKey + ` === ` + strconv.Quote(nonce) + `)`
+	_ = chromedp.Run(ctx, chromedp.Poll(proofExpr, nil,
 		chromedp.WithPollingInterval(100*time.Millisecond), chromedp.WithPollingTimeout(1250*time.Millisecond)))
-	var title string
-	_ = chromedp.Run(ctx, chromedp.Evaluate(`document.title`, &title))
-	return title
+	var proof string
+	readProof := `(()=>document.title===` + strconv.Quote(nonce) + `?document.title:(window.` + xssProofResultKey + `||''))()`
+	_ = chromedp.Run(ctx, chromedp.Evaluate(readProof, &proof))
+	return proof
 }
 
 func triggerXSSInteractions(ctx context.Context, nonce string) {

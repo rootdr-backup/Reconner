@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -26,6 +27,14 @@ func TestBrowserXSSConfirmLive(t *testing.T) {
 	if findChromePath() == "" {
 		t.Skip("no chrome binary resolvable; set RECONNER_CHROME")
 	}
+
+	childMux := http.NewServeMux()
+	childMux.HandleFunc("/reflect", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><title>child</title><body>%s</body></html>", r.URL.Query().Get("q"))
+	})
+	child := httptest.NewServer(childMux)
+	defer child.Close()
 
 	mux := http.NewServeMux()
 	// VULNERABLE: raw reflection into HTML text.
@@ -58,6 +67,14 @@ func TestBrowserXSSConfirmLive(t *testing.T) {
 			app.innerHTML = p; app.textContent = '';
 		</script></body></html>`)
 	})
+	// CROSS-ORIGIN FRAME: the vulnerable reflection executes on another origin.
+	// Reading top.document is forbidden here, so this fixture prevents regression
+	// of the nonce-scoped postMessage proof channel.
+	mux.HandleFunc("/cross-frame", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		src := child.URL + "/reflect?q=" + url.QueryEscape(r.URL.Query().Get("q"))
+		fmt.Fprintf(w, `<html><title>parent</title><body><iframe src=%q></iframe></body></html>`, src)
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -82,6 +99,12 @@ func TestBrowserXSSConfirmLive(t *testing.T) {
 		t.Errorf("SPA endpoint: expected browser to confirm client-rendered XSS, got none")
 	} else {
 		t.Logf("SPA confirmed with payload: %s", pl)
+	}
+
+	if pl, ok := b.Confirm(ctx, srv.URL+"/cross-frame?q=hi", "q"); !ok {
+		t.Errorf("CROSS-FRAME endpoint: expected nonce postMessage proof, got none")
+	} else {
+		t.Logf("Cross-origin frame confirmed with payload: %s", pl)
 	}
 
 	transient := insertionPoint{URL: srv.URL + "/transient?q=hi", Param: "q", Method: "GET", Location: "query"}

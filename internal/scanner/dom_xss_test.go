@@ -132,6 +132,9 @@ func TestAnalyzeDOMXSSPropertiesAndFunctionSummaries(t *testing.T) {
 	if hits := analyzeDOMXSS(`box.setHTMLUnsafe(location.hash);`, true); len(hits) == 0 {
 		t.Fatal("setHTMLUnsafe must remain a DOM injection sink")
 	}
+	if hits := analyzeDOMXSS(`Document.parseHTMLUnsafe(location.hash);`, true); len(hits) == 0 {
+		t.Fatal("parseHTMLUnsafe must remain a DOM injection sink")
+	}
 }
 
 func TestAnalyzeDOMXSSPostMessageVariants(t *testing.T) {

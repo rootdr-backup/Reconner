@@ -22,6 +22,41 @@ type runtimeDOMHit struct {
 
 const runtimeDOMResultKey = "__reconnerXSSRuntime"
 
+const xssProofResultKey = "__reconnerXSSProof"
+
+// xssProofObserverScript creates a nonce-scoped execution channel before any
+// application JavaScript runs. document.title remains the normal top-level
+// proof, while postMessage lets a payload executing in a cross-origin iframe
+// prove execution without trying to read top.document (which browsers block).
+func xssProofObserverScript(nonce string) string {
+	nonceJSON, _ := json.Marshal(nonce)
+	return `(()=>{try{const nonce=` + string(nonceJSON) + `;Object.defineProperty(window,'` + xssProofResultKey + `',{value:'',writable:true,configurable:true});addEventListener('message',e=>{try{const d=e.data;if(d&&d.__reconnerXSSProof===nonce)window.` + xssProofResultKey + `=nonce}catch(_){}})}catch(_){}})();`
+}
+
+// installXSSProofObserver registers the observer for the upcoming navigation and
+// every child frame, then removes it after the single proof attempt.
+func installXSSProofObserver(ctx, tab context.Context, nonce string) (remove func()) {
+	if strings.TrimSpace(nonce) == "" {
+		return func() {}
+	}
+	var id cdppage.ScriptIdentifier
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+		var addErr error
+		id, addErr = cdppage.AddScriptToEvaluateOnNewDocument(xssProofObserverScript(nonce)).Do(actionCtx)
+		return addErr
+	}))
+	if err != nil || id == "" {
+		return func() {}
+	}
+	return func() {
+		cleanupCtx, cancel := context.WithTimeout(tab, 2*time.Second)
+		defer cancel()
+		_ = chromedp.Run(cleanupCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+			return cdppage.RemoveScriptToEvaluateOnNewDocument(id).Do(actionCtx)
+		}))
+	}
+}
+
 // runtimeDOMInstrumentationScript hooks native DOM/code sinks before application
 // JavaScript starts. The wrappers never suppress or rewrite an operation; they
 // only record values containing this navigation's random canary. This catches
@@ -45,8 +80,11 @@ if(window.HTMLScriptElement)setter(HTMLScriptElement.prototype,'src','HTMLScript
 if(window.HTMLIFrameElement)setter(HTMLIFrameElement.prototype,'src','HTMLIFrameElement.src');
 method(Element.prototype,'insertAdjacentHTML','Element.insertAdjacentHTML',[1]);
 method(Element.prototype,'setAttribute','Element.setAttribute',[1]);
+method(Element.prototype,'setHTMLUnsafe','Element.setHTMLUnsafe',[0]);
+if(window.ShadowRoot)method(ShadowRoot.prototype,'setHTMLUnsafe','ShadowRoot.setHTMLUnsafe',[0]);
 method(Document.prototype,'write','Document.write',[0]);
 method(Document.prototype,'writeln','Document.writeln',[0]);
+if(window.Document)method(Document,'parseHTMLUnsafe','Document.parseHTMLUnsafe',[0]);
 if(window.Range)method(Range.prototype,'createContextualFragment','Range.createContextualFragment',[0]);
 if(window.DOMParser)method(DOMParser.prototype,'parseFromString','DOMParser.parseFromString',[0]);
 method(window,'setTimeout','window.setTimeout',[0]);

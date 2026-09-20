@@ -16,6 +16,9 @@ func TestXSSBrowserPayloadsAreNonExfiltratingProofs(t *testing.T) {
 		if !strings.Contains(payload, "alert('reconner')") {
 			t.Errorf("payload lacks the requested Reconner proof popup: %q", payload)
 		}
+		if !strings.Contains(payload, "postMessage") {
+			t.Errorf("payload lacks the cross-frame nonce proof channel: %q", payload)
+		}
 		for _, forbidden := range []string{
 			"confirm(", "prompt(", "document.cookie", "localstorage",
 			"sessionstorage", "fetch(", "xmlhttprequest", "sendbeacon(",

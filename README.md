@@ -296,6 +296,12 @@ new database/driver error; template and command payloads retain their independen
 computed-marker contracts. An imported string is extra coverage, never proof by
 itself.
 
+The v3.0.3 verifier also observes nonce proof messages from cross-origin frames,
+traces modern injection sinks such as `setHTMLUnsafe()` and
+`Document.parseHTMLUnsafe()`, and runs a real-Chromium 13-context coverage matrix
+in CI. Passing that named matrix is a concrete regression guarantee, not a
+universal detection percentage for every application or CSP policy.
+
 ### Target artifact bundles
 
 From a target page, open **Report → Download scan bundle — ZIP**. The archive

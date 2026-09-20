@@ -12,7 +12,10 @@ func TestRuntimeDOMInstrumentationCoversCoreSinks(t *testing.T) {
 		"Element.outerHTML",
 		"Element.insertAdjacentHTML",
 		"Element.setAttribute",
+		"Element.setHTMLUnsafe",
+		"ShadowRoot.setHTMLUnsafe",
 		"Document.write",
+		"Document.parseHTMLUnsafe",
 		"Range.createContextualFragment",
 		"DOMParser.parseFromString",
 		"HTMLIFrameElement.srcdoc",
@@ -38,5 +41,17 @@ func TestRuntimeDOMHitSummaryDeduplicates(t *testing.T) {
 	}
 	if got := runtimeDOMHitSummary(hits); got != "Element.innerHTML -> Document.write" {
 		t.Fatalf("unexpected runtime trace: %q", got)
+	}
+}
+
+func TestXSSProofObserverIsNonceScoped(t *testing.T) {
+	script := xssProofObserverScript(`RCNX"</script>`)
+	for _, want := range []string{xssProofResultKey, "addEventListener", "__reconnerXSSProof"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("proof observer missing %q: %s", want, script)
+		}
+	}
+	if strings.Contains(script, `const nonce=RCNX"</script>`) {
+		t.Fatal("nonce was embedded without JSON escaping")
 	}
 }
