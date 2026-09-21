@@ -78,6 +78,36 @@ func TestContextAwareBrowserPayloadSelection(t *testing.T) {
 	}
 }
 
+func TestMultiContextBrowserPayloadSelectionIsDeduplicated(t *testing.T) {
+	analyses := []ReflectionAnalysis{
+		{Context: CtxHTMLText},
+		{Context: CtxHTMLText},
+		{Context: CtxQuotedAttr, Quote: '\''},
+		{Context: CtxRAWTEXT, CloseTag: "</xmp>"},
+		{Context: CtxSrcDoc, Quote: '"'},
+	}
+	got := xssBrowserTemplatesForAnalyses(analyses)
+	seen := map[string]bool{}
+	for _, payload := range got {
+		if seen[payload] {
+			t.Fatalf("duplicate payload would waste a browser navigation: %q", payload)
+		}
+		seen[payload] = true
+	}
+	for _, needle := range []string{"</xmp>", "&lt;svg"} {
+		found := false
+		for payload := range seen {
+			if strings.Contains(payload, needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("multi-context ladder lost %q coverage", needle)
+		}
+	}
+}
+
 func TestHostRequestGateBoundsCrossModuleBurst(t *testing.T) {
 	host := "performance-gate.test"
 	hostThrottles.Delete(host)

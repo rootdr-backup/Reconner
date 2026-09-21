@@ -196,7 +196,7 @@ jobs:
           chrome_bin="$(find "$HOME/.cache/ms-playwright" -type f \( -name chrome -o -name chrome-headless-shell \) -perm -111 | head -n 1)"
           test -n "$chrome_bin"
           RECONNER_BROWSER_TEST=1 RECONNER_CHROME="$chrome_bin" go test ./internal/scanner \
-            -run '^(TestBrowserXSSConfirmLive|TestBrowserXSSContextCoverageLive|TestBrowserDOMSourceModesLive)$' \
+            -run '^(TestBrowserXSSConfirmLive|TestBrowserXSSContextCoverageLive|TestBrowserXSSNegativeCoverageLive|TestBrowserDOMSourceModesLive)$' \
             -count=1 -timeout=10m
       - run: npm run test:e2e -- --repeat-each=2
         working-directory: frontend

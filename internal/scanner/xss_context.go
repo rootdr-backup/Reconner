@@ -34,7 +34,9 @@ const (
 	CtxURL          = "url"
 	CtxCSS          = "css"
 	CtxComment      = "html_comment"
-	CtxRCDATA       = "rcdata" // inside <textarea>/<title>/<noscript>… raw-text
+	CtxRCDATA       = "rcdata"  // inside <textarea>/<title>
+	CtxRAWTEXT      = "rawtext" // inside <xmp>/<noembed>/<iframe>/<noframes>
+	CtxSrcDoc       = "srcdoc"  // nested HTML document inside iframe[srcdoc]
 )
 
 // xssProbe is a unique marker followed by the four key breakout characters.
@@ -50,6 +52,7 @@ type ReflectionAnalysis struct {
 	Context    string
 	Surviving  string // which of ' " < > survived UNENCODED
 	Decoded    string // encoded bytes the HTML tokenizer decodes inside attributes
+	Escaped    string // bytes escaped by URL/JS encoding, not HTML-tokenizer decoded
 	Executable bool
 	Encoded    bool
 	Quote      byte   // the attribute quote char (' or ") when in an attribute, else 0
@@ -58,12 +61,16 @@ type ReflectionAnalysis struct {
 	TagName    string // current HTML element name, when in an opening tag
 	URLScheme  bool   // reflection controls the beginning of a javascript:-capable URL value
 	CloseTag   string // for CtxRCDATA: the close tag needed to break out (e.g. </textarea>)
+	Offset     int    // byte offset of this reflection in the response body
 }
 
-// rcdataElements are raw-text/RCDATA elements whose content is NOT parsed as
-// markup: a reflection inside one is inert until its close tag breaks out. Search
-// terms echoed into <title> and <textarea> are a very common real XSS sink.
-var rcdataElements = []string{"textarea", "title", "noscript", "xmp", "noembed", "iframe"}
+// Keep tokenizer states separate. title/textarea are RCDATA while the second
+// group is RAWTEXT. Noscript uses RAWTEXT when scripting is enabled, which is the
+// state exercised by Chromium verification.
+var (
+	rcdataElements  = []string{"textarea", "title"}
+	rawTextElements = []string{"noscript", "xmp", "noembed", "iframe", "noframes"}
+)
 
 // AnalyzeReflection inspects a response body for the injected probe. Input is
 // frequently echoed in MORE THAN ONE place — e.g. HTML-encoded in the page title
@@ -80,14 +87,35 @@ func AnalyzeReflection(body string) ReflectionAnalysis {
 // marker per request prevents a literal marker already present in the page or a
 // cached response from being mistaken for reflection.
 func AnalyzeReflectionWithMarker(body, marker string) ReflectionAnalysis {
-	return analyzeReflectionProbe(body, marker, `'"<>`)
+	all := AnalyzeReflectionsWithMarker(body, marker)
+	if len(all) == 0 {
+		return ReflectionAnalysis{Context: CtxNone}
+	}
+	return all[0]
 }
 
 func analyzeReflectionProbe(body, marker, suffix string) ReflectionAnalysis {
-	best := ReflectionAnalysis{Context: CtxNone}
-	if marker == "" {
-		return best
+	all := analyzeReflectionProbes(body, marker, suffix)
+	if len(all) == 0 {
+		return ReflectionAnalysis{Context: CtxNone}
 	}
+	return all[0]
+}
+
+// AnalyzeReflectionsWithMarker returns every semantically distinct reflection of
+// one input, strongest first. One parameter is often copied into HTML, an
+// attribute and inline JavaScript at the same time; retaining only one location
+// made browser verification skip otherwise reachable sinks.
+func AnalyzeReflectionsWithMarker(body, marker string) []ReflectionAnalysis {
+	return analyzeReflectionProbes(body, marker, `'"<>`)
+}
+
+func analyzeReflectionProbes(body, marker, suffix string) []ReflectionAnalysis {
+	if marker == "" {
+		return nil
+	}
+	var all []ReflectionAnalysis
+	bySignature := make(map[string]int)
 	for off := 0; ; {
 		rel := strings.Index(body[off:], marker)
 		if rel < 0 {
@@ -96,14 +124,28 @@ func analyzeReflectionProbe(body, marker, suffix string) ReflectionAnalysis {
 		idx := off + rel
 		off = idx + len(marker)
 		a := analyzeReflectionAt(body, idx, marker, suffix)
-		if reflectionStronger(a, best) {
-			best = a
+		a.Offset = idx
+		sig := reflectionSignature(a)
+		if existing, ok := bySignature[sig]; ok {
+			if reflectionRank(a) > reflectionRank(all[existing]) {
+				all[existing] = a
+			}
+			continue
 		}
-		if best.Executable {
-			break // can't do better than a provably-executable reflection
+		bySignature[sig] = len(all)
+		all = append(all, a)
+	}
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && reflectionRank(all[j]) > reflectionRank(all[j-1]); j-- {
+			all[j], all[j-1] = all[j-1], all[j]
 		}
 	}
-	return best
+	return all
+}
+
+func reflectionSignature(a ReflectionAnalysis) string {
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%t|%s|%s|%s|%s", a.Context, a.TagName, a.AttrName,
+		a.Quote, a.JSQuote, a.URLScheme, a.CloseTag, a.Surviving, a.Decoded, a.Escaped)
 }
 
 // reflectionRank orders reflections by exploit value: executable > raw (breakout
@@ -132,7 +174,7 @@ func analyzeReflectionAt(body string, idx int, marker, suffix string) Reflection
 	// reflection for a raw attacker-controlled '<'. Ordered parsing attributes only
 	// bytes that correspond to the exact characters we sent.
 	after := body[idx+len(marker):]
-	a.Surviving, a.Decoded, a.Encoded = parseReflectedSuffix(after, suffix)
+	a.Surviving, a.Decoded, a.Escaped, a.Encoded = parseReflectedSuffix(after, suffix)
 
 	d := classifyContextDetails(body[:idx])
 	a.Context, a.Quote, a.CloseTag = d.kind, d.quote, d.closeTag
@@ -167,9 +209,11 @@ func analyzeReflectionAt(body string, idx int, marker, suffix string) Reflection
 		// OR the inner JS quote/expression is sufficient and must be browser-proven.
 		a.Executable = (a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote))) ||
 			(a.JSQuote != 0 && (strings.Contains(a.Surviving, string(a.JSQuote)) || strings.Contains(a.Decoded, string(a.JSQuote)))) ||
+			(a.JSQuote != 0 && strings.Contains(a.Escaped, string(a.JSQuote)) && strings.Contains(a.Surviving, `\`)) ||
 			(a.JSQuote == 0 && (strings.Contains(a.Surviving, ";") || strings.Contains(a.Surviving, "(")))
 	case CtxJSString:
 		a.Executable = (a.JSQuote != 0 && strings.Contains(a.Surviving, string(a.JSQuote))) ||
+			(a.JSQuote != 0 && strings.Contains(a.Escaped, string(a.JSQuote)) && strings.Contains(a.Surviving, `\`)) ||
 			(strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">"))
 	case CtxJSExpr:
 		a.Executable = true
@@ -177,7 +221,14 @@ func analyzeReflectionAt(body string, idx int, marker, suffix string) Reflection
 		// Inside <style>: closing it (</style>) needs < and > to survive, then a
 		// fresh element executes. A raw style value alone no longer executes.
 		a.Executable = strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">")
-	case CtxComment, CtxRCDATA:
+	case CtxSrcDoc:
+		// srcdoc is parsed twice: first as an outer attribute and then as an HTML
+		// document. Entity-decoded brackets can therefore create nested markup even
+		// while the outer attribute quote remains intact.
+		a.Executable = (a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote))) ||
+			((strings.Contains(a.Surviving, "<") || strings.Contains(a.Decoded, "<")) &&
+				(strings.Contains(a.Surviving, ">") || strings.Contains(a.Decoded, ">")))
+	case CtxComment, CtxRCDATA, CtxRAWTEXT:
 		// Break out of the comment (-->) or raw-text element (</textarea>) into HTML
 		// text; both require the angle brackets to survive UNENCODED to form the
 		// breakout sequence and a fresh element.
@@ -189,7 +240,7 @@ func analyzeReflectionAt(body string, idx int, marker, suffix string) Reflection
 	return a
 }
 
-func parseReflectedSuffix(after, expected string) (surviving, decoded string, encoded bool) {
+func parseReflectedSuffix(after, expected string) (surviving, decoded, escapedChars string, encoded bool) {
 	if len(after) > 512 {
 		after = after[:512]
 	}
@@ -201,44 +252,69 @@ func parseReflectedSuffix(after, expected string) (surviving, decoded string, en
 			pos++
 			continue
 		}
-		matched := ""
+		matched := reflectedEncoding{}
 		for _, enc := range encodedForms(ch) {
-			if strings.HasPrefix(strings.ToLower(after[pos:]), strings.ToLower(enc)) {
+			if strings.HasPrefix(strings.ToLower(after[pos:]), strings.ToLower(enc.value)) {
 				matched = enc
 				break
 			}
 		}
-		if matched != "" {
+		if matched.value != "" {
 			encoded = true
-			decoded += string(ch)
-			pos += len(matched)
+			if matched.htmlDecoded {
+				decoded += string(ch)
+			} else {
+				escapedChars += string(ch)
+			}
+			pos += len(matched.value)
 		}
 		// If the character was stripped, do not advance: the next expected
 		// character may be the byte currently at pos.
 	}
-	return surviving, decoded, encoded
+	return surviving, decoded, escapedChars, encoded
 }
 
-func encodedForms(ch byte) []string {
+type reflectedEncoding struct {
+	value       string
+	htmlDecoded bool
+}
+
+func htmlEntity(values ...string) []reflectedEncoding {
+	out := make([]reflectedEncoding, 0, len(values))
+	for _, value := range values {
+		out = append(out, reflectedEncoding{value: value, htmlDecoded: true})
+	}
+	return out
+}
+
+func escaped(values ...string) []reflectedEncoding {
+	out := make([]reflectedEncoding, 0, len(values))
+	for _, value := range values {
+		out = append(out, reflectedEncoding{value: value})
+	}
+	return out
+}
+
+func encodedForms(ch byte) []reflectedEncoding {
 	switch ch {
 	case '\'':
-		return []string{"&#39;", "&#039;", "&#x27;", "&apos;", "%27", `\'`, `\u0027`}
+		return append(htmlEntity("&#39;", "&#039;", "&#x27;", "&apos;"), escaped("%27", "%2527", `\'`, `\x27`, `\u0027`)...)
 	case '"':
-		return []string{"&quot;", "&#34;", "&#034;", "&#x22;", "%22", `\"`, `\u0022`}
+		return append(htmlEntity("&quot;", "&#34;", "&#034;", "&#x22;"), escaped("%22", "%2522", `\"`, `\x22`, `\u0022`)...)
 	case '<':
-		return []string{"&lt;", "&#60;", "&#060;", "&#x3c;", "%3c", `\x3c`, `\u003c`}
+		return append(htmlEntity("&lt;", "&#60;", "&#060;", "&#x3c;"), escaped("%3c", "%253c", `\x3c`, `\u003c`)...)
 	case '>':
-		return []string{"&gt;", "&#62;", "&#062;", "&#x3e;", "%3e", `\x3e`, `\u003e`}
+		return append(htmlEntity("&gt;", "&#62;", "&#062;", "&#x3e;"), escaped("%3e", "%253e", `\x3e`, `\u003e`)...)
 	case '`':
-		return []string{"&#96;", "&#x60;", "%60", `\u0060`}
+		return append(htmlEntity("&#96;", "&#x60;"), escaped("%60", "%2560", `\x60`, `\u0060`)...)
 	case '\\':
-		return []string{`\\`, `%5c`, `\u005c`}
+		return escaped(`\\`, `%5c`, `%255c`, `\x5c`, `\u005c`)
 	case ' ':
-		return []string{"%20", "+", "&#32;", "&#x20;"}
+		return append(htmlEntity("&#32;", "&#x20;"), escaped("%20", "%2520", "+")...)
 	case '\t':
-		return []string{"%09", "&#9;", "&#x9;"}
+		return append(htmlEntity("&#9;", "&#x9;"), escaped("%09", "%2509")...)
 	default:
-		return []string{"%" + fmt.Sprintf("%02x", ch)}
+		return escaped("%" + fmt.Sprintf("%02x", ch))
 	}
 }
 
@@ -273,7 +349,11 @@ func classifyContext(before string) (string, byte, string) {
 }
 
 func classifyContextDetails(before string) reflectionContextDetails {
-	low := strings.ToLower(before)
+	// HTML tag names are ASCII-case-insensitive. Unicode lowercasing may change
+	// byte length (and invalid UTF-8 may be replaced), so indices found in that
+	// transformed string cannot safely slice the original response. Preserve
+	// length exactly while folding only A-Z.
+	low := asciiLower(before)
 	// inside an HTML comment? <!-- … [here] with no --> after the last <!--.
 	if lc := strings.LastIndex(before, "<!--"); lc >= 0 && lc > strings.LastIndex(before, "-->") {
 		return reflectionContextDetails{kind: CtxComment}
@@ -301,10 +381,14 @@ func classifyContextDetails(before string) reflectionContextDetails {
 	if lastStyle > lastStyleEnd {
 		return reflectionContextDetails{kind: CtxCSS}
 	}
-	// inside a raw-text/RCDATA element (<textarea>/<title>/…)? Innermost wins.
-	if ctxName, closeTag, ok := rcdataContext(before, low); ok {
+	// RCDATA and RAWTEXT share close-tag breakouts but are distinct parser states.
+	if ctxName, closeTag, ok := textElementContext(before, low, rcdataElements); ok {
 		_ = ctxName
 		return reflectionContextDetails{kind: CtxRCDATA, closeTag: closeTag}
+	}
+	if ctxName, closeTag, ok := textElementContext(before, low, rawTextElements); ok {
+		_ = ctxName
+		return reflectionContextDetails{kind: CtxRAWTEXT, closeTag: closeTag}
 	}
 	// inside an open tag (attribute area)? find last '<' vs last '>'
 	lt := strings.LastIndex(before, "<")
@@ -313,6 +397,19 @@ func classifyContextDetails(before string) reflectionContextDetails {
 		return classifyOpenTag(before[lt:])
 	}
 	return reflectionContextDetails{kind: CtxHTMLText}
+}
+
+func asciiLower(value string) string {
+	var out strings.Builder
+	out.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 func classifyOpenTag(tag string) reflectionContextDetails {
@@ -413,6 +510,10 @@ func classifyOpenTag(tag string) reflectionContextDetails {
 		d.kind, d.jsQuote = CtxEventHandler, openJSQuote(value)
 		return d
 	}
+	if tagName == "iframe" && attrName == "srcdoc" {
+		d.kind = CtxSrcDoc
+		return d
+	}
 	if urlAttrs[attrName] {
 		d.kind = CtxURL
 		return d
@@ -429,10 +530,16 @@ func isHTMLSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c =
 
 func javascriptURLCapable(tagName, attrName string) bool {
 	switch attrName {
-	case "href", "xlink:href", "action", "formaction":
-		return true
+	case "href":
+		return tagName == "a" || tagName == "area"
+	case "xlink:href":
+		return tagName == "a"
+	case "action":
+		return tagName == "form"
+	case "formaction":
+		return tagName == "button" || tagName == "input"
 	case "src":
-		return tagName == "iframe" || tagName == "script"
+		return tagName == "iframe"
 	case "data":
 		return tagName == "object"
 	}
@@ -442,9 +549,9 @@ func javascriptURLCapable(tagName, attrName string) bool {
 // rcdataContext reports whether the marker sits inside the raw-text content of an
 // RCDATA/RAWTEXT element (not its open-tag attributes), and returns the close tag
 // that breaks out. It picks the INNERMOST such element still open before the marker.
-func rcdataContext(before, low string) (ctxName, closeTag string, ok bool) {
+func textElementContext(before, low string, elements []string) (ctxName, closeTag string, ok bool) {
 	bestOpen := -1
-	for _, el := range rcdataElements {
+	for _, el := range elements {
 		o := strings.LastIndex(low, "<"+el)
 		if o < 0 || o <= bestOpen {
 			continue
@@ -756,6 +863,10 @@ func contextPayload(ctxName string) string {
 	case CtxRCDATA:
 		// Close the raw-text element (title/textarea/…), then a fresh element.
 		return `</textarea></title><svg onload=alert(document.domain)>`
+	case CtxRAWTEXT:
+		return `</xmp></noembed></iframe></noframes><svg onload=alert(document.domain)>`
+	case CtxSrcDoc:
+		return `&lt;svg onload=alert(document.domain)&gt;`
 	default:
 		return `<svg onload=alert(document.domain)>`
 	}

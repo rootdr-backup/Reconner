@@ -112,6 +112,8 @@ func TestAnalyzeDOMXSSPropertiesAndFunctionSummaries(t *testing.T) {
 		`function readHash(){return location.hash}const value=readHash();box.innerHTML=value;`,
 		`const readSearch=()=>location.search;box.innerHTML=readSearch();`,
 		`const encoded=encodeURIComponent(location.hash);const decoded=decodeURIComponent(encoded);box.innerHTML=decoded;`,
+		`document.execCommand("insertHTML",false,location.hash);`,
+		`host.shadowRoot.setHTMLUnsafe(location.search);`,
 	}
 	for _, js := range positives {
 		if hits := analyzeDOMXSS(js, true); len(hits) == 0 {

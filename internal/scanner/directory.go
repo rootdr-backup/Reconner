@@ -714,8 +714,9 @@ serviceLoop:
 		// with the same page for ANY path. Establish what a bogus path looks
 		// like so we can discard those instead of reporting hundreds of fakes.
 		bl := soft404Baseline(ctx, base)
+		var priorityWG sync.WaitGroup
 
-		for _, pattern := range patterns {
+		for patternIndex, pattern := range patterns {
 			if ctx.Err() != nil {
 				break
 			}
@@ -724,9 +725,16 @@ serviceLoop:
 			case <-ctx.Done():
 				break serviceLoop
 			}
+			isPriority := patternIndex < cap(sem)
 			wg.Add(1)
-			go func(b, p string, base soft404) {
+			if isPriority {
+				priorityWG.Add(1)
+			}
+			go func(b, p string, base soft404, priority bool) {
 				defer wg.Done()
+				if priority {
+					defer priorityWG.Done()
+				}
 				defer func() { <-sem }()
 				targetURL := b + p
 				req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
@@ -791,7 +799,14 @@ serviceLoop:
 						storeExposedBackup(db, targetID, targetURL, magic, size)
 					}
 				}
-			}(base, pattern, bl)
+			}(base, pattern, bl, isPriority)
+
+			// Do not let the large generic corpus race ahead of the first
+			// high-signal batch. The batch itself remains fully parallel; this
+			// barrier only makes its time-to-signal priority deterministic.
+			if patternIndex == cap(sem)-1 {
+				priorityWG.Wait()
+			}
 		}
 	}
 
