@@ -349,7 +349,11 @@ func classifyContext(before string) (string, byte, string) {
 }
 
 func classifyContextDetails(before string) reflectionContextDetails {
-	low := strings.ToLower(before)
+	// HTML tag names are ASCII-case-insensitive. Unicode lowercasing may change
+	// byte length (and invalid UTF-8 may be replaced), so indices found in that
+	// transformed string cannot safely slice the original response. Preserve
+	// length exactly while folding only A-Z.
+	low := asciiLower(before)
 	// inside an HTML comment? <!-- … [here] with no --> after the last <!--.
 	if lc := strings.LastIndex(before, "<!--"); lc >= 0 && lc > strings.LastIndex(before, "-->") {
 		return reflectionContextDetails{kind: CtxComment}
@@ -393,6 +397,19 @@ func classifyContextDetails(before string) reflectionContextDetails {
 		return classifyOpenTag(before[lt:])
 	}
 	return reflectionContextDetails{kind: CtxHTMLText}
+}
+
+func asciiLower(value string) string {
+	var out strings.Builder
+	out.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 func classifyOpenTag(tag string) reflectionContextDetails {

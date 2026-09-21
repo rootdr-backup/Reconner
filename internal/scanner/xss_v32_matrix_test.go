@@ -85,6 +85,7 @@ func FuzzAnalyzeReflectionV32(f *testing.F) {
 		`<!--` + xssProbe + `-->`,
 		`<iframe srcdoc="` + xssProbe + `"></iframe>`,
 		strings.Repeat(`<template data-x="`, 8) + xssProbe,
+		string([]byte{0xa9, 0xa9, 0xa9, 0xa9}) + `<sCript` + xssMarker,
 	} {
 		f.Add(seed)
 	}
