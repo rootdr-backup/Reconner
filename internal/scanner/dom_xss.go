@@ -81,6 +81,7 @@ var htmlInjectionSinks = []htmlInjectionSink{
 	{"outerHTML", regexp.MustCompile(`\.outerHTML\s*=\s*([^;\n]{1,160})`)},
 	{"insertAdjacentHTML", regexp.MustCompile(`\.insertAdjacentHTML\s*\([^,]{0,30},\s*([^;\n)]{1,160})`)},
 	{"document.write", regexp.MustCompile(`document\.write(?:ln)?\s*\(([^;\n]{1,160})`)},
+	{"document.execCommand(insertHTML)", regexp.MustCompile(`document\.execCommand\s*\(\s*['"]insertHTML['"]\s*,\s*(?:false|null)\s*,\s*([^;\n)]{1,220})`)},
 	{"jQuery.html", regexp.MustCompile(`\.html\s*\(\s*([^;\n)]{1,160})`)},
 	{"jQuery.append", regexp.MustCompile(`\.(?:append|prepend|before|after|replaceWith)\s*\(\s*([^;\n)]{1,220})`)},
 	{"createContextualFragment", regexp.MustCompile(`createContextualFragment\s*\(([^;\n)]{1,160})`)},
@@ -90,9 +91,9 @@ var htmlInjectionSinks = []htmlInjectionSink{
 	{"React.dangerouslySetInnerHTML", regexp.MustCompile(`dangerouslySetInnerHTML\s*[:=]\s*\{\s*(?:\{\s*)?__html\s*:\s*([^}\n]{1,160})`)},
 	{"Angular.$sce.trustAsHtml", regexp.MustCompile(`trustAsHtml\s*\(([^;\n)]{1,160})`)},
 	{"Element.srcdoc", regexp.MustCompile(`\.srcdoc\s*=\s*([^;\n]{1,160})`)},
+	{"Element.setHTMLUnsafe", regexp.MustCompile(`\.setHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
 	// setHTML() intentionally sanitizes. setHTMLUnsafe() is the actual injection
 	// primitive and must not be confused with the safe API.
-	{"Element.setHTMLUnsafe", regexp.MustCompile(`\.setHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
 	{"Document.parseHTMLUnsafe", regexp.MustCompile(`(?:Document\.)?parseHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
 	{"setAttribute(srcdoc/event)", regexp.MustCompile(`\.setAttribute\s*\(\s*['"](?:srcdoc|on[a-z]+)['"]\s*,\s*([^;\n)]{1,220})`)},
 	{"script.src", regexp.MustCompile(`(?:script|scriptEl|scriptTag|newScript)\.src\s*=\s*([^;\n]{1,220})`)},

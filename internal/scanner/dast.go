@@ -204,7 +204,11 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 	// 2) reflection probe + context classification (reused XSS context engine).
 	probeMarker := newXSSToken("rcnctx")
 	probe := sendInjectedResponse(ctx, dastClient, ip, xssProbeFor(probeMarker), auth)
-	a := analyzeReflectionProbe(probe.Body, probeMarker, xssProbeSuffix)
+	analyses := analyzeReflectionProbes(probe.Body, probeMarker, xssProbeSuffix)
+	a := ReflectionAnalysis{Context: CtxNone}
+	if len(analyses) > 0 {
+		a = analyses[0]
+	}
 	// A reflected payload only executes when the browser renders the response as
 	// HTML. Input echoed into application/json (or any declared non-HTML type) is
 	// inert even when '"<> survive raw — the classic reflected-XSS false positive
@@ -265,7 +269,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					return
 				}
 				proofAttempted = true
-				proofPayload, proofMethod, proofConfidence, proofExecuted = s.proveExecutingXSS(ctx, ip, a, auth, baseline, browserBudget)
+				proofPayload, proofMethod, proofConfidence, proofExecuted = s.proveExecutingXSS(ctx, ip, a, analyses, auth, baseline, browserBudget)
 			}
 			// A URL attribute controlled from its first byte does not need a quote
 			// breakout: javascript: is itself the execution primitive. The benign
@@ -358,7 +362,12 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 				// browser payload ladder (up to ~20 serialized navigations) at every
 				// raw-negative HTML parameter, even after reflection scanning had
 				// already shown it was inert.
-				if b.DOMReflectsInsertion(ctx, ip, auth) {
+				// Visible DOM reflection alone is not a reason to spray payloads:
+				// textContent/innerText are deliberately safe and used heavily by SPAs.
+				// Escalate only when the canary actually reached an instrumented HTML,
+				// code or scriptable-URL sink. Reflection inventory still records plain
+				// rendered text through the param_reflection module.
+				if b.DOMReflectsInsertion(ctx, ip, auth) && b.RuntimeTrace(ip, auth) != "" {
 					if pl, ok := b.ConfirmInsertion(ctx, ip, auth); ok {
 						s.confirmXSS(ctx, targetID, ip, "dom", pl, "browser", 99, b.RuntimeTrace(ip, auth))
 						out.xssConfirmed++
@@ -418,9 +427,13 @@ func dastConfirm(a ReflectionAnalysis) (payload, needle string, confirmable bool
 	case CtxComment:
 		// Close the HTML comment, then inject a new element into HTML text.
 		return `-->` + el, el, true
-	case CtxRCDATA:
+	case CtxRCDATA, CtxRAWTEXT:
 		// Close the raw-text element (</textarea> etc.), then a fresh element.
 		return a.CloseTag + el, el, true
+	case CtxSrcDoc:
+		// The live element exists in the nested srcdoc Document, not in the outer
+		// response tree parsed by htmlTagInjected. Only Chromium can prove it.
+		return "", "", false
 	default:
 		return "", "", false
 	}
@@ -599,7 +612,7 @@ func exploitExample(ctxName, injected string) string {
 // branch, CSP edge case or parser difference can all make executable-looking
 // markup non-executing. This distinction is what keeps reflected HTML injection
 // out of the confirmed-XSS bucket.
-func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, auth map[string]string, baseline string, browserBudget *xssBrowserBudget) (payload, proof string, confidence int, executed bool) {
+func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, analyses []ReflectionAnalysis, auth map[string]string, baseline string, browserBudget *xssBrowserBudget) (payload, proof string, confidence int, executed bool) {
 	// Real-browser execution is the only promotion path, so run it first. The old
 	// order sprayed the complete raw-response ladder (often 30+ requests) and then
 	// performed the browser proof that actually decided the verdict.
@@ -609,7 +622,7 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 			if s.cfg != nil {
 				custom = CustomCorpus(s.cfg.WordlistsDir, "xss")
 			}
-			if pl, ok := b.ConfirmInsertionWithAnalysisAndTemplates(ctx, ip, auth, &a, custom); ok {
+			if pl, ok := b.ConfirmInsertionWithAnalysesAndTemplates(ctx, ip, auth, analyses, custom); ok {
 				return pl, "browser", 99, true
 			}
 		}

