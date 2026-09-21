@@ -25,7 +25,7 @@ func TestBrowserXSSConfirmLive(t *testing.T) {
 		t.Skip("browser E2E disabled; set RECONNER_BROWSER_TEST=1 (and RECONNER_CHROME) to run")
 	}
 	if findChromePath() == "" {
-		t.Skip("no chrome binary resolvable; set RECONNER_CHROME")
+		t.Fatal("browser E2E was explicitly required but no Chrome/Chromium binary is available")
 	}
 
 	childMux := http.NewServeMux()

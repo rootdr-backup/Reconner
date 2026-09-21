@@ -99,8 +99,15 @@ func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 	var wrote time.Time
 	var ttfb time.Duration
 	trace := &httptrace.ClientTrace{
-		WroteRequest:         func(httptrace.WroteRequestInfo) { wrote = time.Now() },
-		GotFirstResponseByte: func() { ttfb = time.Since(wrote) },
+		WroteRequest: func(httptrace.WroteRequestInfo) { wrote = time.Now() },
+		GotFirstResponseByte: func() {
+			// Some transports can deliver the first-byte hook without a preceding
+			// successful WroteRequest hook. time.Since(time.Time{}) is centuries,
+			// which used to look exactly like a huge SQL delay.
+			if !wrote.IsZero() {
+				ttfb = time.Since(wrote)
+			}
+		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := sqliTimingClient.Do(req)
@@ -117,10 +124,24 @@ func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 	return ttfb, true
 }
 
-// sampleTTFB takes n TTFB samples and returns their median, min and max.
+// sampleTTFB takes n TTFB samples and returns their median, min and max. A
+// verdict needs a two-thirds quorum: one successful request out of a requested
+// multi-sample distribution is not statistical evidence and previously let a
+// flaky transport decide the median by itself.
 func sampleTTFB(ctx context.Context, ip insertionPoint, value string, auth map[string]string, n int, deadline time.Duration) (median, min, max time.Duration, ok bool) {
-	var ds []time.Duration
-	for i := 0; i < n; i++ {
+	return sampleTTFBSeeded(ctx, ip, value, auth, n, deadline, nil)
+}
+
+// sampleTTFBSeeded includes already-measured samples in a distribution and only
+// performs the missing requests. The cheap sleep(5) screen is a real TTFB sample;
+// reusing it saves one five-second request while i5min still requires every new
+// confirmation sample to be non-overlapping with baseline.
+func sampleTTFBSeeded(ctx context.Context, ip insertionPoint, value string, auth map[string]string, n int, deadline time.Duration, seed []time.Duration) (median, min, max time.Duration, ok bool) {
+	ds := append([]time.Duration(nil), seed...)
+	if len(ds) > n {
+		ds = ds[:n]
+	}
+	for i := len(ds); i < n; i++ {
 		if ctx.Err() != nil {
 			break
 		}
@@ -129,11 +150,20 @@ func sampleTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 			ds = append(ds, d)
 		}
 	}
-	if len(ds) == 0 {
+	return summarizeTTFBSamples(ds, n)
+}
+
+func summarizeTTFBSamples(ds []time.Duration, requested int) (median, min, max time.Duration, ok bool) {
+	required := (2*requested + 2) / 3 // ceil(2n/3)
+	if required < 1 {
+		required = 1
+	}
+	if len(ds) < required {
 		return 0, 0, 0, false
 	}
-	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
-	return ds[len(ds)/2], ds[0], ds[len(ds)-1], true
+	ordered := append([]time.Duration(nil), ds...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	return ordered[len(ordered)/2], ordered[0], ordered[len(ordered)-1], true
 }
 
 // timeBasedSQLi returns (dbms, evidence, true) only when the induced delay scales
@@ -166,7 +196,7 @@ func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth
 			continue
 		}
 		// Confirm: sleep(5) must add a clear, non-overlapping median delay.
-		i5, i5min, _, ok := sampleTTFB(ctx, ip, p.build(val, 5), auth, 3, dl)
+		i5, i5min, _, ok := sampleTTFBSeeded(ctx, ip, p.build(val, 5), auth, 3, dl, []time.Duration{fast5})
 		if !ok || i5-base < 3500*time.Millisecond || i5min < baseMax+2*time.Second {
 			continue
 		}
