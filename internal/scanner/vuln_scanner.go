@@ -764,14 +764,14 @@ func checkCORS(ctx context.Context, rawURL string) (vulnType, evidence, severity
 	return "", "", ""
 }
 
-// ── 403 Bypass ──────────────────────────────────────────────────────────────
+// ── 401/403 Access-Control Bypass ───────────────────────────────────────────
 
 func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn LogFunc) error {
-	logFn("info", "403_bypass", "Checking 403 bypass techniques...")
+	logFn("info", "403_bypass", "Checking 401/403 access-control bypass techniques...")
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url FROM http_services
-		WHERE target_id = ? AND status_code = 403
+		WHERE target_id = ? AND status_code IN (401, 403)
 		LIMIT ?
 	`, targetID, s.cfg.URLLimit())
 	if err != nil {
@@ -788,11 +788,11 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 	urls = dedupeWebBehaviorURLs(filterURLsByHostScope(ctx, urls))
 
 	if len(urls) == 0 {
-		logFn("info", "403_bypass", "No 403 endpoints found to test")
+		logFn("info", "403_bypass", "No 401/403 endpoints found to test")
 		return nil
 	}
 
-	logFn("info", "403_bypass", fmt.Sprintf("Testing %d forbidden endpoints...", len(urls)))
+	logFn("info", "403_bypass", fmt.Sprintf("Testing %d protected endpoints...", len(urls)))
 
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -809,9 +809,13 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 			defer func() { <-sem }()
 
 			if bypass, evidence, confidence, location := check403Bypass(ctx, u); bypass != "" {
-				s.storeVulnSurface(targetID, "403_bypass", "medium", u, "GET", "", location, bypass, evidence, "stable-access-replay", confidence)
+				severity := "medium"
+				if location == "authorization_header" {
+					severity = "high"
+				}
+				s.storeVulnSurface(targetID, "403_bypass", severity, u, "GET", "", location, bypass, evidence, "stable-access-replay", confidence)
 				found.Add(1)
-				logFn("warn", "403_bypass", fmt.Sprintf("403 bypass found: %s via %s", u, bypass))
+				logFn("warn", "403_bypass", fmt.Sprintf("401/403 bypass found: %s via %s", u, bypass))
 				if s.broadcast != nil && confidence >= ConfEvidence {
 					s.broadcast("new_vuln_finding", map[string]any{
 						"target_id": targetID,
@@ -823,7 +827,7 @@ func (s *VulnScanner) Run403Bypass(ctx context.Context, targetID string, logFn L
 		}(svcURL)
 	}
 	wg.Wait()
-	logFn("info", "403_bypass", fmt.Sprintf("403 bypass check done. Found %d bypasses.", found.Load()))
+	logFn("info", "403_bypass", fmt.Sprintf("401/403 bypass check done. Found %d bypasses.", found.Load()))
 	return nil
 }
 
@@ -838,14 +842,15 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 	// request per technique instead of two of every request. Positive results still
 	// require the exact same two-control/two-proof replay as before.
 	bStatus1, baseline1 := fetch403Response(ctx, rawURL, nil)
-	if bStatus1 != http.StatusForbidden {
+	if !isAccessDeniedStatus(bStatus1) {
 		return "", "", 0, ""
 	}
 
 	type attempt struct {
-		label   string
-		headers map[string]string
-		path    string
+		label      string
+		headers    map[string]string
+		path       string
+		authHeader bool
 	}
 	originalURI := parsed.EscapedPath()
 	if originalURI == "" {
@@ -856,6 +861,17 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 	}
 
 	attempts := []attempt{
+		// Credential-presence confusion. RFC 7617 requires Basic credentials to
+		// be a Base64 user-id/password pair, while RFC 6750 requires a non-empty
+		// Bearer token. These deliberately incomplete or empty values must never
+		// be treated as proof of identity. They are replayed exactly like every
+		// other bypass and are never generated from a credential wordlist.
+		{label: "Authorization: Basic (missing credentials)", headers: map[string]string{"Authorization": "Basic"}, authHeader: true},
+		{label: "Authorization: Basic !!! (invalid token68)", headers: map[string]string{"Authorization": "Basic !!!"}, authHeader: true},
+		{label: "Authorization: Basic Og== (empty user/password)", headers: map[string]string{"Authorization": "Basic Og=="}, authHeader: true},
+		{label: "Authorization: Bearer (missing token)", headers: map[string]string{"Authorization": "Bearer"}, authHeader: true},
+		{label: "Authorization: Bearer null", headers: map[string]string{"Authorization": "Bearer null"}, authHeader: true},
+		{label: "Authorization: Bearer undefined", headers: map[string]string{"Authorization": "Bearer undefined"}, authHeader: true},
 		{label: "X-Forwarded-For: 127.0.0.1", headers: map[string]string{"X-Forwarded-For": "127.0.0.1"}},
 		{label: "X-Forwarded-For: 127.0.0.1, proxy", headers: map[string]string{"X-Forwarded-For": "127.0.0.1, 198.51.100.23"}},
 		{label: "X-Real-IP: 127.0.0.1", headers: map[string]string{"X-Real-IP": "127.0.0.1"}},
@@ -916,7 +932,7 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		bStatus2, baseline2 := fetch403Response(ctx, rawURL, nil)
 		status2, body2 := fetch403Response(ctx, targetURL, att.headers)
 		// Only two stable 200 responses count. 301/302 usually redirect to login.
-		if bStatus2 != http.StatusForbidden || !bodiesSameObject(baseline1, baseline2) ||
+		if bStatus2 != bStatus1 || !bodiesSameObject(baseline1, baseline2) ||
 			status2 != http.StatusOK || !bodiesSameObject(body1, body2) {
 			continue
 		}
@@ -931,16 +947,23 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		}
 		conf := ConfMultiTool
 		loc := "header"
-		if att.path != "" {
+		if att.authHeader {
+			conf = ConfPoC
+			loc = "authorization_header"
+		} else if att.path != "" {
 			// A normalized path can map to a separate public route. Preserve it as a
 			// strong candidate unless a later identity-aware verifier proves it is
 			// the same protected object.
 			conf = ConfCandidateHi
 			loc = "path"
 		}
-		return att.label, fmt.Sprintf("stable controls: 403/403 (%d/%d bytes); stable bypass replay: 200/200 (%d/%d bytes) via %s; protected and bypass bodies are materially different", len(baseline1), len(baseline2), len(body1), len(body2), att.label), conf, loc
+		return att.label, fmt.Sprintf("stable controls: %d/%d (%d/%d bytes); stable bypass replay: 200/200 (%d/%d bytes) via %s; protected and bypass bodies are materially different", bStatus1, bStatus2, len(baseline1), len(baseline2), len(body1), len(body2), att.label), conf, loc
 	}
 	return "", "", 0, ""
+}
+
+func isAccessDeniedStatus(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func looksLike403AuthWall(body string) bool {

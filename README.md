@@ -319,6 +319,14 @@ three consecutive runs, including a latency/concurrency gate. See the bounded
 methodology and measurements in
 [v3.3 Web behavior quality evidence](docs/V3_3_WEB_BEHAVIOR_QUALITY_EVIDENCE.md).
 
+v3.3.1 extends the access-control family to both **401 and 403** surfaces and
+detects credential-presence confusion such as a bare `Authorization: Basic`
+header, malformed/empty Basic credentials, and missing/placeholder Bearer
+tokens. Promotion requires two stable denied controls and two identical
+successful replays with materially different protected content. The detector
+does not guess usernames, passwords, or tokens. See the local-only matrix in
+[v3.3.1 authentication-header bypass evidence](docs/V3_3_1_AUTH_HEADER_BYPASS_EVIDENCE.md).
+
 Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
 bounded Range validation, and retains the complete generic corpus behind those
 high-signal candidates. SQLi timing requires a successful sample quorum and
