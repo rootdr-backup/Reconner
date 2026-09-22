@@ -107,6 +107,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 		{"otx", queryOTX},
 		{"anubis", queryAnubis},
 		{"urlscan", queryURLScan},
+		{"scanmalware", queryScanMalware},
 	}
 	var srcWg sync.WaitGroup
 	for _, src := range sources {

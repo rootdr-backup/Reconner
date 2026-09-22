@@ -284,6 +284,67 @@ func queryURLScan(domain string) ([]string, error) {
 	return result, nil
 }
 
+// queryScanMalware pulls subdomains from ScanMalware's free, keyless host
+// inventory (https://scanmalware.com). ScanMalware executes each submitted URL
+// in a real browser and records every host that page contacted, so it surfaces
+// live dev/staging names that hold no certificate and are therefore structurally
+// invisible to CT-log sources like crt.sh and certspotter.
+//
+// The endpoint groups hosts by how each was seen. We request
+// sources=observed,scripts so every name returned was actually contacted by the
+// scanner's browser (a host it resolved and requested, or a script it loaded).
+// We deliberately exclude the other sets: `stream` is hosts that other API
+// callers looked up (not this domain's own scans), and `static`/`declared`/
+// `referenced` are names merely mentioned in page source, only about a third of
+// which are ever contacted. subdomains_only=true returns the flat list.
+func queryScanMalware(domain string) ([]string, error) {
+	url := fmt.Sprintf("https://scanmalware.com/api/v1/hosts/%s?subdomains_only=true&sources=observed,scripts", domain)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+	return parseScanMalwareSubdomains(body, domain)
+}
+
+// parseScanMalwareSubdomains is the pure part of queryScanMalware: it turns a
+// /hosts response body into a deduped, in-scope subdomain list. Split out so it
+// can be tested without a network call. A non-JSON body (an HTML rate-limit or
+// error page) is reported as errSourceUnavailable rather than a parse error.
+func parseScanMalwareSubdomains(body []byte, domain string) ([]string, error) {
+	if !looksJSON(body) {
+		return nil, errSourceUnavailable
+	}
+	var data struct {
+		Subdomains []string `json:"subdomains"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var result []string
+	for _, sub := range data.Subdomains {
+		host := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(sub)), "*.")
+		if !seen[host] && isValidSubdomain(host, domain) {
+			seen[host] = true
+			result = append(result, host)
+		}
+	}
+	return result, nil
+}
+
 // queryCertSpotter pulls subdomains from SSLMate's Cert Spotter CT-log API. It's
 // free (no key for basic use), reliable, and often surfaces names crt.sh misses.
 func queryCertSpotter(domain string) ([]string, error) {
