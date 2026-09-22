@@ -116,6 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           go test ./internal/scanner -run 'Test(BenchmarkLab|BenchmarkE2E|DetectionBenchmark|RealReconPipeline|RealReconPipelineCORS)$' -count=1 -json | tee detection-benchmarks.json
+          go test ./internal/scanner -run '^TestWebBehaviorV33_' -count=3
       - uses: actions/upload-artifact@v7
         if: always()
         with:

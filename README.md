@@ -306,6 +306,19 @@ and five negative controls covering encoding, CSP, JSON and safe `textContent`.
 Passing those named matrices is a concrete regression guarantee, not a universal
 detection percentage for every application or CSP policy.
 
+The v3.3 **Web behavior checks** run 403 bypass, host-header trust, CRLF,
+prototype-pollution and cache-deception families concurrently while retaining
+family-specific concurrency bounds and independent proof replay. Route/query
+deduplication removes crawl value variants before probing. Coverage includes
+forwarded-path/IP and normalized-path access-control variants, eight host
+override headers with response-header/HTML/structured-body URL sinks,
+single/double/triple decode CRLF chains, authenticated JSON prototype merges,
+and cache path-mapping, delimiter, extension and normalization discrepancies.
+CI requires all 13 positive local fixtures and four negative controls to pass
+three consecutive runs, including a latency/concurrency gate. See the bounded
+methodology and measurements in
+[v3.3 Web behavior quality evidence](docs/V3_3_WEB_BEHAVIOR_QUALITY_EVIDENCE.md).
+
 Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
 bounded Range validation, and retains the complete generic corpus behind those
 high-signal candidates. SQLi timing requires a successful sample quorum and
