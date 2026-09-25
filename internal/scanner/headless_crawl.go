@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -56,26 +57,39 @@ type formInputInfo struct {
 
 // pageSurface is what one rendered page yields.
 type pageSurface struct {
-	Links []string   `json:"links"`
-	Forms []formInfo `json:"forms"`
+	Links          []string   `json:"links"`
+	Forms          []formInfo `json:"forms"`
+	StateCount     int        `json:"stateCount"`
+	TransitionURLs []string   `json:"transitionURLs"`
+	States         []string   `json:"states"`
 }
 
 // extractJS runs in the page to collect rendered links + forms. It reads the LIVE
 // DOM (post-hydration), so SPA-injected anchors and dynamically-built forms are
 // captured — exactly what an HTTP crawl misses.
-const extractJS = `(() => {
-  const links = [...document.querySelectorAll('a[href]')].map(a => a.href).filter(Boolean);
-  const forms = [...document.forms].map(f => ({
-    action: f.action || location.href,
-    method: (f.method || 'get').toLowerCase(),
-    encoding: (f.enctype || '').toLowerCase(),
-    inputs: [...f.elements]
-      .filter(e => e.name && !e.matches(':disabled') &&
-        !['submit', 'button', 'reset', 'file'].includes(e.type) &&
-        (!['checkbox', 'radio'].includes(e.type) || e.checked))
-      .map(e => ({name: e.name, value: e.type === 'file' ? '' : (e.value || '')}))
-  }));
-  return JSON.stringify({links: [...new Set(links)].slice(0,500), forms: forms.slice(0,50)});
+const extractJS = `(async() => {
+  const links=new Set(), forms=new Map(), states=new Set(), transitionURLs=new Set();
+  const roots=()=>{const out=[document];for(let i=0;i<out.length;i++){
+    const r=out[i];for(const e of r.querySelectorAll?r.querySelectorAll('*'):[]){if(e.shadowRoot)out.push(e.shadowRoot)}
+    if(r===document){for(const f of document.querySelectorAll('iframe')){try{if(f.contentDocument)out.push(f.contentDocument)}catch(_){}}}
+  }return out};
+  const snapshot=()=>{const rs=roots(), shape=[];for(const r of rs){
+    for(const a of r.querySelectorAll?r.querySelectorAll('a[href],[role="link"][href]'):[]){try{if(a.href)links.add(a.href)}catch(_){}}
+    for(const f of r.querySelectorAll?r.querySelectorAll('form'):[]){
+      const item={action:f.action||location.href,method:(f.method||'get').toLowerCase(),encoding:(f.enctype||'').toLowerCase(),inputs:[...f.elements]
+        .filter(e=>e.name&&!e.matches(':disabled')&&!['submit','button','reset','file'].includes(e.type)&&(!['checkbox','radio'].includes(e.type)||e.checked))
+        .map(e=>({name:e.name,value:e.type==='file'?'':(e.value||'') }))};
+      forms.set(JSON.stringify(item),item)
+    }
+    shape.push(...[...(r.querySelectorAll?r.querySelectorAll('a[href],form,input[name],button,[role="tab"],details'):[])].slice(0,250).map(e=>e.tagName+':'+(e.getAttribute('role')||'')+':'+(e.getAttribute('name')||'')+':'+(e.getAttribute('aria-controls')||'')))
+  }
+  states.add(location.href+'|'+shape.sort().join(','));transitionURLs.add(location.href)};
+  snapshot();
+  // Interact only with navigation-like, non-submitting controls. Generic buttons
+  // are intentionally excluded because an arbitrary click may mutate server state.
+  const safe=[...document.querySelectorAll('a[href^="#"],[role="tab"][aria-controls],details:not([open])>summary')].slice(0,12);
+  for(const el of safe){try{el.click();await new Promise(r=>setTimeout(r,80));snapshot()}catch(_){}}
+  return JSON.stringify({links:[...links].slice(0,750),forms:[...forms.values()].slice(0,100),stateCount:states.size,transitionURLs:[...transitionURLs].slice(0,50),states:[...states].slice(0,20)});
 })()`
 
 // Run drives the bounded headless crawl for a target.
@@ -92,6 +106,8 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 	}
 
 	seeds := c.seedURLs(ctx, targetID)
+	RecordCoverage(ctx, CoverageDiscovered, int64(len(seeds)))
+	RecordCoverage(ctx, CoverageEligible, int64(len(seeds)))
 	if len(seeds) == 0 {
 		logFn("info", "headless_crawl", "No HTML hosts to render — skipping.")
 		return nil
@@ -156,11 +172,17 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 		cur := queue[0]
 		queue = queue[1:]
 		pages++
+		RecordCoverage(ctx, CoverageAttempted, 1)
 
 		surf, ok := c.renderPage(browserCtx, cur.url)
 		if !ok {
+			RecordCoverage(ctx, CoverageError, 1)
 			continue
 		}
+		if surf.StateCount > 1 {
+			RecordCoverage(ctx, CoverageDiscovered, int64(surf.StateCount-1))
+		}
+		c.storeStates(ctx, targetID, cur.url, surf.States)
 		if pages%10 == 0 {
 			logFn("info", "headless_crawl", fmt.Sprintf("Rendered %d/%d page(s)...", pages, headlessMaxPages))
 		}
@@ -184,6 +206,20 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 			if !seen[norm] && cur.depth < headlessMaxDepth && len(seen) < headlessMaxPages*4 {
 				seen[norm] = true
 				queue = append(queue, qi{norm, cur.depth + 1})
+				RecordCoverage(ctx, CoverageEligible, 1)
+			}
+		}
+		for _, transition := range surf.TransitionURLs {
+			tu, err := url.Parse(transition)
+			if err != nil || !c.inScope(tu.Hostname(), domain) || !urlHostInScope(ctx, tu.String()) || !urlInEndpointScope(ctx, tu.String()) {
+				continue
+			}
+			tu.Fragment = ""
+			norm := tu.String()
+			if !seen[norm] && cur.depth < headlessMaxDepth && len(seen) < headlessMaxPages*4 {
+				seen[norm] = true
+				queue = append(queue, qi{norm, cur.depth + 1})
+				RecordCoverage(ctx, CoverageEligible, 1)
 			}
 		}
 		// forms → each named input is an insertion point (with the form's method).
@@ -219,8 +255,26 @@ func (c *HeadlessCrawler) Run(ctx context.Context, targetID string, logFn LogFun
 	}
 
 	stored := c.storeParams(ctx, targetID, params)
+	RecordCoverage(ctx, CoverageDiscovered, int64(stored))
 	logFn("warn", "headless_crawl", fmt.Sprintf("Headless crawl done. Rendered %d page(s), harvested %d parameter insertion point(s) from the live DOM.", pages, stored))
 	return nil
+}
+
+func (c *HeadlessCrawler) storeStates(ctx context.Context, targetID, pageURL string, states []string) {
+	parent := ""
+	for sequence, state := range states {
+		if strings.TrimSpace(state) == "" {
+			continue
+		}
+		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(state)))
+		_, _ = c.db.ExecContext(ctx, `INSERT INTO browser_states
+			(id,target_id,url,fingerprint,parent_fingerprint,sequence,source)
+			VALUES(?,?,?,?,?,?,'headless')
+			ON CONFLICT(target_id,fingerprint) DO UPDATE SET
+				url=excluded.url,parent_fingerprint=excluded.parent_fingerprint,sequence=excluded.sequence`,
+			uuid.NewString(), targetID, pageURL, fingerprint, parent, sequence)
+		parent = fingerprint
+	}
 }
 
 // renderPage navigates to url, waits for hydration, and extracts links + forms.

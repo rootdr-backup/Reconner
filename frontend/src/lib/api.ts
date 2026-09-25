@@ -1,6 +1,6 @@
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding,
-  Parameter, DirectoryFinding, BackupFinding, OpenRedirectFinding,
+  Parameter, DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding,
   NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, TaskPhase, DashboardStats, AttackPath,
   NetworkService, IngramCamera, Asset,
   BountyProgram, BountySyncState, BountyScopeEvent,
@@ -231,6 +231,7 @@ export const findings = {
   parameters: (id: string, reflectedOnly = true) =>
     req<Parameter[]>(`/targets/${id}/parameters${reflectedOnly ? '?reflected=true' : ''}`),
   directoryFindings: (id: string) => req<DirectoryFinding[]>(`/targets/${id}/directory-findings`),
+  adminPanels: (id: string) => req<AdminPanelFinding[]>(`/targets/${id}/admin-panels`),
   backupFindings: (id: string) => req<BackupFinding[]>(`/targets/${id}/backup-findings`),
   openRedirects: (id: string) => req<OpenRedirectFinding[]>(`/targets/${id}/open-redirects`),
   nucleiFindings: (id: string) => req<NucleiFinding[]>(`/targets/${id}/nuclei-findings`),

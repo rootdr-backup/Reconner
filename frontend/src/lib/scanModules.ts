@@ -51,6 +51,7 @@ export const SCAN_MODULES: ScanModule[] = [
   { id: 'ssti', label: 'Server template injection', desc: 'Use safe arithmetic differentials to identify server template evaluation.', group: 'validation', tier: 'active', requires: params },
   { id: 'csti', label: 'Client template injection', desc: 'Use dual safe arithmetic proof after browser rendering.', group: 'validation', tier: 'active', requires: params },
   { id: 'xxe', label: 'XML entity handling', desc: 'Focused XML parser validation on compatible request contracts.', group: 'validation', tier: 'active', requires: params },
+  { id: 'file_upload', label: 'File upload validation', desc: 'Proof-gated executable, SVG/image-processing, archive and web-root configuration checks.', group: 'validation', tier: 'active', requires: params },
   { id: 'cmdi', label: 'Command injection signal', desc: 'Focused command-execution detection on compatible inputs.', group: 'validation', tier: 'advanced', requires: params },
   { id: 'cors', label: 'CORS policy', desc: 'Validate cross-origin policy behavior.', group: 'validation', tier: 'active', requires: core },
   { id: 'csrf', label: 'CSRF controls', desc: 'Review state-changing request protections.', group: 'validation', tier: 'active', requires: core },
@@ -75,7 +76,7 @@ export const MODULE_BY_ID = new Map(SCAN_MODULES.map(module => [module.id, modul
 export const DETECTOR_IDS = new Set(SCAN_MODULES.filter(module =>
   !['surface'].includes(module.group) && module.id !== 'verify'
 ).map(module => module.id).concat([
-  'open_redirect', 'xss', 'sqli', 'nosqli', 'ssrf', 'lfi', 'ssti', 'csti', 'xxe', 'cmdi',
+  'open_redirect', 'xss', 'sqli', 'nosqli', 'ssrf', 'lfi', 'ssti', 'csti', 'xxe', 'file_upload', 'cmdi',
   'cors', 'csrf', 'vuln_scan', 'blh', 'jwt', 'idor', 'authz', 'ato', 'oast', 'cache_poison',
   'race', 'smuggling', 'nuclei', 'takeover', 'origin_ip', 'shodan', 'passive', 'exposure', 'intel',
   'dir_discovery', 'backup_discovery',
@@ -103,10 +104,9 @@ export const SCAN_BUNDLES = [
   { id: 'surface', label: 'Complete surface map', desc: 'HTTP + JavaScript + parameters', modules: ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery'] },
   { id: 'exposure', label: 'Exposure review', desc: 'Passive, files and technology signals', modules: ['passive', 'exposure', 'intel', 'backup_discovery'] },
   { id: 'takeover', label: 'Subdomains + takeover', desc: 'Discovery followed by dangling-DNS checks', modules: ['subdomain_enum', 'takeover'] },
-  { id: 'injection', label: 'Injection validation', desc: 'Focused parameter-driven detectors', modules: ['open_redirect', 'xss', 'sqli', 'nosqli', 'ssrf', 'lfi', 'ssti', 'csti', 'xxe'] },
+  { id: 'injection', label: 'Injection validation', desc: 'Focused parameter-driven detectors', modules: ['open_redirect', 'xss', 'sqli', 'nosqli', 'ssrf', 'lfi', 'ssti', 'csti', 'xxe', 'file_upload'] },
   { id: 'access', label: 'Identity & access', desc: 'JWT, IDOR, authorization and chains', modules: ['jwt', 'idor', 'authz', 'ato'] },
 ]
 
 export const SAFE_PROFILE = ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'passive', 'exposure', 'intel']
 export const STANDARD_PROFILE = [...SAFE_PROFILE, 'param_reflection', 'backup_discovery', 'open_redirect', 'xss', 'sqli', 'cors', 'jwt']
-

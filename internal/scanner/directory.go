@@ -323,6 +323,7 @@ func (s *DirScanner) loadHTTPServices(ctx context.Context, targetID string) (ser
 
 func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "dir_discovery", "Starting directory discovery...")
+	s.classifyStoredServicePanels(targetID)
 
 	services, totalAlive := s.loadHTTPServices(ctx, targetID)
 	if len(services) == 0 {
@@ -559,7 +560,15 @@ func (s *DirScanner) probeAndStore(ctx context.Context, targetID, targetURL stri
 	}
 
 	redirect := resp.Header.Get("Location")
-	return s.storeDirFinding(targetID, targetURL, resp.StatusCode, trueSize(resp, len(body)), redirect)
+	if resp.Request != nil && resp.Request.URL != nil && resp.Request.URL.String() != targetURL {
+		redirect = resp.Request.URL.String()
+	}
+	stored := s.storeDirFinding(targetID, targetURL, resp.StatusCode, trueSize(resp, len(body)), redirect)
+	if stored {
+		s.storeAdminPanel(targetID, targetURL, resp.StatusCode, extractTitle(string(body)), body, redirect,
+			resp.Header.Get("Server")+" "+resp.Header.Get("X-Powered-By")+" "+redirect)
+	}
+	return stored
 }
 
 // realSize returns the TRUE resource size: the Content-Length header when the

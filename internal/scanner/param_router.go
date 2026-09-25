@@ -36,6 +36,7 @@ const (
 	ClassCRLF     VulnClass = "crlf"
 	ClassXSS      VulnClass = "xss"
 	ClassCSTI     VulnClass = "csti"
+	ClassUpload   VulnClass = "file_upload"
 )
 
 // classTokens: a parameter matches a class when ANY of its name tokens is in the
@@ -76,6 +77,9 @@ var classTokens = map[VulnClass]map[string]bool{
 		"callback", "lang", "view", "tab", "id", "page"),
 	ClassCSTI: set("q", "query", "search", "name", "message", "comment", "text", "content",
 		"title", "description", "input", "term", "template", "preview", "view", "label"),
+	ClassUpload: set("file", "files", "upload", "uploads", "attachment", "attachments", "avatar",
+		"image", "photo", "picture", "document", "media", "asset", "blob", "binary", "content",
+		"data", "base", "base64", "filename", "file_name", "mime", "mimetype", "contenttype"),
 }
 
 func set(items ...string) map[string]bool {

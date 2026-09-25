@@ -21,7 +21,14 @@ http:
         words:
           - "DB_PASSWORD"
           - "DB_NAME"
+          - "DB_USER"
+          - "define("
         condition: and
       - type: status
         status:
           - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

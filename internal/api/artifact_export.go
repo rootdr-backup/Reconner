@@ -200,7 +200,7 @@ func targetArtifactDatasets(targetID string) []artifactDataset {
 		"objects", "actions", "object_relationships", "workflow_variables", "authorization_observations",
 		"hypotheses", "state_snapshots", "capture_sessions", "request_templates",
 		"candidates", "candidate_transitions", "subdomains", "http_services", "js_files", "js_findings",
-		"parameters", "directory_findings", "backup_findings", "open_redirect_findings", "nuclei_findings",
+		"parameters", "directory_findings", "admin_panel_findings", "backup_findings", "open_redirect_findings", "nuclei_findings",
 		"monitoring_changes", "vuln_findings", "blind_xss_probes", "oob_probes", "open_ports",
 	}
 	datasets := make([]artifactDataset, 0, len(byTarget)+5)
@@ -225,6 +225,7 @@ func targetArtifactDatasets(targetID string) []artifactDataset {
 		artifactDataset{Name: "tasks", Query: `SELECT * FROM tasks WHERE target_id=? ORDER BY created_at`, Args: []any{targetID}},
 		artifactDataset{Name: "task_logs", Query: `SELECT l.* FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.target_id=? ORDER BY l.id`, Args: []any{targetID}},
 		artifactDataset{Name: "task_phases", Query: `SELECT p.* FROM task_phases p JOIN tasks t ON t.id=p.task_id WHERE t.target_id=? ORDER BY p.task_id,p.phase_index`, Args: []any{targetID}},
+		artifactDataset{Name: "browser_states", Query: `SELECT * FROM browser_states WHERE target_id=? ORDER BY url,sequence`, Args: []any{targetID}},
 		artifactDataset{Name: "notifications", Query: `SELECT * FROM notifications WHERE target_id=? ORDER BY created_at`, Args: []any{targetID}},
 	)
 	return datasets

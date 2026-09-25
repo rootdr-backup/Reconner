@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/gorilla/mux"
@@ -333,6 +334,58 @@ func (h *Handler) handleListDirectoryFindings(w http.ResponseWriter, r *http.Req
 			findings = append(findings, f)
 		}
 	}
+	h.writeSuccess(w, findings)
+}
+
+// handleListAdminPanels returns one representative per stable panel fingerprint.
+// The affected URL list retains every host/path behind that row so deduplication
+// removes dashboard noise without hiding the actual attack surface.
+func (h *Handler) handleListAdminPanels(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	rows, err := h.db.QueryContext(r.Context(), `
+		SELECT id,target_id,url,status_code,panel_type,product,title,redirect_url,
+			content_hash,group_key,evidence,created_at
+		FROM admin_panel_findings WHERE target_id=?
+		ORDER BY group_key,url`, id)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+
+	groups := make(map[string]*models.AdminPanelFinding)
+	for rows.Next() {
+		var f models.AdminPanelFinding
+		if err := rows.Scan(&f.ID, &f.TargetID, &f.URL, &f.StatusCode, &f.PanelType,
+			&f.Product, &f.Title, &f.RedirectURL, &f.ContentHash, &f.GroupKey,
+			&f.Evidence, &f.CreatedAt); err != nil {
+			continue
+		}
+		g := groups[f.GroupKey]
+		if g == nil {
+			f.AffectedURLs = []string{f.URL}
+			f.AffectedCount = 1
+			groups[f.GroupKey] = &f
+			continue
+		}
+		g.AffectedURLs = append(g.AffectedURLs, f.URL)
+		g.AffectedCount++
+		// Prefer the shortest URL as the compact representative.
+		if len(f.URL) < len(g.URL) {
+			g.URL, g.ID, g.StatusCode, g.RedirectURL, g.CreatedAt = f.URL, f.ID, f.StatusCode, f.RedirectURL, f.CreatedAt
+		}
+	}
+	findings := make([]models.AdminPanelFinding, 0, len(groups))
+	for _, g := range groups {
+		sort.Strings(g.AffectedURLs)
+		findings = append(findings, *g)
+	}
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].AffectedCount != findings[j].AffectedCount {
+			return findings[i].AffectedCount > findings[j].AffectedCount
+		}
+		return findings[i].URL < findings[j].URL
+	})
 	h.writeSuccess(w, findings)
 }
 

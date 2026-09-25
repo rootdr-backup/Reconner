@@ -2,10 +2,37 @@ package scanner
 
 import (
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/recon-platform/internal/config"
 )
+
+// nucleiNonEvidenceStatusFP rejects HTTP outcomes that cannot, by themselves,
+// prove the active behavior claimed by injection/execution templates. This is a
+// deliberately narrow status gate: 2xx and 5xx remain available (error-based
+// SQLi legitimately uses 5xx), and open redirects keep 3xx as their proof.
+func nucleiNonEvidenceStatusFP(typ, rawResponse string) bool {
+	switch typ {
+	case "sqli", "xss", "ssrf", "lfi", "command_injection", "ssti", "xxe", "file_upload":
+	default:
+		return false
+	}
+	line := rawResponse
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	parts := strings.Fields(line)
+	if len(parts) < 2 || !strings.HasPrefix(strings.ToUpper(parts[0]), "HTTP/") {
+		return false
+	}
+	status, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	return status == 204 || (status >= 300 && status < 400) || status == 401 || status == 403 || status == 404
+}
 
 // Nuclei intelligence layer: turn raw nuclei output into the SAME normalized
 // VulnerabilityCandidate the rest of the engine speaks, classify it into a
@@ -325,6 +352,7 @@ func blockedTemplateIDList() []string {
 	for id := range blockedTemplateIDs {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return ids
 }
 
@@ -337,14 +365,20 @@ func blockedTemplateIDList() []string {
 // non-empty flag pair since the built-in list is never empty.
 func nucleiExcludeIDFlag(cfg *config.Config) []string {
 	ids := blockedTemplateIDList()
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
 	if cfg != nil {
 		for _, id := range cfg.NucleiExcludeTemplateIDs {
 			id = strings.ToLower(strings.TrimSpace(id))
-			if id != "" {
+			if id != "" && !seen[id] {
 				ids = append(ids, id)
+				seen[id] = true
 			}
 		}
 	}
+	sort.Strings(ids)
 	return []string{"-eid", strings.Join(ids, ",")}
 }
 

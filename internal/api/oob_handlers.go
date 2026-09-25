@@ -37,6 +37,8 @@ func oobVulnType(kind string) string {
 		return "blind_ssti"
 	case "log4shell":
 		return "log4shell_rce"
+	case "file_upload_ssrf", "file_upload_xxe":
+		return "file_upload"
 	}
 	return "blind_ssrf"
 }

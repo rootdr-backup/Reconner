@@ -109,10 +109,11 @@ var moduleRequires = map[string][]string{
 	ModuleATO:          capParams, // redirect analysis is internal (checkOpenRedirectURL)
 	// blind classes own their OOB confirmation internally (shared oobCapability),
 	// so they need only the params bundle — NOT a multi-class OAST detector module.
-	ModuleSSRF: capParams,
-	ModuleXXE:  capParams,
-	ModuleCmdi: capParams,
-	ModuleOAST: capParams,
+	ModuleSSRF:       capParams,
+	ModuleXXE:        capParams,
+	ModuleFileUpload: capParams,
+	ModuleCmdi:       capParams,
+	ModuleOAST:       capParams,
 	// http_services-only (probe live hosts; no parameter mining needed)
 	ModuleCORS:            capCoreWeb,
 	ModuleCachePoison:     capCoreWeb,

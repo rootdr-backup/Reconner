@@ -168,6 +168,13 @@ export default function Tasks() {
                     className={cn('shrink-0 rounded-md border px-2 py-1.5 max-w-44', phaseTone[phase.status] || phaseTone.pending)}>
                     <p className="text-[10px] font-medium truncate">{phase.module}</p>
                     <p className="text-[9px] uppercase tracking-wide opacity-80">{phase.status.replace('_', ' ')}</p>
+                    {(phase.eligible > 0 || phase.attempted > 0 || phase.confirmed > 0 || phase.candidates > 0) && (
+                      <p className="mt-1 text-[9px] text-text-muted whitespace-nowrap">
+                        {phase.attempted}/{phase.eligible} tried
+                        {phase.candidates > 0 ? ` · ${phase.candidates} cand` : ''}
+                        {phase.confirmed > 0 ? ` · ${phase.confirmed} proven` : ''}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>

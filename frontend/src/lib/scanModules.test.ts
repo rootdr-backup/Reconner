@@ -34,4 +34,13 @@ describe('scan module catalog', () => {
     expect(resolved.has('xss')).toBe(false)
     expect(resolved.has('subdomain_enum')).toBe(false)
   })
+
+  it('plans file upload validation without unrelated detectors', () => {
+    const resolved = resolveModuleSelection(new Set(['file_upload']))
+    for (const id of ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'param_reflection', 'file_upload', 'verify']) {
+      expect(resolved.has(id), id).toBe(true)
+    }
+    expect(resolved.has('xss')).toBe(false)
+    expect(resolved.has('xxe')).toBe(false)
+  })
 })

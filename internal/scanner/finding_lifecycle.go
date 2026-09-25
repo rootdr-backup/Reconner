@@ -250,6 +250,14 @@ func RecordCandidateResult(ctx context.Context, db *database.DB, c Vulnerability
 	if err := upsertFindingProjection(ctx, db, id, c, result, finalState, meta); err != nil {
 		return id, err
 	}
+	switch finalState {
+	case CandConfirmed, CandVerified:
+		RecordCoverage(ctx, CoverageConfirmed, 1)
+	case CandRejected:
+		RecordCoverage(ctx, CoverageRejected, 1)
+	case CandDetected, CandVerifying, CandInconclusive, CandTriaged:
+		RecordCoverage(ctx, CoverageCandidate, 1)
+	}
 	return id, nil
 }
 

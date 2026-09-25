@@ -63,6 +63,7 @@ func TestPlanSingleVulnerabilityExpandsPipeline(t *testing.T) {
 		ModuleSSTI:         {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleNoSQLi:       {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleXXE:          {ModuleHTTPProbe, ModuleParamDiscovery},
+		ModuleFileUpload:   {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleCmdi:         {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleOpenRedirect: {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleIDOR:         {ModuleHTTPProbe, ModuleParamDiscovery},
@@ -209,7 +210,7 @@ func TestPlanNetworkPassthrough(t *testing.T) {
 // takeover) must never enumerate subdomains — the scan stays on the seeded host.
 func TestPlanManyDetectorsNoSubdomainEnum(t *testing.T) {
 	sel := []string{
-		ModuleXSS, ModuleSQLi, ModuleSSRF, ModuleLFI, ModuleSSTI, ModuleXXE,
+		ModuleXSS, ModuleSQLi, ModuleSSRF, ModuleLFI, ModuleSSTI, ModuleXXE, ModuleFileUpload,
 		ModuleCmdi, ModuleIDOR, ModuleJWT, ModuleOpenRedirect, ModuleNuclei,
 		ModuleExposure, ModuleIntel, ModulePassive, ModuleCachePoison, ModuleOAST,
 	}

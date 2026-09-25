@@ -217,6 +217,22 @@ export interface DirectoryFinding {
   created_at: string
 }
 
+export interface AdminPanelFinding {
+  id: string
+  target_id: string
+  url: string
+  status_code: number
+  panel_type: string
+  product: string
+  title: string
+  redirect_url: string
+  content_hash: string
+  evidence: string
+  affected_count: number
+  affected_urls: string[]
+  created_at: string
+}
+
 export interface BackupFinding {
   id: string
   target_id: string
@@ -346,6 +362,14 @@ export interface TaskPhase {
   reason: string
   attempt_count: number
   duration_ms: number
+  discovered: number
+  eligible: number
+  attempted: number
+  candidates: number
+  confirmed: number
+  rejected: number
+  blocked: number
+  errors: number
   started_at: string | null
   finished_at: string | null
   created_at: string

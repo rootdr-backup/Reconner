@@ -21,6 +21,7 @@ func RunMigrations(db *DB) error {
 		createJSFindingsTable,
 		createParametersTable,
 		createDirectoryFindingsTable,
+		createAdminPanelFindingsTable,
 		createBackupFindingsTable,
 		createOpenRedirectFindingsTable,
 		createNucleiFindingsTable,
@@ -28,6 +29,7 @@ func RunMigrations(db *DB) error {
 		createTasksTable,
 		createTaskLogsTable,
 		createTaskPhasesTable,
+		createBrowserStatesTable,
 		createScreenshotsTable,
 		createMonitoringChangesTable,
 		createNotificationsTable,
@@ -114,6 +116,14 @@ func RunMigrations(db *DB) error {
 		alterTargetsAddOwner,
 		alterTasksAddEta,
 		alterTasksAddModuleEta,
+		alterTaskPhasesAddDiscovered,
+		alterTaskPhasesAddEligible,
+		alterTaskPhasesAddAttempted,
+		alterTaskPhasesAddCandidates,
+		alterTaskPhasesAddConfirmed,
+		alterTaskPhasesAddRejected,
+		alterTaskPhasesAddBlockedCount,
+		alterTaskPhasesAddErrorCount,
 		alterParametersAddLocation,
 		createBountyProgramsTable,
 		createBountyProgramAssetsTable,
@@ -1079,6 +1089,25 @@ CREATE TABLE IF NOT EXISTS directory_findings (
 	UNIQUE(target_id, url)
 );`
 
+const createAdminPanelFindingsTable = `
+CREATE TABLE IF NOT EXISTS admin_panel_findings (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	status_code INTEGER DEFAULT 0,
+	panel_type TEXT DEFAULT '',
+	product TEXT DEFAULT '',
+	title TEXT DEFAULT '',
+	redirect_url TEXT DEFAULT '',
+	content_hash TEXT DEFAULT '',
+	group_key TEXT NOT NULL,
+	evidence TEXT DEFAULT '',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	UNIQUE(target_id, url)
+);`
+
 const createBackupFindingsTable = `
 CREATE TABLE IF NOT EXISTS backup_findings (
 	id TEXT PRIMARY KEY,
@@ -1189,6 +1218,14 @@ CREATE TABLE IF NOT EXISTS task_phases (
 	reason TEXT DEFAULT '',
 	attempt_count INTEGER DEFAULT 0,
 	duration_ms INTEGER DEFAULT 0,
+	discovered_count INTEGER DEFAULT 0,
+	eligible_count INTEGER DEFAULT 0,
+	attempted_count INTEGER DEFAULT 0,
+	candidate_count INTEGER DEFAULT 0,
+	confirmed_count INTEGER DEFAULT 0,
+	rejected_count INTEGER DEFAULT 0,
+	blocked_count INTEGER DEFAULT 0,
+	error_count INTEGER DEFAULT 0,
 	started_at DATETIME,
 	finished_at DATETIME,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1196,6 +1233,32 @@ CREATE TABLE IF NOT EXISTS task_phases (
 	UNIQUE(task_id, phase_index),
 	FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );`
+
+// browser_states is the durable client-side state graph. URL alone is not a
+// sufficient crawl identity for SPAs: same-document interactions can expose a
+// different form and JavaScript surface without changing the path.
+const createBrowserStatesTable = `
+CREATE TABLE IF NOT EXISTS browser_states (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	parent_fingerprint TEXT DEFAULT '',
+	sequence INTEGER DEFAULT 0,
+	source TEXT DEFAULT 'headless',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(target_id, fingerprint),
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
+
+const alterTaskPhasesAddDiscovered = `ALTER TABLE task_phases ADD COLUMN discovered_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddEligible = `ALTER TABLE task_phases ADD COLUMN eligible_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddAttempted = `ALTER TABLE task_phases ADD COLUMN attempted_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddCandidates = `ALTER TABLE task_phases ADD COLUMN candidate_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddConfirmed = `ALTER TABLE task_phases ADD COLUMN confirmed_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddRejected = `ALTER TABLE task_phases ADD COLUMN rejected_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddBlockedCount = `ALTER TABLE task_phases ADD COLUMN blocked_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddErrorCount = `ALTER TABLE task_phases ADD COLUMN error_count INTEGER DEFAULT 0;`
 
 const createScreenshotsTable = `
 CREATE TABLE IF NOT EXISTS screenshots (
@@ -1539,6 +1602,8 @@ CREATE INDEX IF NOT EXISTS idx_js_findings_target ON js_findings(target_id);
 CREATE INDEX IF NOT EXISTS idx_parameters_target ON parameters(target_id);
 CREATE INDEX IF NOT EXISTS idx_parameters_reflected ON parameters(is_reflected);
 CREATE INDEX IF NOT EXISTS idx_directory_findings_target ON directory_findings(target_id);
+CREATE INDEX IF NOT EXISTS idx_admin_panel_findings_target ON admin_panel_findings(target_id);
+CREATE INDEX IF NOT EXISTS idx_admin_panel_findings_group ON admin_panel_findings(target_id, group_key);
 CREATE INDEX IF NOT EXISTS idx_backup_findings_target ON backup_findings(target_id);
 CREATE INDEX IF NOT EXISTS idx_nuclei_findings_target ON nuclei_findings(target_id);
 CREATE INDEX IF NOT EXISTS idx_nuclei_findings_severity ON nuclei_findings(severity);

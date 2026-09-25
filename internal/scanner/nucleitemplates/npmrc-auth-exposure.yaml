@@ -1,0 +1,27 @@
+id: reconner-npmrc-auth-exposure
+info:
+  name: Exposed npm registry credentials
+  author: reconner
+  severity: critical
+  description: A publicly readable .npmrc can disclose npm registry authentication material. Matchers require a registry-scoped credential assignment rather than a generic documentation keyword.
+  tags: reconner,exposure,npm,secret,credentials
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.npmrc"
+      - "{{BaseURL}}/npmrc"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^\\s*//[^/\\s]+/[^:]*:(_authToken|_auth|username|_password)\\s*=\\s*[^\\s]{6,}\\s*$'
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

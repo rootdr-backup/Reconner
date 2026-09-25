@@ -139,6 +139,23 @@ type DirectoryFinding struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type AdminPanelFinding struct {
+	ID            string    `json:"id"`
+	TargetID      string    `json:"target_id"`
+	URL           string    `json:"url"`
+	StatusCode    int       `json:"status_code"`
+	PanelType     string    `json:"panel_type"`
+	Product       string    `json:"product"`
+	Title         string    `json:"title"`
+	RedirectURL   string    `json:"redirect_url"`
+	ContentHash   string    `json:"content_hash"`
+	GroupKey      string    `json:"-"`
+	Evidence      string    `json:"evidence"`
+	AffectedCount int       `json:"affected_count"`
+	AffectedURLs  []string  `json:"affected_urls"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 type BackupFinding struct {
 	ID            string    `json:"id"`
 	TargetID      string    `json:"target_id"`
@@ -238,6 +255,14 @@ type TaskPhase struct {
 	Reason       string     `json:"reason"`
 	AttemptCount int        `json:"attempt_count"`
 	DurationMS   int64      `json:"duration_ms"`
+	Discovered   int64      `json:"discovered"`
+	Eligible     int64      `json:"eligible"`
+	Attempted    int64      `json:"attempted"`
+	Candidates   int64      `json:"candidates"`
+	Confirmed    int64      `json:"confirmed"`
+	Rejected     int64      `json:"rejected"`
+	Blocked      int64      `json:"blocked"`
+	Errors       int64      `json:"errors"`
 	StartedAt    *time.Time `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at"`
 	CreatedAt    time.Time  `json:"created_at"`

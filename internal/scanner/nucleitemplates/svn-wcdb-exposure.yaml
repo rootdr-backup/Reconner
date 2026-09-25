@@ -1,0 +1,19 @@
+id: reconner-svn-wcdb-exposure
+info:
+  name: Exposed Subversion working-copy database
+  author: reconner
+  severity: high
+  description: A publicly readable .svn/wc.db exposes working-copy metadata and repository paths. The matcher requires the SQLite file signature.
+  tags: reconner,exposure,svn,source,disclosure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.svn/wc.db"
+    matchers-condition: and
+    matchers:
+      - type: binary
+        binary:
+          - "53514c69746520666f726d6174203300"
+      - type: status
+        status:
+          - 200
