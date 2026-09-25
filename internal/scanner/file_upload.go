@@ -117,7 +117,16 @@ func hasUploadMetadataSibling(ip insertionPoint) bool {
 
 func eligibleFileUploadPoint(ip insertionPoint) bool {
 	if insertionLocation(ip) == "multipart" {
-		return true
+		// A multipart form exposes every successful control as an insertion
+		// point so required CSRF/tenant/action fields can be replayed as
+		// siblings.  Only the actual file-like control is an upload target;
+		// probing every multipart control duplicates findings and mutates form
+		// plumbing that must remain stable.
+		name := uploadLeafName(ip.Param)
+		if uploadMetadataNames[name] {
+			return false
+		}
+		return uploadFieldNames[name] || paramProneTo(ClassUpload, ip.Param, ip.Value)
 	}
 	loc := insertionLocation(ip)
 	if loc != "json" && loc != "body" {

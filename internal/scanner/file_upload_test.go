@@ -509,6 +509,26 @@ func TestFileUploadRunConsumesDiscoveredMultipartInsertionPoint(t *testing.T) {
 	}
 }
 
+func TestFileUploadMultipartEligibilityKeepsFormPlumbingAsSiblings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "file", want: true},
+		{name: "profile_picture", want: true},
+		{name: "csrf", value: "local-test", want: false},
+		{name: "tenant_id", value: "7", want: false},
+		{name: "filename", value: "avatar.png", want: false},
+		{name: "mime_type", value: "image/png", want: false},
+	} {
+		ip := insertionPoint{Param: tc.name, Value: tc.value, Method: "POST", ContentType: "multipart/form-data", Location: "multipart"}
+		if got := eligibleFileUploadPoint(ip); got != tc.want {
+			t.Fatalf("multipart eligibility for %q=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestFileUploadJSONTransportUsesStructuredFileObject(t *testing.T) {
 	withLoopbackAllowed(t)
 	var sawSibling bool
