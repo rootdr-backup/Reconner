@@ -10,7 +10,7 @@ import { ws } from '../lib/websocket'
 import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
-  DirectoryFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent
+  DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent
 } from '../types'
 
 const isScannableProjectAsset = (asset: Asset) =>
@@ -27,6 +27,7 @@ const TAB_GROUPS = [
     { id: 'js', label: 'Scripts' },
     { id: 'params', label: 'Parameters' },
     { id: 'dirs', label: 'Directories' },
+    { id: 'admin-panels', label: 'Admin & sensitive panels' },
   ] },
   { group: 'Vulnerabilities', tabs: [
     { id: 'vulns', label: 'Confirmed' },
@@ -211,6 +212,28 @@ function NucleiAffected({ targetId, templateId, count }: { targetId: string; tem
             </div>
           ))}
           {rows && rows.length === 0 && !loading && <p className="text-[10px] text-text-muted">No details stored.</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PanelAffected({ panel }: { panel: AdminPanelFinding }) {
+  const [open, setOpen] = useState(false)
+  const urls = panel.affected_urls || [panel.url]
+  return (
+    <div className="mt-1">
+      <button onClick={() => setOpen(v => !v)} className="text-[10px] text-accent hover:underline select-none">
+        {open ? '▾' : '▸'} {panel.affected_count || urls.length} matching panel URL(s)
+      </button>
+      {open && (
+        <div className="mt-1 space-y-1 max-h-64 overflow-auto pr-1">
+          {urls.map(u => (
+            <div key={u} className="flex items-start gap-1 border-l border-white/10 pl-2">
+              <a href={u} target="_blank" rel="noreferrer" className="flex-1 font-mono text-[10px] text-accent break-all hover:underline">{u}</a>
+              <CopyButton text={u} />
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -439,6 +462,7 @@ export default function TargetDetail() {
       else if (t === 'js-findings') r = await findingsApi.jsFindings(id)
       else if (t === 'params') r = await findingsApi.parameters(id, false)
       else if (t === 'dirs') r = await findingsApi.directoryFindings(id)
+      else if (t === 'admin-panels') r = await findingsApi.adminPanels(id)
       else if (t === 'backups') r = await findingsApi.backupFindings(id)
       else if (t === 'redirects') r = await findingsApi.openRedirects(id)
       else if (t === 'nuclei') r = await findingsApi.nucleiFindings(id)
@@ -840,6 +864,7 @@ export default function TargetDetail() {
                       {tab === 'js-findings' && ['Severity', 'Type', 'Value', 'JS File Source', 'Context', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'params' && ['Full URL', 'Parameter', 'Source', 'Reflected', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'dirs' && ['URL', 'Status', 'Size', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
+                      {tab === 'admin-panels' && ['Panel', 'Type', 'Status', 'Evidence', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'backups' && ['URL', 'Status', 'Size', 'Type', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'redirects' && ['URL', 'Redirects To', 'Verified', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'nuclei' && ['Severity', 'Template', 'URL', 'Description', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
@@ -969,6 +994,27 @@ export default function TargetDetail() {
                         <td className="table-cell"><span className={cn('font-mono text-xs', statusCodeColor(d.status_code))}>{d.status_code}</span></td>
                         <td className="table-cell text-xs">{d.content_length > 0 ? `${(d.content_length / 1024).toFixed(1)}KB` : '—'}</td>
                         <td className="table-cell text-xs">{timeAgo(d.created_at)}</td>
+                      </tr>
+                    ))}
+                    {tab === 'admin-panels' && (pageData as AdminPanelFinding[]).map(p => (
+                      <tr key={p.id} className="table-row align-top">
+                        <td className="table-cell max-w-sm">
+                          <div className="flex items-start gap-1.5">
+                            <div className="min-w-0">
+                              <a href={p.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono break-all">{truncate(p.url, 72)}</a>
+                              <p className="text-xs font-semibold text-text-primary mt-0.5">{p.product || p.title || 'Sensitive panel'}</p>
+                              <PanelAffected panel={p} />
+                            </div>
+                            <CopyButton text={p.url} />
+                          </div>
+                        </td>
+                        <td className="table-cell text-xs capitalize">{p.panel_type || 'management panel'}</td>
+                        <td className="table-cell"><span className={cn('font-mono text-xs', statusCodeColor(p.status_code))}>{p.status_code}</span></td>
+                        <td className="table-cell text-xs text-text-muted max-w-sm">
+                          <p>{p.evidence || 'strong panel fingerprint'}</p>
+                          {p.redirect_url && <p className="font-mono text-[10px] break-all mt-1">→ {p.redirect_url}</p>}
+                        </td>
+                        <td className="table-cell text-xs whitespace-nowrap">{timeAgo(p.created_at)}</td>
                       </tr>
                     ))}
                     {tab === 'backups' && (pageData as BackupFinding[]).map(b => (

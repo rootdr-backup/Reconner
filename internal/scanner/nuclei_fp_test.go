@@ -1,6 +1,9 @@
 package scanner
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestBlockedNoisyTemplates(t *testing.T) {
 	blocked := []struct{ id, name string }{
@@ -73,5 +76,20 @@ func TestLenientURLDecode(t *testing.T) {
 		if got := lenientURLDecode(in); got != want {
 			t.Errorf("lenientURLDecode(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestNucleiNonEvidenceStatusGuard(t *testing.T) {
+	for _, status := range []int{204, 302, 401, 403, 404} {
+		response := "HTTP/1.1 " + fmt.Sprint(status) + " Result\r\nContent-Type: text/html\r\n\r\n"
+		if !nucleiNonEvidenceStatusFP("xss", response) {
+			t.Errorf("xss response status %d must not be accepted as behavior proof", status)
+		}
+	}
+	if nucleiNonEvidenceStatusFP("sqli", "HTTP/1.1 500 Internal Server Error\r\n\r\nSQL syntax") {
+		t.Fatal("error-based SQLi must retain 5xx evidence")
+	}
+	if nucleiNonEvidenceStatusFP("open_redirect", "HTTP/1.1 302 Found\r\nLocation: https://example.invalid\r\n\r\n") {
+		t.Fatal("open redirects legitimately use a 3xx proof")
 	}
 }

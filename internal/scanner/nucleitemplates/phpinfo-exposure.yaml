@@ -17,8 +17,9 @@ http:
       - type: word
         part: body
         words:
+          - "phpinfo()"
           - "PHP Version"
-          - "php.ini"
+          - "Server API"
         condition: and
       - type: status
         status:

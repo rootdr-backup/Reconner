@@ -11,12 +11,14 @@ http:
       - "{{BaseURL}}/_ignition/health-check"
     matchers-condition: and
     matchers:
-      - type: word
+      - type: regex
         part: body
+        regex:
+          - '(?s)^\\s*\\{\\s*"can_execute_commands"\\s*:\\s*(true|false)\\s*\\}\\s*$'
+      - type: word
+        part: header
         words:
-          - "\"can_execute_commands\""
-          - "ignition"
-        condition: or
+          - "application/json"
       - type: status
         status:
           - 200

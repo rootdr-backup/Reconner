@@ -52,6 +52,17 @@ func TestClassifierCatchesRealParams(t *testing.T) {
 	}
 }
 
+func TestClassifierRoutesFileUploadShapes(t *testing.T) {
+	for _, name := range []string{"file", "attachments[]", "avatar", "fileName", "mime_type", "base64"} {
+		if !paramProneTo(ClassUpload, name, "") {
+			t.Errorf("upload parameter %q was not routed to file_upload", name)
+		}
+	}
+	if paramProneTo(ClassUpload, "display_name", "Alice") {
+		t.Fatal("ordinary profile text must not be routed as a file upload")
+	}
+}
+
 // Value heuristics route regardless of the parameter name.
 func TestClassifierValueHeuristics(t *testing.T) {
 	if !paramProneTo(ClassSSRF, "data", "https://internal.example/") {

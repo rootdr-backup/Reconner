@@ -58,6 +58,7 @@ const (
 	ModuleIntel           = "intel"
 	ModuleOAST            = "oast"
 	ModuleXXE             = "xxe"
+	ModuleFileUpload      = "file_upload"
 	ModuleIDOR            = "idor"
 	ModuleJWT             = "jwt"
 	ModuleATO             = "ato"
@@ -115,6 +116,7 @@ var AllModules = []string{
 	ModuleIntel,
 	ModuleOAST,
 	ModuleXXE,
+	ModuleFileUpload,
 	ModuleIDOR,
 	ModuleJWT,
 	ModuleAuthz,
@@ -173,6 +175,7 @@ type Scheduler struct {
 	intelScanner       *scanner.IntelScanner
 	oastScanner        *scanner.OASTScanner
 	xxeScanner         *scanner.XXEScanner
+	fileUploadScanner  *scanner.FileUploadScanner
 	idorScanner        *scanner.IDORScanner
 	jwtScanner         *scanner.JWTScanner
 	atoEngine          *scanner.AccountTakeoverEngine
@@ -262,6 +265,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.intelScanner = scanner.NewIntelScanner(db, exec, cfg, log, bc)
 	s.oastScanner = scanner.NewOASTScanner(db, exec, cfg, log, bc)
 	s.xxeScanner = scanner.NewXXEScanner(db, exec, cfg, log, bc)
+	s.fileUploadScanner = scanner.NewFileUploadScanner(db, exec, cfg, log, bc)
 	s.idorScanner = scanner.NewIDORScanner(db, exec, cfg, log, bc)
 	s.jwtScanner = scanner.NewJWTScanner(db, exec, cfg, log, bc)
 	s.atoEngine = scanner.NewAccountTakeoverEngine(db, exec, cfg, log, bc)
@@ -1630,6 +1634,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		ModuleSSTI:            2,
 		ModuleCmdi:            2,
 		ModuleXXE:             2,
+		ModuleFileUpload:      2,
 		ModuleCachePoison:     2,
 		ModuleRace:            2,
 		ModuleIDOR:            2,
@@ -2246,6 +2251,8 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.oastScanner.Run(ctx, targetID, logFn)
 	case ModuleXXE:
 		return s.xxeScanner.Run(ctx, targetID, logFn)
+	case ModuleFileUpload:
+		return s.fileUploadScanner.Run(ctx, targetID, logFn)
 	case ModuleIDOR:
 		return s.idorScanner.Run(ctx, targetID, logFn)
 	case ModuleJWT:
@@ -2345,17 +2352,25 @@ func (s *Scheduler) updateTargetStats(targetID string) {
 
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ?", targetID).Scan(&subdomainCount)
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1", targetID).Scan(&aliveCount)
+	// The orange headline is an actionable vulnerability count, not an inventory
+	// counter. Keep only medium+ findings; exposed-file discovery is promoted into
+	// vuln_findings after validation, so counting backup rows here double-counted
+	// them and made low/info discoveries look like vulnerabilities.
 	// Nuclei is counted by DISTINCT template_id (not raw rows): one template that
 	// fires on hundreds of near-identical URLs is ONE logical finding, so the
 	// headline count reflects real issues instead of duplicated noise (matches the
 	// collapsed nuclei list view).
 	s.db.QueryRow(`
 		SELECT
-			(SELECT COUNT(DISTINCT template_id) FROM nuclei_findings WHERE target_id = ? AND COALESCE(verification,'unverified') != 'rejected') +
-			(SELECT COUNT(*) FROM backup_findings WHERE target_id = ?) +
+			(SELECT COUNT(DISTINCT template_id) FROM nuclei_findings WHERE target_id = ?
+				AND LOWER(COALESCE(severity,'info')) IN ('medium','high','critical')
+				AND COALESCE(verification,'unverified') != 'rejected') +
 			(SELECT COUNT(*) FROM open_redirect_findings WHERE target_id = ? AND COALESCE(status,'finding')='finding') +
-			(SELECT COUNT(*) FROM vuln_findings WHERE target_id = ? AND COALESCE(status,'finding')='finding')
-	`, targetID, targetID, targetID, targetID).Scan(&findingCount)
+			(SELECT COUNT(*) FROM vuln_findings WHERE target_id = ?
+				AND LOWER(COALESCE(severity,'info')) IN ('medium','high','critical')
+				AND COALESCE(status,'finding')='finding'
+				AND COALESCE(triage,'') != 'false_positive')
+	`, targetID, targetID, targetID).Scan(&findingCount)
 
 	_, _ = s.db.Exec(`
 		UPDATE targets SET 

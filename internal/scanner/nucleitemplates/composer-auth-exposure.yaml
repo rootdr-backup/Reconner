@@ -1,0 +1,28 @@
+id: reconner-composer-auth-exposure
+info:
+  name: Exposed Composer auth.json
+  author: reconner
+  severity: critical
+  description: A publicly readable Composer auth.json can disclose repository credentials or OAuth tokens. Matchers require valid JSON content type and an authentication object.
+  tags: reconner,exposure,composer,secret,credentials
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/auth.json"
+      - "{{BaseURL}}/.composer/auth.json"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - '(?s)"(github-oauth|gitlab-oauth|http-basic|bearer)"\\s*:\\s*\\{'
+          - '(?s)"(token|username|password)"\\s*:\\s*"[^"\\r\\n]{4,}"'
+        condition: and
+      - type: word
+        part: header
+        words:
+          - "application/json"
+      - type: status
+        status:
+          - 200

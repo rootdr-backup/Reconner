@@ -65,6 +65,38 @@ func TestBuildExecPayloadsBreakout(t *testing.T) {
 	}
 }
 
+func TestBrowserPayloadCoverageIsContextBoundedAndDeep(t *testing.T) {
+	cases := []struct {
+		name string
+		a    ReflectionAnalysis
+		min  int
+		want string
+	}{
+		{"html", ReflectionAnalysis{Context: CtxHTMLText}, 10, "animate"},
+		{"quoted attribute", ReflectionAnalysis{Context: CtxQuotedAttr, Quote: '"'}, 5, "details"},
+		{"unquoted attribute", ReflectionAnalysis{Context: CtxUnquotedAttr}, 5, "autofocus"},
+		{"template literal", ReflectionAnalysis{Context: CtxJSString, JSQuote: '`'}, 4, "${("},
+		{"srcdoc", ReflectionAnalysis{Context: CtxSrcDoc, Quote: '"'}, 5, "&lt;img"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := xssBrowserPayloadsForAnalysis(&tc.a)
+			if len(got) < tc.min {
+				t.Fatalf("context ladder too shallow: got %d want >= %d", len(got), tc.min)
+			}
+			joined := strings.ToLower(strings.Join(got, "\n"))
+			if !strings.Contains(joined, strings.ToLower(tc.want)) {
+				t.Fatalf("context ladder lacks %q family", tc.want)
+			}
+			for _, payload := range got {
+				if !strings.Contains(payload, "__reconnerXSSProof") || !strings.Contains(payload, "alert('reconner')") {
+					t.Fatalf("payload lost execution proof: %q", payload)
+				}
+			}
+		})
+	}
+}
+
 // TestExecPayloadSurvived proves the raw-survival check: a tag vector counts only
 // when its element forms as a live start tag AND its handler token is present raw.
 func TestExecPayloadSurvived(t *testing.T) {

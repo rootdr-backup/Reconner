@@ -200,7 +200,7 @@ func targetArtifactDatasets(targetID string) []artifactDataset {
 		"objects", "actions", "object_relationships", "workflow_variables", "authorization_observations",
 		"hypotheses", "state_snapshots", "capture_sessions", "request_templates",
 		"candidates", "candidate_transitions", "subdomains", "http_services", "js_files", "js_findings",
-		"parameters", "directory_findings", "backup_findings", "open_redirect_findings", "nuclei_findings",
+		"parameters", "directory_findings", "admin_panel_findings", "backup_findings", "open_redirect_findings", "nuclei_findings",
 		"monitoring_changes", "vuln_findings", "blind_xss_probes", "oob_probes", "open_ports",
 	}
 	datasets := make([]artifactDataset, 0, len(byTarget)+5)

@@ -453,7 +453,6 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 		sev := strings.ToLower(out.Info.Severity)
 		actionableSev := !(sev == "info" || sev == "low" || sev == "unknown" || sev == "")
 		typ, _ := classifyNucleiTemplate(out.TemplateID, out.Info.Tags)
-
 		// MISS NOTHING: capture every hit that is either an actionable severity OR
 		// maps to a real vulnerability class as a normalized candidate — even an
 		// info/low template that actually hit a sqli/xss/ssrf/lfi/rce/ssti/redirect
@@ -462,6 +461,15 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 		if actionableSev || typ != "nuclei" {
 			_ = StoreCandidate(ctx, s.db,
 				nucleiToCandidate(targetID, out.TemplateID, out.Info.Name, out.Info.Severity, out.MatchedAt, out.Info.Tags))
+		}
+
+		// A behavior template returning only a redirect, auth denial, no-content or
+		// not-found response has not demonstrated injection/execution. Preserve its
+		// normalized candidate for native verification, but never promote the raw
+		// template hit as a finding. Open redirects remain exempt because a 3xx
+		// Location is their actual proof primitive.
+		if nucleiNonEvidenceStatusFP(typ, out.Response) {
+			return
 		}
 
 		// FINDINGS stay HIGH-SIGNAL: skip the info/low tiers unless opted in, and

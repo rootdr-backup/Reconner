@@ -181,6 +181,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/targets/{id}/js-findings", h.requireAuth(h.handleListJSFindings)).Methods("GET")
 	api.HandleFunc("/targets/{id}/parameters", h.requireAuth(h.handleListParameters)).Methods("GET")
 	api.HandleFunc("/targets/{id}/directory-findings", h.requireAuth(h.handleListDirectoryFindings)).Methods("GET")
+	api.HandleFunc("/targets/{id}/admin-panels", h.requireAuth(h.handleListAdminPanels)).Methods("GET")
 	api.HandleFunc("/targets/{id}/backup-findings", h.requireAuth(h.handleListBackupFindings)).Methods("GET")
 	api.HandleFunc("/targets/{id}/open-redirects", h.requireAuth(h.handleListOpenRedirects)).Methods("GET")
 	api.HandleFunc("/targets/{id}/nuclei-findings", h.requireAuth(h.handleListNucleiFindings)).Methods("GET")

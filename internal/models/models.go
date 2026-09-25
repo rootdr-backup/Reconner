@@ -139,6 +139,23 @@ type DirectoryFinding struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type AdminPanelFinding struct {
+	ID            string    `json:"id"`
+	TargetID      string    `json:"target_id"`
+	URL           string    `json:"url"`
+	StatusCode    int       `json:"status_code"`
+	PanelType     string    `json:"panel_type"`
+	Product       string    `json:"product"`
+	Title         string    `json:"title"`
+	RedirectURL   string    `json:"redirect_url"`
+	ContentHash   string    `json:"content_hash"`
+	GroupKey      string    `json:"-"`
+	Evidence      string    `json:"evidence"`
+	AffectedCount int       `json:"affected_count"`
+	AffectedURLs  []string  `json:"affected_urls"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 type BackupFinding struct {
 	ID            string    `json:"id"`
 	TargetID      string    `json:"target_id"`

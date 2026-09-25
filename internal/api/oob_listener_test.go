@@ -83,6 +83,7 @@ func TestOOBVulnTypeMapping(t *testing.T) {
 	cases := map[string]string{
 		"log4shell": "log4shell_rce", "rce": "blind_rce", "sqli": "blind_sqli",
 		"xxe": "blind_xxe", "ssrf": "blind_ssrf", "": "blind_ssrf",
+		"file_upload_ssrf": "file_upload", "file_upload_xxe": "file_upload",
 	}
 	for kind, want := range cases {
 		if got := oobVulnType(kind); got != want {

@@ -21,7 +21,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `timemachine` | Discovery | Archive service and valid domain | Strict-hostname archived URL provenance |
 | `param_reflection` | Discovery | Parameter inventory | MIME-aware reflected marker |
 | `paramfuzz` | Discovery | Stable live endpoint | Repeatable controlled differential |
-| `dir_discovery` | Detector | Live HTTP service | Soft-404/content-family differential |
+| `dir_discovery` | Detector | Live HTTP service | Soft-404/content-family differential; high-sensitive panels require product, credential-form, redirect, or authorization evidence and are content-grouped |
 | `backup_discovery` | Detector | Live HTTP service | Archive/SQL signature or sensitive config-content schema beyond status/path |
 | `open_redirect` | Detector | Routable insertion point | External destination plus encoded/sibling controls |
 | `nuclei` | Detector | Nuclei binary and live target | Parsed template evidence with noise guards |
@@ -42,6 +42,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `intel` | Detector | Persisted discovery observations | Stable multi-source correlation evidence |
 | `oast` | Detector | Public callback URL and insertion point | Callback attributed to exact probe token |
 | `xxe` | Detector | XML request or callback | Controlled marker or token-attributed callback |
+| `file_upload` | Detector | Scoped multipart or file-like structured insertion point | Retrieved execution marker, Chromium proof, traversed-member retrieval, or token-attributed processing callback |
 | `idor` | Detector | Owner and attacker identities | Same-object owner/unauthenticated/attacker matrix |
 | `jwt` | Detector | Captured JWT | Cryptographic acceptance differential |
 | `authz` | Detector | Two identities and owned-object traffic | Relationship-aware cross-identity replay matrix |

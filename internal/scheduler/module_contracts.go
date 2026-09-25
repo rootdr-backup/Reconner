@@ -46,6 +46,7 @@ var V3ModuleContracts = map[string]ModuleContract{
 	ModuleIntel:           {"detector", "persisted discovery observations", "correlations evaluated", "multi-source evidence with stable fingerprint", "scanner/benchmark_realrecon_test.go"},
 	ModuleOAST:            {"detector", "public callback URL and insertion surface", "probes registered and sent", "token-attributed callback only", "scanner/oast_test.go"},
 	ModuleXXE:             {"detector", "XML-capable request or callback", "eligible requests attempted", "controlled file marker or attributed OOB", "scanner/injection_engines_v3_test.go"},
+	ModuleFileUpload:      {"detector", "scoped multipart or file-like structured insertion point", "bounded bypass matrix attempted", "retrieval execution, browser proof, traversal retrieval or attributed OOB callback", "scanner/file_upload_test.go"},
 	ModuleIDOR:            {"detector", "baseline owner and attacker identities", "owned-object reads compared", "owner/unauth/attacker same-object matrix", "scanner/idor_sameobject_test.go"},
 	ModuleJWT:             {"detector", "captured JWT", "supported token mutations attempted", "cryptographic acceptance differential", "scanner/jwt_test.go"},
 	ModuleAuthz:           {"detector", "two identities and owned-object traffic", "read candidates replayed; writes remain hypotheses", "relationship-aware cross-identity matrix", "scanner/authz_verify_test.go"},

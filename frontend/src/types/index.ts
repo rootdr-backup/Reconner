@@ -217,6 +217,22 @@ export interface DirectoryFinding {
   created_at: string
 }
 
+export interface AdminPanelFinding {
+  id: string
+  target_id: string
+  url: string
+  status_code: number
+  panel_type: string
+  product: string
+  title: string
+  redirect_url: string
+  content_hash: string
+  evidence: string
+  affected_count: number
+  affected_urls: string[]
+  created_at: string
+}
+
 export interface BackupFinding {
   id: string
   target_id: string

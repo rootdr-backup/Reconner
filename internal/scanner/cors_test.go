@@ -126,7 +126,7 @@ func TestCORSCredentialPolicyWithoutSensitiveReplayIsCandidate(t *testing.T) {
 // TestReconnerTemplatePackMaterializes verifies the embedded template pack is
 // non-empty and writes to disk.
 func TestReconnerTemplatePackMaterializes(t *testing.T) {
-	if reconnerTemplateCount() < 5 {
+	if reconnerTemplateCount() < 13 {
 		t.Fatalf("expected the embedded template pack to carry several templates, got %d", reconnerTemplateCount())
 	}
 	dir := materializeReconnerTemplates(t.TempDir())
