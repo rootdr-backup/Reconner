@@ -15,9 +15,10 @@ import (
 // a dangerous browser sink), not vulnerability proof. Promotion still requires
 // the normal random-nonce JavaScript execution proof.
 type runtimeDOMHit struct {
-	Sink    string `json:"sink"`
-	Preview string `json:"preview"`
-	Stack   string `json:"stack"`
+	Sink    string   `json:"sink"`
+	Preview string   `json:"preview"`
+	Stack   string   `json:"stack"`
+	Lineage []string `json:"lineage"`
 }
 
 const runtimeDOMResultKey = "__reconnerXSSRuntime"
@@ -66,12 +67,18 @@ func runtimeDOMInstrumentationScript(marker string) string {
 	markerJSON, _ := json.Marshal(marker)
 	return `(()=>{try{
 const marker=` + string(markerJSON) + `;
-const state={marker,hits:[]};
+const state={marker,hits:[],sources:[]};
 Object.defineProperty(window,'` + runtimeDOMResultKey + `',{value:state,configurable:true});
 const text=v=>{try{if(typeof v==='string')return v;if(v==null)return '';return JSON.stringify(v)}catch(_){try{return String(v)}catch(_){return ''}}};
 const record=(sink,value)=>{const raw=text(value);if(!raw.includes(marker)||state.hits.length>=32)return;let stack='';try{stack=String(new Error().stack||'').split('\n').slice(2,7).join('\n')}catch(_){};state.hits.push({sink,preview:raw.slice(0,240),stack:stack.slice(0,800)})};
 const method=(obj,name,sink,indices)=>{try{const original=obj&&obj[name];if(typeof original!=='function')return;Object.defineProperty(obj,name,{configurable:true,writable:true,value:function(...args){for(const i of indices)record(sink,args[i]);return Reflect.apply(original,this,args)}})}catch(_){}};
+const sourceMethod=(obj,name,label)=>{try{const original=obj&&obj[name];if(typeof original!=='function')return;Object.defineProperty(obj,name,{configurable:true,writable:true,value:function(...args){const out=Reflect.apply(original,this,args),raw=text(out);if(raw.includes(marker)&&!state.sources.includes(label))state.sources.push(label);return out}})}catch(_){}};
+const streamMethod=(obj,name,sink)=>{try{const original=obj&&obj[name];if(typeof original!=='function')return;Object.defineProperty(obj,name,{configurable:true,writable:true,value:function(...args){const stream=Reflect.apply(original,this,args);try{const getWriter=stream.getWriter.bind(stream);stream.getWriter=function(){const writer=getWriter(),write=writer.write.bind(writer);writer.write=v=>{record(sink+'.write',v);return write(v)};return writer}}catch(_){};return stream}})}catch(_){}};
 const setter=(obj,name,sink)=>{try{const d=Object.getOwnPropertyDescriptor(obj,name);if(!d||!d.configurable||typeof d.set!=='function')return;Object.defineProperty(obj,name,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){record(sink,v);return Reflect.apply(d.set,this,[v])}})}catch(_){}};
+sourceMethod(URLSearchParams.prototype,'get','URLSearchParams.get');
+sourceMethod(URLSearchParams.prototype,'getAll','URLSearchParams.getAll');
+if(window.Storage)sourceMethod(Storage.prototype,'getItem','Storage.getItem');
+sourceMethod(Document.prototype,'createElement','Document.createElement(tagName)');
 setter(Element.prototype,'innerHTML','Element.innerHTML');
 setter(Element.prototype,'outerHTML','Element.outerHTML');
 if(window.ShadowRoot)setter(ShadowRoot.prototype,'innerHTML','ShadowRoot.innerHTML');
@@ -82,11 +89,14 @@ method(Element.prototype,'insertAdjacentHTML','Element.insertAdjacentHTML',[1]);
 try{const original=Element.prototype.setAttribute;Object.defineProperty(Element.prototype,'setAttribute',{configurable:true,writable:true,value:function(name,value){const n=String(name||'').toLowerCase();if(n.startsWith('on')||['srcdoc','href','xlink:href','action','formaction','src','data'].includes(n))record('Element.setAttribute('+n+')',value);return Reflect.apply(original,this,[name,value])}})}catch(_){};
 method(Element.prototype,'setHTMLUnsafe','Element.setHTMLUnsafe',[0]);
 if(window.ShadowRoot)method(ShadowRoot.prototype,'setHTMLUnsafe','ShadowRoot.setHTMLUnsafe',[0]);
+for(const n of ['replaceWithHTMLUnsafe','beforeHTMLUnsafe','prependHTMLUnsafe','appendHTMLUnsafe','afterHTMLUnsafe'])method(Element.prototype,n,'Element.'+n,[0]);
+for(const n of ['streamHTMLUnsafe','streamReplaceWithHTMLUnsafe','streamBeforeHTMLUnsafe','streamPrependHTMLUnsafe','streamAppendHTMLUnsafe','streamAfterHTMLUnsafe'])streamMethod(Element.prototype,n,'Element.'+n);
 method(Document.prototype,'write','Document.write',[0]);
 method(Document.prototype,'writeln','Document.writeln',[0]);
 if(window.Range)method(Range.prototype,'createContextualFragment','Range.createContextualFragment',[0]);
 method(window,'setTimeout','window.setTimeout',[0]);
 method(window,'setInterval','window.setInterval',[0]);
+try{if(window.trustedTypes&&typeof trustedTypes.createPolicy==='function'){const original=trustedTypes.createPolicy.bind(trustedTypes);trustedTypes.createPolicy=function(name,rules){const wrapped={...rules};if(rules&&typeof rules.createHTML==='function'){const create=rules.createHTML;wrapped.createHTML=function(...args){const out=Reflect.apply(create,this,args),raw=text(out);if(raw.includes(marker)&&!state.sources.includes('TrustedTypes.createHTML('+name+')'))state.sources.push('TrustedTypes.createHTML('+name+')');return out}}return original(name,wrapped)}}}catch(_){};
 }catch(_){}})();`
 }
 
@@ -117,7 +127,7 @@ func installRuntimeDOMInstrumentation(ctx, tab context.Context, marker string) (
 
 func readRuntimeDOMHits(ctx context.Context) []runtimeDOMHit {
 	var hits []runtimeDOMHit
-	expr := `(()=>{const s=window.` + runtimeDOMResultKey + `;return s&&Array.isArray(s.hits)?s.hits:[]})()`
+	expr := `(()=>{const s=window.` + runtimeDOMResultKey + `;return s&&Array.isArray(s.hits)?s.hits.map(h=>({...h,lineage:s.sources||[]})):[]})()`
 	_ = chromedp.Run(ctx, chromedp.Evaluate(expr, &hits))
 	return hits
 }
@@ -132,6 +142,13 @@ func runtimeDOMHitSummary(hits []runtimeDOMHit) string {
 		sink := strings.TrimSpace(hit.Sink)
 		if sink == "" || seen[sink] {
 			continue
+		}
+		for _, step := range hit.Lineage {
+			step = strings.TrimSpace(step)
+			if step != "" && !seen[step] {
+				seen[step] = true
+				parts = append(parts, step)
+			}
 		}
 		seen[sink] = true
 		parts = append(parts, sink)

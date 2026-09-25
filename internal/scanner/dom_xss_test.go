@@ -114,6 +114,11 @@ func TestAnalyzeDOMXSSPropertiesAndFunctionSummaries(t *testing.T) {
 		`const encoded=encodeURIComponent(location.hash);const decoded=decodeURIComponent(encoded);box.innerHTML=decoded;`,
 		`document.execCommand("insertHTML",false,location.hash);`,
 		`host.shadowRoot.setHTMLUnsafe(location.search);`,
+		`box.replaceWithHTMLUnsafe(location.hash);`,
+		`box.appendHTMLUnsafe(location.search);`,
+		`box.streamHTMLUnsafe().getWriter().write(location.hash);`,
+		`const tag=document.createElement(location.hash.slice(1));eval(tag.localName);`,
+		`const saved=localStorage.getItem("draft");box.innerHTML=saved;`,
 	}
 	for _, js := range positives {
 		if hits := analyzeDOMXSS(js, true); len(hits) == 0 {

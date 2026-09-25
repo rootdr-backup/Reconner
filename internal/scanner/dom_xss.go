@@ -41,6 +41,7 @@ var domSourcesHigh = []string{
 var domSourcesLow = []string{
 	"document.referrer", "window.name", "history.state",
 	"navigation.currentEntry.getState",
+	"localStorage.getItem", "sessionStorage.getItem", "document.cookie",
 }
 
 var bareLocationSource = regexp.MustCompile(`(?:^|[^A-Za-z0-9_$\.])location(?:[^A-Za-z0-9_$\.]|$)`)
@@ -92,6 +93,12 @@ var htmlInjectionSinks = []htmlInjectionSink{
 	{"Angular.$sce.trustAsHtml", regexp.MustCompile(`trustAsHtml\s*\(([^;\n)]{1,160})`)},
 	{"Element.srcdoc", regexp.MustCompile(`\.srcdoc\s*=\s*([^;\n]{1,160})`)},
 	{"Element.setHTMLUnsafe", regexp.MustCompile(`\.setHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.replaceWithHTMLUnsafe", regexp.MustCompile(`\.replaceWithHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.beforeHTMLUnsafe", regexp.MustCompile(`\.beforeHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.prependHTMLUnsafe", regexp.MustCompile(`\.prependHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.appendHTMLUnsafe", regexp.MustCompile(`\.appendHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.afterHTMLUnsafe", regexp.MustCompile(`\.afterHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
+	{"Element.streamHTMLUnsafe", regexp.MustCompile(`\.streamHTMLUnsafe\s*\([^)]*\)\.getWriter\s*\(\s*\)\.write\s*\(([^;\n)]{1,220})`)},
 	// setHTML() intentionally sanitizes. setHTMLUnsafe() is the actual injection
 	// primitive and must not be confused with the safe API.
 	{"Document.parseHTMLUnsafe", regexp.MustCompile(`(?:Document\.)?parseHTMLUnsafe\s*\(([^;\n)]{1,160})`)},
@@ -115,6 +122,7 @@ type domXSSHit struct {
 // to avoid masking real flows.
 var domSanitizers = []string{
 	"DOMPurify.sanitize", "Sanitizer.sanitize", "sanitizeFor(",
+	".setHTML(", "Document.parseHTML(",
 	"encodeHTML", "escapeHTML", "htmlEncode", "he.encode(",
 }
 

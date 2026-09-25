@@ -29,6 +29,7 @@ func RunMigrations(db *DB) error {
 		createTasksTable,
 		createTaskLogsTable,
 		createTaskPhasesTable,
+		createBrowserStatesTable,
 		createScreenshotsTable,
 		createMonitoringChangesTable,
 		createNotificationsTable,
@@ -115,6 +116,14 @@ func RunMigrations(db *DB) error {
 		alterTargetsAddOwner,
 		alterTasksAddEta,
 		alterTasksAddModuleEta,
+		alterTaskPhasesAddDiscovered,
+		alterTaskPhasesAddEligible,
+		alterTaskPhasesAddAttempted,
+		alterTaskPhasesAddCandidates,
+		alterTaskPhasesAddConfirmed,
+		alterTaskPhasesAddRejected,
+		alterTaskPhasesAddBlockedCount,
+		alterTaskPhasesAddErrorCount,
 		alterParametersAddLocation,
 		createBountyProgramsTable,
 		createBountyProgramAssetsTable,
@@ -1209,6 +1218,14 @@ CREATE TABLE IF NOT EXISTS task_phases (
 	reason TEXT DEFAULT '',
 	attempt_count INTEGER DEFAULT 0,
 	duration_ms INTEGER DEFAULT 0,
+	discovered_count INTEGER DEFAULT 0,
+	eligible_count INTEGER DEFAULT 0,
+	attempted_count INTEGER DEFAULT 0,
+	candidate_count INTEGER DEFAULT 0,
+	confirmed_count INTEGER DEFAULT 0,
+	rejected_count INTEGER DEFAULT 0,
+	blocked_count INTEGER DEFAULT 0,
+	error_count INTEGER DEFAULT 0,
 	started_at DATETIME,
 	finished_at DATETIME,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1216,6 +1233,32 @@ CREATE TABLE IF NOT EXISTS task_phases (
 	UNIQUE(task_id, phase_index),
 	FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );`
+
+// browser_states is the durable client-side state graph. URL alone is not a
+// sufficient crawl identity for SPAs: same-document interactions can expose a
+// different form and JavaScript surface without changing the path.
+const createBrowserStatesTable = `
+CREATE TABLE IF NOT EXISTS browser_states (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	parent_fingerprint TEXT DEFAULT '',
+	sequence INTEGER DEFAULT 0,
+	source TEXT DEFAULT 'headless',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(target_id, fingerprint),
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
+
+const alterTaskPhasesAddDiscovered = `ALTER TABLE task_phases ADD COLUMN discovered_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddEligible = `ALTER TABLE task_phases ADD COLUMN eligible_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddAttempted = `ALTER TABLE task_phases ADD COLUMN attempted_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddCandidates = `ALTER TABLE task_phases ADD COLUMN candidate_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddConfirmed = `ALTER TABLE task_phases ADD COLUMN confirmed_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddRejected = `ALTER TABLE task_phases ADD COLUMN rejected_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddBlockedCount = `ALTER TABLE task_phases ADD COLUMN blocked_count INTEGER DEFAULT 0;`
+const alterTaskPhasesAddErrorCount = `ALTER TABLE task_phases ADD COLUMN error_count INTEGER DEFAULT 0;`
 
 const createScreenshotsTable = `
 CREATE TABLE IF NOT EXISTS screenshots (

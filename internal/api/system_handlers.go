@@ -526,6 +526,9 @@ func (h *Handler) handleGetTaskPhases(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(), `SELECT id,task_id,phase_index,module,status,
 		COALESCE(reason,''),COALESCE(attempt_count,0),COALESCE(duration_ms,0),
+		COALESCE(discovered_count,0),COALESCE(eligible_count,0),COALESCE(attempted_count,0),
+		COALESCE(candidate_count,0),COALESCE(confirmed_count,0),COALESCE(rejected_count,0),
+		COALESCE(blocked_count,0),COALESCE(error_count,0),
 		started_at,finished_at,created_at,updated_at
 		FROM task_phases WHERE task_id=? ORDER BY phase_index`, id)
 	if err != nil {
@@ -538,7 +541,9 @@ func (h *Handler) handleGetTaskPhases(w http.ResponseWriter, r *http.Request) {
 		var phase models.TaskPhase
 		var startedAt, finishedAt *string
 		if err := rows.Scan(&phase.ID, &phase.TaskID, &phase.PhaseIndex, &phase.Module, &phase.Status,
-			&phase.Reason, &phase.AttemptCount, &phase.DurationMS, &startedAt, &finishedAt,
+			&phase.Reason, &phase.AttemptCount, &phase.DurationMS,
+			&phase.Discovered, &phase.Eligible, &phase.Attempted, &phase.Candidates,
+			&phase.Confirmed, &phase.Rejected, &phase.Blocked, &phase.Errors, &startedAt, &finishedAt,
 			&phase.CreatedAt, &phase.UpdatedAt); err != nil {
 			h.writeError(w, http.StatusInternalServerError, "failed to decode task phases")
 			return

@@ -13,6 +13,12 @@ func TestRuntimeDOMInstrumentationCoversCoreSinks(t *testing.T) {
 		"Element.insertAdjacentHTML",
 		"Element.setAttribute",
 		"Element.setHTMLUnsafe",
+		"replaceWithHTMLUnsafe",
+		"appendHTMLUnsafe",
+		"streamHTMLUnsafe",
+		"URLSearchParams.get",
+		"Storage.getItem",
+		"TrustedTypes.createHTML",
 		"ShadowRoot.setHTMLUnsafe",
 		"Document.write",
 		"Range.createContextualFragment",
@@ -38,11 +44,11 @@ func TestRuntimeDOMInstrumentationCoversCoreSinks(t *testing.T) {
 
 func TestRuntimeDOMHitSummaryDeduplicates(t *testing.T) {
 	hits := []runtimeDOMHit{
-		{Sink: "Element.innerHTML"},
+		{Sink: "Element.innerHTML", Lineage: []string{"URLSearchParams.get"}},
 		{Sink: "Element.innerHTML"},
 		{Sink: "Document.write"},
 	}
-	if got := runtimeDOMHitSummary(hits); got != "Element.innerHTML -> Document.write" {
+	if got := runtimeDOMHitSummary(hits); got != "URLSearchParams.get -> Element.innerHTML -> Document.write" {
 		t.Fatalf("unexpected runtime trace: %q", got)
 	}
 }

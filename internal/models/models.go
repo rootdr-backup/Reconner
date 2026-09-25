@@ -255,6 +255,14 @@ type TaskPhase struct {
 	Reason       string     `json:"reason"`
 	AttemptCount int        `json:"attempt_count"`
 	DurationMS   int64      `json:"duration_ms"`
+	Discovered   int64      `json:"discovered"`
+	Eligible     int64      `json:"eligible"`
+	Attempted    int64      `json:"attempted"`
+	Candidates   int64      `json:"candidates"`
+	Confirmed    int64      `json:"confirmed"`
+	Rejected     int64      `json:"rejected"`
+	Blocked      int64      `json:"blocked"`
+	Errors       int64      `json:"errors"`
 	StartedAt    *time.Time `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at"`
 	CreatedAt    time.Time  `json:"created_at"`

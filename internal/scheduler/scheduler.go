@@ -1578,6 +1578,20 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		})
 	}
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
+		moduleCtx = scanner.WithCoverageReporter(moduleCtx, func(metric scanner.CoverageMetric, delta int64) {
+			column := map[scanner.CoverageMetric]string{
+				scanner.CoverageDiscovered: "discovered_count", scanner.CoverageEligible: "eligible_count",
+				scanner.CoverageAttempted: "attempted_count", scanner.CoverageCandidate: "candidate_count",
+				scanner.CoverageConfirmed: "confirmed_count", scanner.CoverageRejected: "rejected_count",
+				scanner.CoverageBlocked: "blocked_count", scanner.CoverageError: "error_count",
+			}[metric]
+			if column == "" || delta <= 0 {
+				return
+			}
+			// column is selected exclusively from the constant map above; values stay
+			// parameterized. SQLite serializes the small atomic phase-ledger updates.
+			_, _ = s.db.Exec(`UPDATE task_phases SET `+column+`=`+column+`+?,updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=?`, delta, taskID, module)
+		})
 		switch module {
 		case ModuleSubdomainEnum:
 			return runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
@@ -2326,8 +2340,10 @@ func (s *Scheduler) startTaskPhase(taskID, module string) {
 
 func (s *Scheduler) finishTaskPhase(taskID, module, status, reason string, duration time.Duration) {
 	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,duration_ms=?,finished_at=CURRENT_TIMESTAMP,
+		blocked_count=blocked_count+CASE WHEN ?='blocked' THEN 1 ELSE 0 END,
+		error_count=error_count+CASE WHEN ?='failed' THEN 1 ELSE 0 END,
 		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=? AND status IN ('pending','running')`,
-		status, reason, duration.Milliseconds(), taskID, module)
+		status, reason, duration.Milliseconds(), status, status, taskID, module)
 }
 
 func (s *Scheduler) terminalTaskPhaseCount(taskID string) int {
@@ -2338,7 +2354,9 @@ func (s *Scheduler) terminalTaskPhaseCount(taskID string) int {
 
 func (s *Scheduler) finishUnresolvedTaskPhases(taskID, status, reason string) {
 	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,finished_at=CURRENT_TIMESTAMP,
-		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status IN ('pending','running')`, status, reason, taskID)
+		blocked_count=blocked_count+CASE WHEN ?='blocked' THEN 1 ELSE 0 END,
+		error_count=error_count+CASE WHEN ?='failed' THEN 1 ELSE 0 END,
+		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status IN ('pending','running')`, status, reason, status, status, taskID)
 }
 
 func (s *Scheduler) unresolvedTaskPhaseCount(taskID string) int {

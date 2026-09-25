@@ -362,6 +362,14 @@ export interface TaskPhase {
   reason: string
   attempt_count: number
   duration_ms: number
+  discovered: number
+  eligible: number
+  attempted: number
+  candidates: number
+  confirmed: number
+  rejected: number
+  blocked: number
+  errors: number
   started_at: string | null
   finished_at: string | null
   created_at: string

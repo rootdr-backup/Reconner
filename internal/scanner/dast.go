@@ -126,6 +126,8 @@ func (s *DASTScanner) run(ctx context.Context, targetID string, logFn LogFunc, x
 	if xssOnly {
 		points = loadXSSInsertionPoints(ctx, s.db, targetID, pointLimit)
 	}
+	RecordCoverage(ctx, CoverageDiscovered, int64(len(points)))
+	RecordCoverage(ctx, CoverageEligible, int64(len(points)))
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	// Create a per-run headless-browser budget. Params whose reflection is NOT
 	// visible in raw HTML (client-rendered / SPA / DOM sinks) are escalated to a real
@@ -158,6 +160,7 @@ pointLoop:
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			RecordCoverage(ctx, CoverageAttempted, 1)
 			res := s.testPoint(ctx, targetID, ip, auth, xssOnly, browserBudget)
 			atomic.AddInt64(&xssConfirmed, int64(res.xssConfirmed))
 			atomic.AddInt64(&xssRejected, int64(res.xssRejected))

@@ -17,7 +17,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `js_analysis` | Discovery | Live HTTP service | Content-derived observation tied to source asset |
 | `js_endpoints` | Discovery | JavaScript asset | Normalized in-scope endpoint tied to source asset |
 | `param_discovery` | Discovery | Live/crawled surface | Method, location, content type, and sibling values |
-| `headless_crawl` | Discovery | Chromium and HTML seed | Rendered link/form provenance |
+| `headless_crawl` | Discovery | Chromium and HTML seed | Persisted rendered-state graph with link/form, shadow-root, same-origin-frame and safe interaction provenance |
 | `timemachine` | Discovery | Archive service and valid domain | Strict-hostname archived URL provenance |
 | `param_reflection` | Discovery | Parameter inventory | MIME-aware reflected marker |
 | `paramfuzz` | Discovery | Stable live endpoint | Repeatable controlled differential |
@@ -25,7 +25,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `backup_discovery` | Detector | Live HTTP service | Archive/SQL signature or sensitive config-content schema beyond status/path |
 | `open_redirect` | Detector | Routable insertion point | External destination plus encoded/sibling controls |
 | `nuclei` | Detector | Nuclei binary and live target | Parsed template evidence with noise guards |
-| `xss` | Detector | HTML-capable insertion surface | Browser execution with independent marker |
+| `xss` | Detector | HTML-capable insertion surface | Source-to-sink runtime trace followed by browser execution with an independent marker |
 | `vuln_scan` | Detector | Live/parameter surface | Family-specific proof or explicit candidate state |
 | `sqli` | Detector | Routable insertion point | Multi-signal boolean/error/timing proof |
 | `ssrf` | Detector | Insertion point; callback for blind proof | Controlled response or token-attributed callback |

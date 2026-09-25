@@ -3,6 +3,27 @@
 This release adds a proof-gated file-upload vulnerability detector for
 authorized bug-bounty and penetration-testing scopes.
 
+## Measurable coverage and client-state XSS
+
+- Adds durable per-phase counters for discovered, eligible, attempted,
+  candidate, confirmed, rejected, blocked and errored work. The Scan activity
+  ledger exposes the same facts and target exports include them.
+- Persists a bounded browser state graph instead of treating URL as the only
+  crawl identity. The crawler inventories open shadow roots, same-origin frames,
+  forms, tabs, hash navigation and disclosure widgets.
+- Limits automatic interaction to navigation-like controls; it does not click
+  generic buttons or submit forms, preserving the existing safe parallel model.
+- Extends DOM-XSS static and runtime routing across new static/streaming
+  `*HTMLUnsafe` APIs, tag-name-derived JavaScript, browser storage sources and
+  source-to-sink runtime lineage.
+- Keeps the proof boundary unchanged: source/sink traces schedule work, while a
+  fresh nonce executing in Chromium is required for a confirmed XSS.
+- Adds the browser-state graph and phase coverage ledger to portable target
+  research bundles.
+
+Research sources, module-by-module gaps and the staged backlog are documented in
+[`RESEARCH_BACKLOG_2026Q3.md`](RESEARCH_BACKLOG_2026Q3.md).
+
 ## Admin and high-sensitive panel inventory
 
 - Classifies administrative logins and management consoles from strong product,

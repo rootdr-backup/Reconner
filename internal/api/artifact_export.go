@@ -225,6 +225,7 @@ func targetArtifactDatasets(targetID string) []artifactDataset {
 		artifactDataset{Name: "tasks", Query: `SELECT * FROM tasks WHERE target_id=? ORDER BY created_at`, Args: []any{targetID}},
 		artifactDataset{Name: "task_logs", Query: `SELECT l.* FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.target_id=? ORDER BY l.id`, Args: []any{targetID}},
 		artifactDataset{Name: "task_phases", Query: `SELECT p.* FROM task_phases p JOIN tasks t ON t.id=p.task_id WHERE t.target_id=? ORDER BY p.task_id,p.phase_index`, Args: []any{targetID}},
+		artifactDataset{Name: "browser_states", Query: `SELECT * FROM browser_states WHERE target_id=? ORDER BY url,sequence`, Args: []any{targetID}},
 		artifactDataset{Name: "notifications", Query: `SELECT * FROM notifications WHERE target_id=? ORDER BY created_at`, Args: []any{targetID}},
 	)
 	return datasets

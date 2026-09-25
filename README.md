@@ -273,9 +273,19 @@ Reconner's XSS pipeline focuses on **reflected XSS and DOM XSS**. It does not
 run stored-XSS injection as part of the general scan pipeline.
 
 The v3.4 pipeline expands context-selected browser proof across HTML/SVG,
-attribute, JavaScript/template, URL, raw-text and nested `srcdoc` sinks. It stays
-bounded: only vectors appropriate to the observed reflection context are tried,
-and a finding still requires a fresh nonce to execute in Chromium.
+attribute, JavaScript/template, URL, raw-text and nested `srcdoc` sinks. Its
+state-aware crawler inventories same-origin frames, shadow roots, forms, hash
+routes, tabs and disclosure widgets without auto-clicking generic mutation
+buttons. Modern static and streaming `*HTMLUnsafe` APIs, tag-name-derived data,
+storage sources and Trusted Types-adjacent flows feed the browser verifier. It
+stays bounded: only vectors appropriate to the observed context are tried, and
+a finding still requires a fresh nonce to execute in Chromium.
+
+Every task phase now exposes a coverage ledger—discovered, eligible, attempted,
+candidate, confirmed, rejected, blocked and errored counts. These are execution
+facts rather than a claim that an unattempted surface is clean. Rendered browser
+states are persisted in the target export so a scan's client-side reach can be
+reviewed and compared between releases.
 
 Static JavaScript source-to-sink analysis is routing intelligence, not proof. It
 stays internal until Chromium observes a nonce payload execute; only then does a
