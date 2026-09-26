@@ -345,7 +345,7 @@ func (h *Handler) handleListAdminPanels(w http.ResponseWriter, r *http.Request) 
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id,target_id,url,status_code,panel_type,product,title,redirect_url,
 			content_hash,group_key,evidence,created_at
-		FROM admin_panel_findings WHERE target_id=?
+		FROM admin_panel_findings WHERE target_id=? AND status_code NOT BETWEEN 300 AND 399
 		ORDER BY group_key,url`, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")

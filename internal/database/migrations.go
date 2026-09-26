@@ -22,6 +22,7 @@ func RunMigrations(db *DB) error {
 		createParametersTable,
 		createDirectoryFindingsTable,
 		createAdminPanelFindingsTable,
+		deleteUnverifiedAdminPanelRedirects,
 		createBackupFindingsTable,
 		createOpenRedirectFindingsTable,
 		createNucleiFindingsTable,
@@ -1107,6 +1108,11 @@ CREATE TABLE IF NOT EXISTS admin_panel_findings (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
 	UNIQUE(target_id, url)
 );`
+
+// A redirect is routing evidence, not a verified panel. Older builds persisted
+// 301/302 rows before following Location; remove that historical noise once on
+// upgrade. New scans store only the verified final response.
+const deleteUnverifiedAdminPanelRedirects = `DELETE FROM admin_panel_findings WHERE status_code BETWEEN 300 AND 399;`
 
 const createBackupFindingsTable = `
 CREATE TABLE IF NOT EXISTS backup_findings (

@@ -65,6 +65,14 @@ func classifyAdminPanel(rawURL string, status int, title string, body []byte, ex
 	if err != nil {
 		return panelSignature{}, false
 	}
+	// A redirect is routing evidence, not panel evidence. The directory client
+	// follows same-host redirects and passes the final response here; any 3xx
+	// that remains was either cross-host, exceeded the hop limit, or otherwise
+	// could not be verified. Never turn that unresolved Location header (or its
+	// small HTML body) into an admin-panel finding.
+	if status >= 300 && status < 400 {
+		return panelSignature{}, false
+	}
 	path := strings.ToLower(strings.TrimRight(u.Path, "/"))
 	text := strings.ToLower(title + " " + string(body) + " " + extra)
 	for _, p := range panelProducts {
@@ -89,14 +97,11 @@ func classifyAdminPanel(rawURL string, status int, title string, body []byte, ex
 	if status == 401 || status == 403 {
 		return panelSignature{Product: "Restricted interface", PanelType: "admin or restricted panel", Evidence: "admin path with HTTP authentication/authorization response"}, true
 	}
-	if status >= 300 && status < 400 && (strings.Contains(text, "login") || strings.Contains(text, "sign-in") || strings.Contains(text, "signin")) {
-		return panelSignature{Product: "Administrative login", PanelType: "admin login", Evidence: "administrative path redirects to authentication"}, true
-	}
 	adminWords := strings.Contains(text, "admin") || strings.Contains(text, "dashboard") ||
 		strings.Contains(text, "control panel") || strings.Contains(text, "management console")
 	passwordForm := strings.Contains(text, `type="password"`) || strings.Contains(text, `type='password'`) ||
 		(strings.Contains(text, "password") && strings.Contains(text, "<form"))
-	if status >= 200 && status < 400 && adminWords && passwordForm {
+	if status >= 200 && status < 300 && adminWords && passwordForm {
 		return panelSignature{Product: "Administrative login", PanelType: "admin login", Evidence: "admin title/content plus credential form"}, true
 	}
 	return panelSignature{}, false
