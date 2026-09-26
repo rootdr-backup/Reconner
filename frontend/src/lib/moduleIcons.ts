@@ -16,6 +16,7 @@ const MODULE_GROUP: Record<string, Group> = {
   passive: 'analysis', takeover: 'analysis', origin_ip: 'analysis',
   shodan: 'analysis', exposure: 'analysis', intel: 'analysis', verify: 'analysis',
   monitor: 'analysis',
+	network: 'recon', network_nuclei_only: 'inject', network_initial_access: 'inject', network_brute: 'inject',
 }
 
 const MODULE_CODE: Record<string, string> = {
@@ -29,6 +30,7 @@ const MODULE_CODE: Record<string, string> = {
   blh: 'BL', csrf: 'CS',
   passive: 'PA', takeover: 'TK', origin_ip: 'OI', shodan: 'SH', exposure: 'EX',
   intel: 'IN', verify: 'VF', monitor: 'MO',
+	network: 'NW', network_nuclei_only: 'NN', network_initial_access: 'NA', network_brute: 'NB',
 }
 
 export const moduleGroup = (m?: string): Group => (m && MODULE_GROUP[m]) || 'analysis'

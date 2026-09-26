@@ -52,6 +52,9 @@ func normalizeAssetValue(raw string) (string, error) {
 	if _, network, err := net.ParseCIDR(v); err == nil {
 		return network.String(), nil
 	}
+	if normalized, err := scanner.NormalizeNetworkScope(v); err == nil && strings.Contains(normalized, "-") {
+		return normalized, nil
+	}
 	if strings.ContainsAny(v, "/?#") && !strings.HasPrefix(v, "*.") {
 		// A path/query without a scheme is ambiguous and was previously mangled
 		// into a fake hostname. Require an explicit URL instead.
@@ -70,6 +73,9 @@ func detectAssetKind(value string) (kind, netScope string, webHosts []string) {
 	}
 	if _, network, err := net.ParseCIDR(strings.TrimSpace(value)); err == nil {
 		return "network", network.String(), nil
+	}
+	if normalized, err := scanner.NormalizeNetworkScope(value); err == nil && strings.Contains(normalized, "-") {
+		return "network", normalized, nil
 	}
 	webHosts, netScope = scanner.SplitScope(value)
 	switch {
@@ -147,10 +153,6 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind, _, _ := detectAssetKind(value)
-	if kind != "web" {
-		h.writeError(w, http.StatusBadRequest, "network/CIDR assets are unavailable in this build; add a web domain or URL")
-		return
-	}
 	assetType := normalizeManualAssetType(req.AssetType, value, kind)
 	aid := uuid.New().String()
 	if _, err := h.db.Exec(
@@ -239,10 +241,6 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 		value, valueChanged = v, v != existing
 	}
 	kind, _, _ = detectAssetKind(value)
-	if kind != "web" {
-		h.writeError(w, http.StatusBadRequest, "network/CIDR assets are unavailable in this build; use a web domain or URL")
-		return
-	}
 	if req.AssetType != nil {
 		assetType = *req.AssetType
 	}

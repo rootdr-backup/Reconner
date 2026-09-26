@@ -399,10 +399,10 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
           <div>
             <label className="label" htmlFor="project-assets">Initial assets *</label>
             <textarea id="project-assets" className="input resize-none font-mono text-xs" rows={5}
-              placeholder={"One asset per line — domains, URLs/pages, JS files, or an IP-hosted URL:\nexample.com\nhttps://app.example.com/account\nhttps://cdn.example.com/app.js\nhttp://192.0.2.10"}
+							placeholder={"One asset per line — domains, URLs/pages, JS files, IP, CIDR, or IP range:\nexample.com\nhttps://app.example.com/account\n192.168.1.10\n192.168.1.0/24\n192.168.1.1-192.168.1.10"}
               value={form.domain} onChange={e => setForm({ ...form, domain: e.target.value })} />
             <p className="text-[10px] text-text-muted mt-1">
-              Reconner creates individually manageable web assets. A full URL stays a page seed and a <span className="font-mono">.js</span> URL stays a JavaScript seed. CIDR/network scanning is not supported in this stability release.
+							Reconner creates individually manageable web and network assets. A full URL stays a page seed; network assets accept a single IP, CIDR, or inclusive range such as <span className="font-mono">192.168.1.1-192.168.1.10</span>. Network modules appear only after choosing Network Scan.
             </p>
           </div>
           <div>

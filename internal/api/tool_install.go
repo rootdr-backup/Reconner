@@ -45,6 +45,7 @@ var toolCatalog = map[string]toolSpec{
 	"dnsx":        {methodGo, "github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1", "https://github.com/projectdiscovery/dnsx", ""},
 	"alterx":      {methodGo, "github.com/projectdiscovery/alterx/cmd/alterx@v0.1.0", "https://github.com/projectdiscovery/alterx", ""},
 	"asnmap":      {methodGo, "github.com/projectdiscovery/asnmap/cmd/asnmap@v1.1.1", "https://github.com/projectdiscovery/asnmap", ""},
+	"naabu":       {methodGo, "github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.6.1", "https://github.com/projectdiscovery/naabu", "Uses TCP connect mode by default in Reconner."},
 	"shuffledns":  {methodGo, "github.com/projectdiscovery/shuffledns/cmd/shuffledns@v1.2.1", "https://github.com/projectdiscovery/shuffledns", "Also needs massdns on PATH."},
 	"gau":         {methodGo, "github.com/lc/gau/v2/cmd/gau@v2.2.4", "https://github.com/lc/gau", ""},
 	"waybackurls": {methodGo, "github.com/tomnomnom/waybackurls@v0.1.0", "https://github.com/tomnomnom/waybackurls", ""},
@@ -62,6 +63,7 @@ var toolCatalog = map[string]toolSpec{
 	// ── apt (needs root — command shown, not auto-run) ──
 	"sqlmap":  {methodApt, "sqlmap", "https://github.com/sqlmapproject/sqlmap", "Or: pip install --user sqlmap-dev / git clone."},
 	"python3": {methodApt, "python3", "https://www.python.org", ""},
+	"nmap":    {methodApt, "nmap", "https://nmap.org", "Service detection works unprivileged; OS detection also needs NET_RAW/NET_ADMIN."},
 
 	// ── manual (prebuilt binary / distro-specific) ──
 	"findomain":   {methodManual, "", "https://github.com/Findomain/Findomain/releases", "Download the prebuilt binary and put it on PATH."},

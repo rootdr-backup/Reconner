@@ -220,7 +220,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		Tags          []string          `json:"tags"`
 		Priority      string            `json:"priority"`
 		Notes         string            `json:"notes"`
-		Kind          string            `json:"kind"`          // web; legacy network/mixed values are read-only
+		Kind          string            `json:"kind"`          // web, network, or mixed
 		ExcludeScope  string            `json:"exclude_scope"` // out-of-scope hosts/IPs/CIDRs/URLs
 		ScanUserAgent string            `json:"scan_user_agent"`
 		ScanHeaders   map[string]string `json:"scan_headers"`
@@ -243,20 +243,19 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	normalizedScope := strings.Join(scopeValues, ",")
 
-	// A URL whose host is an IP remains a supported web endpoint. Bare IP/CIDR
-	// execution has no v3 executor, so new network/mixed inventory is rejected
-	// instead of creating a project that can never run. Existing legacy rows are
-	// still readable and exportable after upgrade.
+	// A URL whose host is an IP remains a web endpoint. Bare IP/CIDR/range assets
+	// use the explicit network pipeline; mixed projects are scanned per asset so
+	// web and network execution can never be enabled accidentally together.
 	requestedKind := strings.ToLower(strings.TrimSpace(req.Kind))
 	if requestedKind != "" && requestedKind != "web" && requestedKind != "network" && requestedKind != "mixed" {
 		h.writeError(w, http.StatusBadRequest, "kind must be web, network, or mixed")
 		return
 	}
-	if requestedKind == "network" || requestedKind == "mixed" || classifyProjectScope(scopeValues) != "web" {
-		h.writeError(w, http.StatusBadRequest, "network/CIDR targets are unavailable in this build; add web domains or URLs only")
+	kind := classifyProjectScope(scopeValues)
+	if requestedKind != "" && requestedKind != kind && !(requestedKind == "mixed" && kind == "mixed") {
+		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("scope is %s, not %s", kind, requestedKind))
 		return
 	}
-	kind := "web"
 
 	// Preserve endpoint paths and query strings. Managed assets are authoritative,
 	// and collapsing https://host/path into the invalid host/path form silently
@@ -326,10 +325,11 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleNetworkServices(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT ip, port, protocol, service, product, version, banner,
-		       is_web, web_url, web_title, web_status, tls
-		FROM network_services WHERE target_id = ?
-		ORDER BY ip, port`, id)
+		SELECT ns.ip, ns.port, ns.protocol, ns.service, ns.product, ns.version, ns.banner,
+		       ns.is_web, ns.web_url, ns.web_title, ns.web_status, ns.tls,
+		       COALESCE(nh.os_guess,''),COALESCE(nh.rdns,'')
+		FROM network_services ns LEFT JOIN network_hosts nh ON nh.target_id=ns.target_id AND nh.ip=ns.ip
+		WHERE ns.target_id = ? ORDER BY ns.ip, ns.port`, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to query network services")
 		return
@@ -348,13 +348,15 @@ func (h *Handler) handleNetworkServices(w http.ResponseWriter, r *http.Request) 
 		WebTitle string `json:"web_title"`
 		WebfStat int    `json:"web_status"`
 		TLS      bool   `json:"tls"`
+		OSGuess  string `json:"os_guess"`
+		RDNS     string `json:"rdns"`
 	}
 	out := make([]svc, 0)
 	for rows.Next() {
 		var s svc
 		var isWeb, tlsi int
 		if rows.Scan(&s.IP, &s.Port, &s.Protocol, &s.Service, &s.Product, &s.Version,
-			&s.Banner, &isWeb, &s.WebURL, &s.WebTitle, &s.WebfStat, &tlsi) == nil {
+			&s.Banner, &isWeb, &s.WebURL, &s.WebTitle, &s.WebfStat, &tlsi, &s.OSGuess, &s.RDNS) == nil {
 			s.IsWeb = isWeb == 1
 			s.TLS = tlsi == 1
 			out = append(out, s)
@@ -496,10 +498,6 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		kind = classifyProjectScope(scopeValues)
-		if kind != "web" {
-			h.writeError(w, http.StatusBadRequest, "network/CIDR targets are unavailable in this build; use web domains or URLs only")
-			return
-		}
 		domain = strings.Join(scopeValues, ",")
 	}
 

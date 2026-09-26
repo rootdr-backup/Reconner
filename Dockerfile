@@ -8,20 +8,20 @@
 # every one of them is built or downloaded HERE, at image-build time, and
 # copied into a slim runtime. No tool is ever installed at container startup.
 #
-# Stages (produce exactly the 23 required external commands, audited against
+# Stages (produce exactly the 25 required external commands, audited against
 # internal/scheduler/scheduler.go's expectedTools + internal/api/tool_install.go,
 # plus headless Chromium and git as runtime dependencies):
 #   1. frontend   — React/Vite dashboard                       → frontend/dist
-#   2. gotools    — 15 pinned Go-based recon tools             → /out/*
+#   2. gotools    — 16 pinned Go-based recon tools             → /out/*
 #   3. massdns    — massdns (1) compiled from source            → /out/massdns
 #   4. external   — feroxbuster + findomain (2) official releases → /out/*
 #   5. pytools    — dirsearch/uro/waymore (3) in a self-contained venv → /opt/venv
 #   6. backend    — Reconner Go binary (CGO + embedded SQLite)  → /out/reconner
-#   7. runtime    — slim Debian + sqlmap/python3 (2, via apt) +
+#   7. runtime    — slim Debian + sqlmap/python3/nmap (3, via apt) +
 #                   Chromium + every tool above, finished with a hard
 #                   build-time verification of the PATH.
-#                   15 (Go) + 1 (massdns) + 2 (releases) + 3 (venv) + 2 (apt)
-#                   = 23 required tools. Chromium and git are bundled in
+#                   16 (Go) + 1 (massdns) + 2 (releases) + 3 (venv) + 3 (apt)
+#                   = 25 required tools. Chromium and git are bundled in
 #                   addition to, not counted within those 23 — git specifically
 #                   because internal/scanner/nuclei.go gates its own official-
 #                   template auto-provisioning on `IsToolAvailable("git")`;
@@ -102,6 +102,9 @@ RUN build-hardened-go-tool github.com/projectdiscovery/alterx ${ALTERX_VERSION} 
 ARG ASNMAP_VERSION=v1.1.1
 RUN build-hardened-go-tool github.com/projectdiscovery/asnmap ${ASNMAP_VERSION} ./cmd/asnmap asnmap
 
+ARG NAABU_VERSION=v2.6.1
+RUN build-hardened-go-tool github.com/projectdiscovery/naabu/v2 ${NAABU_VERSION} ./cmd/naabu naabu
+
 ARG SHUFFLEDNS_VERSION=v1.2.1
 RUN build-hardened-go-tool github.com/projectdiscovery/shuffledns ${SHUFFLEDNS_VERSION} ./cmd/shuffledns shuffledns
 
@@ -129,14 +132,14 @@ RUN build-hardened-go-tool github.com/edoardottt/scilla ${SCILLA_VERSION} ./cmd/
 # Sanity check: every binary we expect actually landed in /out. Fails loud and
 # early instead of silently shipping a partial tool-chain.
 RUN set -eu; \
-    for t in subfinder httpx nuclei katana dnsx alterx asnmap shuffledns gau \
+    for t in subfinder httpx nuclei katana dnsx alterx asnmap naabu shuffledns gau \
              waybackurls assetfinder hakrawler subzy puredns scilla; do \
       if [ ! -x "/out/$t" ]; then \
         echo "BUILD FAILURE: /out/$t was not produced by go install" >&2; \
         exit 1; \
       fi; \
     done; \
-    echo "gotools: all 15 pinned Go binaries present in /out"
+    echo "gotools: all 16 pinned Go binaries present in /out"
 
 # ── stage 3: massdns (built from source — not packaged for Debian bookworm) ──
 # Root cause of the earlier `fatal error: stdint.h: No such file or directory`:
@@ -313,6 +316,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       chromium \
+      nmap \
+      libcap2-bin \
       sqlmap \
       python3 \
       git \
@@ -320,6 +325,11 @@ RUN apt-get update \
       gosu \
       tini \
  && rm -rf /var/lib/apt/lists/*
+
+# Reconner itself remains unprivileged. Only nmap receives the two narrow
+# packet capabilities required by -O; discovery still uses TCP connect mode,
+# not privileged SYN scanning.
+RUN setcap cap_net_raw,cap_net_admin+eip /usr/bin/nmap
 
 # Fixed, unprivileged runtime identity. The writable home is intentional:
 # Chromium and several recon tools persist harmless caches/config beneath it.
@@ -377,14 +387,14 @@ ENV HOME=/home/reconner \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN gosu reconner:reconner sh -c 'set -eu; \
-    echo "==> verifying all 23 required tools, plus Chromium and git, are on PATH"; \
+    echo "==> verifying all 25 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
-      subfinder httpx nuclei katana dnsx alterx asnmap shuffledns \
+      subfinder httpx nuclei katana dnsx alterx asnmap naabu shuffledns \
       gau waybackurls assetfinder hakrawler subzy puredns scilla \
       dirsearch feroxbuster findomain sqlmap uro waymore \
       massdns python3 \
-      chromium git \
+      chromium git nmap \
     ; do \
       if ! command -v "$t" >/dev/null 2>&1; then \
         MISSING="${MISSING} $t"; \
@@ -403,6 +413,8 @@ RUN gosu reconner:reconner sh -c 'set -eu; \
     findomain --version; \
     sqlmap --version; \
     nuclei -version; \
+    naabu -version; \
+    nmap --version | head -1; \
     httpx -version; \
     subfinder -version; \
     katana -version; \

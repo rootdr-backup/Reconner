@@ -22,6 +22,12 @@ services:
     # The entrypoint uses root only for the one-time ownership migration of
     # pre-v3 volumes, then drops permanently to uid/gid 10001 before startup.
     user: "0:0"
+    # nmap OS fingerprinting runs after the entrypoint drops to uid 10001. The
+    # binary has matching file capabilities; keep them in the container's
+    # bounding set without granting broad host access.
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
     # Bound the entire container, including Chromium and external scanner child
     # processes. Override these in .env for the host sizes documented in
     # README.Docker.md; Go's internal memory budget auto-detects this cgroup.

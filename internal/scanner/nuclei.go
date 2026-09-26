@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -295,6 +297,56 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 
 	logFn("info", "nuclei", fmt.Sprintf("Nuclei scan complete. Found %d vulnerabilities.", findingCount.Load()))
 	return nil
+}
+
+// RunNetwork feeds the already-verified open service inventory to nuclei's
+// network/TCP templates. It is separate from Run so selecting web nuclei never
+// expands into a port scan and selecting network nuclei never re-crawls the web.
+func (s *NucleiScanner) RunNetwork(ctx context.Context, targetID, rawScope string, logFn LogFunc) error {
+	if s.exec == nil || !s.exec.IsToolAvailable("nuclei") {
+		return BlockedPhase("nuclei binary is unavailable")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT ip,port FROM network_services WHERE target_id=? ORDER BY ip,port`, targetID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var targets []string
+	allowed, err := networkScopeSet(rawScope)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ip string
+		var port int
+		if rows.Scan(&ip, &port) == nil && allowed[ip] {
+			targets = append(targets, net.JoinHostPort(ip, strconv.Itoa(port)))
+		}
+	}
+	if len(targets) == 0 {
+		return BlockedPhase("no verified open network services for nuclei")
+	}
+	conc, bulk, rate := 100, 80, 300
+	if s.cfg != nil {
+		if s.cfg.Workers.Nuclei > conc {
+			conc = s.cfg.Workers.Nuclei
+		}
+		if s.cfg.NucleiBulkSize > 0 {
+			bulk = s.cfg.NucleiBulkSize
+		}
+		if s.cfg.Limits.HTTPRateLimit > rate {
+			rate = s.cfg.Limits.HTTPRateLimit
+		}
+	}
+	packDir := ""
+	if s.cfg != nil {
+		packDir = materializeReconnerTemplates(s.cfg.DataDir)
+	}
+	var findings atomic.Int64
+	var warned atomic.Bool
+	s.runNucleiProcess(ctx, targetID, targets, []string{"medium", "high", "critical"}, []string{"network", "ssl"}, conc, bulk, rate, packDir, &findings, &warned, logFn)
+	logFn("info", "network_nuclei_only", fmt.Sprintf("Network nuclei complete. Found %d result(s).", findings.Load()))
+	return ctx.Err()
 }
 
 // regroupIntoChunks splits items into at most maxChunks roughly-equal groups,

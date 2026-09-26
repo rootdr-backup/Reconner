@@ -32,7 +32,7 @@ func TestExecuteTaskFinishesOnlyWithTerminalPhaseLedger(t *testing.T) {
 	}
 }
 
-func TestLegacyUnsupportedModuleCannotFinishGreen(t *testing.T) {
+func TestNetworkModuleHasRealTerminalPhase(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets(id,domain,kind) VALUES('legacy-network-target','10.0.0.1','network')`); err != nil {
 		t.Fatal(err)
@@ -55,11 +55,11 @@ func TestLegacyUnsupportedModuleCannotFinishGreen(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT status,reason FROM task_phases WHERE task_id='legacy-network-task'`).Scan(&phaseStatus, &phaseReason); err != nil {
 		t.Fatal(err)
 	}
-	if taskStatus != "failed" || phaseStatus != "failed" {
-		t.Fatalf("phantom module task=%q phase=%q, want failed/failed", taskStatus, phaseStatus)
+	if taskStatus != "finished" || phaseStatus != "completed" {
+		t.Fatalf("network module task=%q phase=%q, want finished/completed", taskStatus, phaseStatus)
 	}
-	if !strings.Contains(taskError, "invalid module selection") || !strings.Contains(phaseReason, "invalid module selection") {
-		t.Fatalf("failure reason was not explicit: task=%q phase=%q", taskError, phaseReason)
+	if taskError != "" || phaseReason != "" {
+		t.Fatalf("unexpected network phase error: task=%q phase=%q", taskError, phaseReason)
 	}
 }
 

@@ -364,6 +364,11 @@ path-only responses are excluded. The target's orange finding total now counts
 only actionable medium, high and critical issues (plus verified open redirects),
 not low/info inventory rows.
 
+Admin-panel redirects are never treated as findings by status alone. Reconner
+follows bounded same-host redirects, fingerprints the final response and stores
+only a verified 2xx login/console or an evidence-backed 401/403 interface. Old
+301/302-only rows are removed automatically during the database migration.
+
 Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
 bounded Range validation, and retains the complete generic corpus behind those
 high-signal candidates. SQLi timing requires a successful sample quorum and
@@ -427,12 +432,30 @@ Available commands include `/status`, `/targets`, `/target`, `/scans`,
 
 ## Network targets
 
-Direct IP/CIDR/range execution is intentionally unavailable in this release.
-Legacy network projects remain readable and exportable. Both the API and scan
-planner fail closed with a clear unsupported-capability error, so no empty or
-successful-looking phantom scan can be created.
+Network scanning is an explicit profile inside the ordinary project/asset scan
+dialog; it does not add another sidebar section and it never runs as a side
+effect of a web profile. Network assets accept a single IP, CIDR, or inclusive
+range (`192.168.1.1-192.168.1.10`). Mixed projects are scanned one asset at a
+time so web and network modules cannot be accidentally combined.
 
-The frozen prerequisite and proof surface for all 43 supported modules is in
+- **Network fast** uses Naabu TCP-connect discovery over a curated set of
+  high-signal ports (SSH, FTP, Telnet, HTTP/S, SMB, RDP, databases, containers
+  and common admin consoles).
+- **Network normal** covers Naabu's top 1000 ports; **deep** covers all TCP
+  ports. ICMP is never a liveness gate, avoiding missed hosts that drop ping.
+- Nmap fingerprints only verified open ports (`-sV`) and performs bounded OS
+  detection when the runtime capabilities are available. Native TCP/banner and
+  service hints remain as a bounded fallback for small scopes.
+- Recognised CDN/WAF edges and configured out-of-scope IPs/CIDRs are removed
+  before any port request. Nuclei receives only verified services and its
+  network/TCP template families.
+- 401/403 verification reuses Reconner's stable-control bypass engine on
+  discovered web services. HTTP Basic credential auditing is a separate,
+  explicit opt-in: it requires a real Basic challenge, is rate-limited, stops
+  on lockout/429 responses and requires two identical success replays. Its
+  usernames and top-1000 password corpus are managed under Settings → Corpora.
+
+The frozen prerequisite and proof surface for all 43 supported web modules is in
 [the v3 capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
 ## Toolchain
@@ -442,16 +465,18 @@ published:
 
 | Area | Bundled tools |
 |---|---|
-| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, scilla |
+| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, scilla, naabu |
 | DNS | dnsx, massdns, puredns, shuffledns |
 | HTTP/crawling | httpx, katana, hakrawler, gau, waybackurls, waymore, uro |
 | Content | dirsearch, feroxbuster |
-| Detection | nuclei, subzy, sqlmap |
+| Detection | nuclei, subzy, sqlmap, nmap |
 | Runtime | Chromium, Python 3 and git |
 
-The container receives no `NET_RAW` or `NET_ADMIN` capability. Tool versions
-and downloaded release checksums are pinned so rebuilds cannot silently change
-the scanner stack.
+Compose keeps `NET_RAW` and `NET_ADMIN` in the container capability bounding set
+only for Nmap OS fingerprinting; the Reconner service still runs as uid 10001,
+Naabu uses TCP connect mode, and Nmap alone has matching file capabilities.
+Remove `cap_add` to disable OS fingerprinting while retaining port and service
+discovery. Tool versions and downloaded release checksums are pinned.
 
 ## Configuration
 

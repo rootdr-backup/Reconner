@@ -29,6 +29,12 @@ type AssetLite = { id: string; value: string; kind: string; name: string }
 interface Props { target: Target; asset?: AssetLite; open: boolean; onClose: () => void; onStarted?: () => void }
 
 export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) => {
+	const scopeKind = asset?.kind || target.kind || 'web'
+	const networkCapable = scopeKind === 'network' || (scopeKind === 'mixed' && !!asset)
+	const networkOnly = scopeKind === 'network'
+	const [networkMode, setNetworkMode] = useState(networkOnly)
+	const [networkProfile, setNetworkProfile] = useState<'fast' | 'normal' | 'deep'>('fast')
+	const [networkModules, setNetworkModules] = useState<Set<string>>(new Set(['network']))
   const [selected, setSelected] = useState<Set<string>>(
     new Set(SAFE_PROFILE)
   )
@@ -99,26 +105,58 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     setSingleEndpoint(true)
     setAuthCookie('')
     setAuthBearer('')
+		setNetworkMode(networkOnly)
+		setNetworkProfile('fast')
+		setNetworkModules(new Set(['network']))
     targetsApi.identities(target.id).then(r => setIdCount(r.length)).catch(() => setIdCount(0))
-  }, [open, target.id])
+  }, [open, target.id, networkOnly])
   const idorSelected = planned.has('idor')
   const idorReady = !idorSelected || idCount >= 2 || (idorA.trim() !== '' && idorB.trim() !== '')
 
-  const legacyNetworkScope = asset
-    ? asset.kind === 'network' || asset.kind === 'mixed'
-    : target.kind === 'network' || target.kind === 'mixed'
-  if (legacyNetworkScope) {
+	if (scopeKind === 'mixed' && !asset) {
+		return <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="md"><div className="space-y-4"><div className="rounded-xl border border-accent/30 bg-accent/[.06] p-4"><p className="text-sm font-semibold text-text-primary">Choose one asset to scan</p><p className="mt-2 text-xs leading-5 text-text-secondary">This project contains both web and network scope. Start the scan from an individual asset below so Reconner can show exactly the compatible web or network pipeline and never mix them accidentally.</p></div><div className="flex justify-end"><Button variant="ghost" onClick={onClose}>Close</Button></div></div></Modal>
+	}
+
+  if (networkMode) {
+		const networkDefs = [
+			{ id: 'network', label: 'Port, service & OS discovery', desc: 'TCP connect discovery, banner grabbing, nmap service fingerprint and opportunistic OS detection.' },
+			{ id: 'network_nuclei_only', label: 'Service-aware nuclei', desc: 'Run network/TCP templates only against verified open services.' },
+			{ id: 'network_initial_access', label: '401/403 verification', desc: 'Run the existing proof-gated authorization bypass checks against discovered web services.' },
+			{ id: 'network_brute', label: 'HTTP Basic credential audit', desc: 'Explicit, rate-limited top-1000 password check. Stops on lockout/rate limiting.' },
+		]
+		const applyNetworkProfile = (profile: 'fast' | 'normal' | 'deep') => {
+			setNetworkProfile(profile)
+			setNetworkModules(new Set(profile === 'fast' ? ['network'] : profile === 'normal'
+				? ['network', 'network_nuclei_only', 'network_initial_access']
+				: ['network', 'network_nuclei_only', 'network_initial_access', 'network_brute']))
+		}
+		const startNetwork = async () => {
+			setLoading(true)
+			try {
+				const modules = networkDefs.filter(module => networkModules.has(module.id)).map(module => module.id)
+				if (!modules.includes('network')) modules.unshift('network')
+				modules.push(`network_${networkProfile}`)
+				await startModules(modules)
+				addToast('success', `Network scan started for ${label}`)
+				onClose(); onStarted?.()
+			} catch (e: unknown) {
+				addToast('error', e instanceof Error ? e.message : 'Failed to start network scan')
+			} finally { setLoading(false) }
+		}
     return (
-      <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="md">
-        <div className="space-y-4">
-          <div className="rounded-xl border border-severity-high/35 bg-severity-high/[.07] p-4">
-            <p className="text-sm font-semibold text-severity-high">Network execution is unavailable in this build</p>
-            <p className="mt-2 text-xs leading-5 text-text-secondary">
-              This legacy project is kept for viewing and export, but Reconner will not create a successful-looking scan that performs no network work. Scan an individual web asset instead; network discovery will return only when it has a tested executor and phase coverage.
-            </p>
-          </div>
-          <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>Close</Button></div>
-        </div>
+      <Modal open={open} onClose={onClose} title={`Scan — ${label}`} width="xl" footer={
+			<div className="flex items-center justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={loading} onClick={startNetwork}>▶ Start Network Scan</Button></div>
+		}>
+			<div className="space-y-5">
+				<div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+					{!networkOnly && <button type="button" onClick={() => setNetworkMode(false)} className="rounded-lg border border-border px-3 py-2 text-left"><span className="block text-xs font-semibold">Web scan</span><span className="text-[10px] text-text-muted">Application pipeline</span></button>}
+					{(['fast','normal','deep'] as const).map(profile => <button key={profile} type="button" onClick={() => applyNetworkProfile(profile)} className={cn('rounded-lg border px-3 py-2 text-left',networkProfile===profile?'border-accent bg-accent-muted text-accent':'border-border text-text-secondary')}><span className="block text-xs font-semibold capitalize">Network {profile}</span><span className="text-[10px] text-text-muted">{profile==='fast'?'Important ports':profile==='normal'?'Top 1000 + validation':'All TCP ports + validation'}</span></button>)}
+				</div>
+				<div className="rounded-xl border border-severity-high/25 bg-severity-high/[.05] p-3 text-[11px] leading-5 text-text-secondary">Runs only because Network Scan was explicitly selected. Recognised CDN/WAF edge IPs are excluded before probing. ICMP is recorded only as a hint and never suppresses TCP discovery.</div>
+				<div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+					{networkDefs.map(module => { const required=module.id==='network'; const on=required||networkModules.has(module.id); return <button key={module.id} type="button" disabled={required} onClick={() => setNetworkModules(previous => { const next=new Set(previous); next.has(module.id)?next.delete(module.id):next.add(module.id); return next })} className={cn('rounded-xl border p-3 text-left',on?'border-accent/40 bg-accent/[.1]':'border-border bg-white/[.02]')}><span className="block text-xs font-semibold text-text-primary">{module.label}{required?' · required':''}</span><span className="mt-1 block text-[10px] leading-4 text-text-muted">{module.desc}</span></button> })}
+				</div>
+			</div>
       </Modal>
     )
   }
@@ -233,6 +271,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
                 <span className="text-[10px] text-text-muted">{p.sub}</span>
               </button>
             ))}
+					{networkCapable && <button type="button" onClick={() => setNetworkMode(true)} className="flex flex-col items-start px-3 py-2 rounded-lg border border-border text-left text-text-secondary hover:text-text-primary hover:border-border-strong"><span className="text-xs font-semibold">Network Scan</span><span className="text-[10px] text-text-muted">Ports, banners &amp; services</span></button>}
           </div>
         </div>
 

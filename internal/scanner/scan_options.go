@@ -7,6 +7,34 @@ import (
 	"strings"
 )
 
+type NetworkProfile string
+
+const (
+	NetworkFast   NetworkProfile = "fast"
+	NetworkNormal NetworkProfile = "normal"
+	NetworkDeep   NetworkProfile = "deep"
+)
+
+type networkProfileKey string
+
+const ctxNetworkProfile networkProfileKey = "network_profile"
+
+func WithNetworkProfile(ctx context.Context, profile NetworkProfile) context.Context {
+	switch profile {
+	case NetworkFast, NetworkNormal, NetworkDeep:
+		return context.WithValue(ctx, ctxNetworkProfile, profile)
+	default:
+		return context.WithValue(ctx, ctxNetworkProfile, NetworkNormal)
+	}
+}
+
+func networkProfileFromContext(ctx context.Context) NetworkProfile {
+	if value, ok := ctx.Value(ctxNetworkProfile).(NetworkProfile); ok {
+		return value
+	}
+	return NetworkNormal
+}
+
 // Per-scan toggles carried on the scan context (set by the scheduler from the
 // scan request's pseudo-modules, the same channel as the speed profile). Each
 // defaults to the historical behaviour when unset, so an older client that sends

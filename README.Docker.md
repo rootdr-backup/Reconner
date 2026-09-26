@@ -87,8 +87,10 @@ table. Do not set `limits.max_memory_mb` above the Compose memory limit.
 - **Port**: the app always listens on `8080` inside the container. Publish it on
   a different host port by setting `HOST_PORT` in `.env` (the mapping is
   `HOST_PORT:8080`).
-- **Port/service scans**: `naabu`/`nmap` SYN scans need `NET_RAW`/`NET_ADMIN`,
-  which the compose file grants. Remove `cap_add` if you only run web-app scans.
+- **Port/service scans**: Naabu always uses unprivileged TCP-connect discovery.
+  Compose retains `NET_RAW`/`NET_ADMIN` only for the file-capability-scoped Nmap
+  OS fingerprint step; remove `cap_add` to disable OS detection while keeping
+  port, banner and service discovery.
 - **Headless Chromium**: bundled and auto-detected (`RECONNER_CHROME=/usr/bin/chromium`);
   it runs `--no-sandbox` (already handled in code) and gets `shm_size: 512m`.
 - **First-run nuclei templates**: provisioned automatically on the first scan;

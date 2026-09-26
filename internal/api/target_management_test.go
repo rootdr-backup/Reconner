@@ -131,27 +131,33 @@ func TestDeleteTargetRemovesNonFKLifecycleRows(t *testing.T) {
 	}
 }
 
-func TestWebAPIMutationsRejectUnsupportedNetworkScopesAtomically(t *testing.T) {
+func TestAPIMutationsAcceptNetworkScopesAndRejectKindMasquerade(t *testing.T) {
 	h, adminID := newIsoHandler(t)
 	h.hub = websocket.NewHub()
 
 	for _, body := range []string{
 		`{"domain":"192.0.2.0/24","name":"cidr"}`,
 		`{"domain":"example.org,192.0.2.1","name":"mixed"}`,
-		`{"domain":"example.org","kind":"network","name":"masquerade"}`,
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/targets", bytes.NewBufferString(body))
 		req = req.WithContext(context.WithValue(req.Context(), ctxUserIDKey, adminID))
 		rec := httptest.NewRecorder()
 		h.handleCreateTarget(rec, req)
-		if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte("network/CIDR")) {
+		if rec.Code != http.StatusCreated {
 			t.Errorf("network create status=%d body=%s", rec.Code, rec.Body.String())
 		}
 	}
+	req := httptest.NewRequest(http.MethodPost, "/api/targets", bytes.NewBufferString(`{"domain":"example.org","kind":"network","name":"masquerade"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserIDKey, adminID))
+	rec := httptest.NewRecorder()
+	h.handleCreateTarget(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("kind masquerade status=%d body=%s", rec.Code, rec.Body.String())
+	}
 	var count int
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM targets`).Scan(&count)
-	if count != 0 {
-		t.Fatalf("rejected creates persisted %d target(s)", count)
+	if count != 2 {
+		t.Fatalf("persisted targets=%d, want CIDR and mixed only", count)
 	}
 
 	if _, err := h.db.Exec(`INSERT INTO targets(id,domain,name,kind,owner_id) VALUES('web-target','example.org','original','web',?)`, adminID); err != nil {
@@ -164,25 +170,28 @@ func TestWebAPIMutationsRejectUnsupportedNetworkScopesAtomically(t *testing.T) {
 	updateReq = mux.SetURLVars(updateReq, map[string]string{"id": "web-target"})
 	updateRec := httptest.NewRecorder()
 	h.handleUpdateTarget(updateRec, updateReq)
-	if updateRec.Code != http.StatusBadRequest {
+	if updateRec.Code != http.StatusOK {
 		t.Fatalf("network update status=%d body=%s", updateRec.Code, updateRec.Body.String())
 	}
 	var domain, name string
 	_ = h.db.QueryRow(`SELECT domain,name FROM targets WHERE id='web-target'`).Scan(&domain, &name)
-	if domain != "example.org" || name != "original" {
-		t.Fatalf("rejected target update was partial: domain=%q name=%q", domain, name)
+	if domain != "198.51.100.0/24" || name != "must-not-commit" {
+		t.Fatalf("network target update missing: domain=%q name=%q", domain, name)
+	}
+	if _, err := h.db.Exec(`INSERT INTO assets(id,target_id,value,kind,asset_type) VALUES('web-asset','web-target','example.org','web','domain')`); err != nil {
+		t.Fatal(err)
 	}
 
 	assetReq := httptest.NewRequest(http.MethodPatch, "/api/targets/web-target/assets/web-asset", bytes.NewBufferString(`{"name":"must-not-commit","value":"203.0.113.10"}`))
 	assetReq = mux.SetURLVars(assetReq, map[string]string{"id": "web-target", "aid": "web-asset"})
 	assetRec := httptest.NewRecorder()
 	h.handleUpdateAsset(assetRec, assetReq)
-	if assetRec.Code != http.StatusBadRequest {
+	if assetRec.Code != http.StatusOK {
 		t.Fatalf("network asset update status=%d body=%s", assetRec.Code, assetRec.Body.String())
 	}
 	var assetValue, assetName string
 	_ = h.db.QueryRow(`SELECT value,COALESCE(name,'') FROM assets WHERE id='web-asset'`).Scan(&assetValue, &assetName)
-	if assetValue != "example.org" || assetName != "" {
-		t.Fatalf("rejected asset update was partial: value=%q name=%q", assetValue, assetName)
+	if assetValue != "203.0.113.10" || assetName != "must-not-commit" {
+		t.Fatalf("network asset update missing: value=%q name=%q", assetValue, assetName)
 	}
 }

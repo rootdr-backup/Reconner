@@ -11,6 +11,8 @@ export interface NetworkService {
   web_title: string
   web_status: number
   tls: boolean
+	os_guess: string
+	rdns: string
 }
 
 export interface Asset {

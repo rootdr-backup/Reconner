@@ -55,9 +55,13 @@ var corpusSpecs = map[string]corpusSpec{
 	"jwt_secrets": {"JWT weak secrets", "wordlist", "HMAC secrets used by the bounded JWT dictionary check.", func() []string {
 		return append([]string{}, jwtWeakSecrets...)
 	}},
-	"xss":  {"XSS", "payload", "Browser-proof templates. Each template must set top.document.title to the single %s nonce.", xssBrowserPayloads},
-	"sqli": {"SQL injection", "payload", "Supplemental error-based SQL injection probes, replayed before a finding is accepted.", func() []string { return []string{"'", `"`, "' OR '1'='1'-- -", "1 AND 1=1", "1 AND 1=2"} }},
-	"lfi":  {"LFI / traversal", "payload", "Local-file inclusion and traversal probes.", func() []string { return append([]string{}, lfiPayloads...) }},
+	"basic_auth_users": {"HTTP Basic usernames", "wordlist", "Usernames for the explicit, rate-limited network Basic-auth audit.", func() []string {
+		return []string{"admin", "administrator", "root", "user", "operator", "manager", "support", "guest", "test", "webadmin"}
+	}},
+	"basic_auth_passwords": {"HTTP Basic passwords", "wordlist", "Top 1000 deterministic common-password candidates for the explicit network Basic-auth audit.", defaultBasicAuthPasswords},
+	"xss":                  {"XSS", "payload", "Browser-proof templates. Each template must set top.document.title to the single %s nonce.", xssBrowserPayloads},
+	"sqli":                 {"SQL injection", "payload", "Supplemental error-based SQL injection probes, replayed before a finding is accepted.", func() []string { return []string{"'", `"`, "' OR '1'='1'-- -", "1 AND 1=1", "1 AND 1=2"} }},
+	"lfi":                  {"LFI / traversal", "payload", "Local-file inclusion and traversal probes.", func() []string { return append([]string{}, lfiPayloads...) }},
 	"ssrf": {"SSRF", "payload", "In-band internal and metadata URLs.", func() []string {
 		out := make([]string, 0, len(ssrfInbandPayloads))
 		for _, p := range ssrfInbandPayloads {
@@ -85,7 +89,7 @@ func corpusPath(dir, id string) string {
 func corpusKey(id, value string) string {
 	value = normalizeCorpusValue(id, value)
 	switch id {
-	case "subdomain", "vhost", "extensions", "parameters":
+	case "subdomain", "vhost", "extensions", "parameters", "basic_auth_users", "basic_auth_passwords":
 		return strings.ToLower(value)
 	default:
 		return value
@@ -95,8 +99,11 @@ func corpusKey(id, value string) string {
 func normalizeCorpusValue(id, value string) string {
 	value = strings.TrimSpace(value)
 	switch id {
-	case "subdomain", "vhost":
+	case "subdomain", "vhost", "basic_auth_users":
 		value = strings.ToLower(value)
+		if id == "basic_auth_users" {
+			return value
+		}
 		value = strings.TrimPrefix(value, "*.")
 		value = strings.TrimPrefix(value, ".")
 	case "extensions":
@@ -117,6 +124,8 @@ func validCorpusValue(id, value string) bool {
 	switch id {
 	case "subdomain", "vhost":
 		return validDNSPrefix(value)
+	case "basic_auth_users", "basic_auth_passwords":
+		return len(value) <= 256 && !strings.ContainsAny(value, ":\x00")
 	case "extensions":
 		return extensionPattern.MatchString(value)
 	case "parameters":
@@ -139,6 +148,36 @@ func validCorpusValue(id, value string) bool {
 	default:
 		return true
 	}
+}
+
+func defaultBasicAuthPasswords() []string {
+	// Kept generated (rather than a large opaque blob) so maintainers can audit
+	// exactly what an explicit credential check may send. The order starts with
+	// the most common defaults, then expands predictable suffix variants until
+	// the documented 1000-entry corpus is reached.
+	bases := []string{
+		"admin", "password", "123456", "12345678", "123456789", "12345", "1234", "1234567", "1234567890", "qwerty",
+		"letmein", "welcome", "monkey", "dragon", "master", "login", "passw0rd", "changeme", "default", "root",
+		"administrator", "guest", "user", "test", "support", "manager", "operator", "system", "secret", "access",
+		"abc123", "111111", "000000", "iloveyou", "sunshine", "princess", "football", "baseball", "trustno1", "zaq12wsx",
+	}
+	suffixes := []string{"", "1", "12", "123", "1234", "!", "@123", "2024", "2025", "2026", "01", "007", "321", "admin", "pass", "#1", "!23", "@", "00", "99", "qwerty", "welcome", "12345", "123456", "2023"}
+	out := make([]string, 0, 1000)
+	seen := map[string]bool{}
+	for _, base := range bases {
+		for _, suffix := range suffixes {
+			for _, candidate := range []string{base + suffix, strings.Title(base) + suffix} { //nolint:staticcheck -- credential corpus intentionally includes title-case forms
+				if !seen[candidate] {
+					seen[candidate] = true
+					out = append(out, candidate)
+					if len(out) == 1000 {
+						return out
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 func readCustomCorpus(dir, id string) []string {

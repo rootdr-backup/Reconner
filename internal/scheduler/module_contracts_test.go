@@ -42,12 +42,12 @@ func TestExpectedToolInventoryContainsOnlySupportedRuntimeDependencies(t *testin
 		"subfinder", "assetfinder", "findomain", "scilla", "asnmap",
 		"puredns", "alterx", "shuffledns", "dnsx",
 		"httpx", "gau", "waybackurls", "waymore", "katana", "hakrawler", "uro",
-		"nuclei", "dirsearch", "feroxbuster", "subzy", "sqlmap", "python3",
+		"nuclei", "dirsearch", "feroxbuster", "naabu", "nmap", "subzy", "sqlmap", "python3",
 	}
 	if !slices.Equal(expectedTools, want) {
 		t.Fatalf("expected tool inventory drifted\n got: %v\nwant: %v", expectedTools, want)
 	}
-	for _, retired := range []string{"nmap", "naabu", "hydra", "uncover", "dalfox", "gowitness"} {
+	for _, retired := range []string{"hydra", "uncover", "dalfox", "gowitness"} {
 		if slices.Contains(expectedTools, retired) {
 			t.Errorf("retired/unused tool %q is still advertised", retired)
 		}

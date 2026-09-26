@@ -10,11 +10,12 @@ import { ws } from '../lib/websocket'
 import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
-  DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent
+  DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent, NetworkService
 } from '../types'
 
 const isScannableProjectAsset = (asset: Asset) =>
-  asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')
+	(asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')) ||
+	(asset.kind === 'network' && ['ip', 'cidr'].includes(asset.asset_type || 'ip'))
 
 // Findings information architecture — a logical hierarchy instead of a flat row
 // of unrelated siblings. Assets = the discovered surface; Vulnerabilities = the
@@ -28,6 +29,7 @@ const TAB_GROUPS = [
     { id: 'params', label: 'Parameters' },
     { id: 'dirs', label: 'Directories' },
     { id: 'admin-panels', label: 'Admin & sensitive panels' },
+		{ id: 'network-services', label: 'Network services' },
   ] },
   { group: 'Vulnerabilities', tabs: [
     { id: 'vulns', label: 'Confirmed' },
@@ -313,6 +315,7 @@ export default function TargetDetail() {
       setIsScanning(t.scan_status === 'running')
       // Network targets never populate the default 'subdomains' tab — land on
       // the tab that actually carries their results.
+			if (t.kind === 'network') setTab('network-services')
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
@@ -463,6 +466,7 @@ export default function TargetDetail() {
       else if (t === 'params') r = await findingsApi.parameters(id, false)
       else if (t === 'dirs') r = await findingsApi.directoryFindings(id)
       else if (t === 'admin-panels') r = await findingsApi.adminPanels(id)
+			else if (t === 'network-services') r = await targetsApi.networkServices(id)
       else if (t === 'backups') r = await findingsApi.backupFindings(id)
       else if (t === 'redirects') r = await findingsApi.openRedirects(id)
       else if (t === 'nuclei') r = await findingsApi.nucleiFindings(id)
@@ -645,11 +649,11 @@ export default function TargetDetail() {
         </div>
 		<div className="flex flex-col sm:flex-row gap-2 mb-3">
 		  <select value={newAssetType} onChange={e => setNewAssetType(e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary sm:w-32">
-			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP / range'],['cidr','CIDR'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
 		  </select>
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}
-			placeholder="domain, full URL/page, or .js file"
+			placeholder="domain, URL, IP, CIDR, or IP range"
             className="flex-1 bg-surface-alt border border-border rounded px-2 py-1.5 text-xs font-mono" />
           <Button size="sm" variant="secondary" loading={assetBusy} onClick={addAsset}>Add</Button>
         </div>
@@ -668,7 +672,7 @@ export default function TargetDetail() {
                   <p className="text-[11px] font-mono text-text-secondary truncate" title={a.value}>{a.value}</p>
                 </div>
                 <Button size="sm" variant="primary" disabled={a.approval_status !== 'approved' || !isScannableProjectAsset(a)}
-                  title={!isScannableProjectAsset(a) ? (a.kind === 'network' ? 'Legacy network assets are read-only in this build' : 'Reference-only asset type') : undefined} onClick={() => setScanAsset(a)}>Scan</Button>
+					title={!isScannableProjectAsset(a) ? 'Reference-only asset type' : undefined} onClick={() => setScanAsset(a)}>Scan</Button>
                 <button onClick={() => renameAsset(a)} title="Rename" className="p-1 rounded text-text-muted hover:text-accent hover:bg-accent/10">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                 </button>
@@ -865,6 +869,7 @@ export default function TargetDetail() {
                       {tab === 'params' && ['Full URL', 'Parameter', 'Source', 'Reflected', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'dirs' && ['URL', 'Status', 'Size', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'admin-panels' && ['Panel', 'Type', 'Status', 'Evidence', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
+											{tab === 'network-services' && ['Host', 'Port', 'Service', 'Product / Version', 'Banner', 'Web'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'backups' && ['URL', 'Status', 'Size', 'Type', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'redirects' && ['URL', 'Redirects To', 'Verified', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'nuclei' && ['Severity', 'Template', 'URL', 'Description', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
@@ -1017,6 +1022,16 @@ export default function TargetDetail() {
                         <td className="table-cell text-xs whitespace-nowrap">{timeAgo(p.created_at)}</td>
                       </tr>
                     ))}
+									{tab === 'network-services' && (pageData as NetworkService[]).map(s => (
+										<tr key={`${s.ip}:${s.port}/${s.protocol}`} className="table-row">
+											<td className="table-cell"><span className="block font-mono text-xs">{s.ip}</span>{(s.rdns || s.os_guess) && <span className="block text-[10px] text-text-muted">{[s.rdns,s.os_guess].filter(Boolean).join(' · ')}</span>}</td>
+											<td className="table-cell font-mono text-xs">{s.port}/{s.protocol}</td>
+											<td className="table-cell text-xs">{s.service || 'unknown'}{s.tls ? ' · TLS' : ''}</td>
+											<td className="table-cell text-xs">{[s.product,s.version].filter(Boolean).join(' ') || '—'}</td>
+											<td className="table-cell max-w-sm font-mono text-[10px] text-text-muted">{truncate(s.banner || '',100) || '—'}</td>
+											<td className="table-cell text-xs">{s.web_url ? <a href={s.web_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">{s.web_status || 'open'} · {truncate(s.web_title || s.web_url,35)}</a> : '—'}</td>
+										</tr>
+									))}
                     {tab === 'backups' && (pageData as BackupFinding[]).map(b => (
                       <tr key={b.id} className="table-row">
                         <td className="table-cell max-w-sm">

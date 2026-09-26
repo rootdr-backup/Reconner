@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestToolCatalogIsPinnedAndHasNoRetiredNetworkTools(t *testing.T) {
+func TestToolCatalogIsPinnedAndHasNoRetiredTools(t *testing.T) {
 	for name, spec := range toolCatalog {
 		switch spec.Method {
 		case methodGo:
@@ -23,7 +23,7 @@ func TestToolCatalogIsPinnedAndHasNoRetiredNetworkTools(t *testing.T) {
 			t.Errorf("tool %q uses a moving latest ref: %q", name, spec.Ref)
 		}
 	}
-	for _, retired := range []string{"nmap", "naabu", "hydra", "uncover", "dalfox", "gowitness"} {
+	for _, retired := range []string{"hydra", "uncover", "dalfox", "gowitness"} {
 		if _, ok := toolCatalog[retired]; ok {
 			t.Errorf("retired/unused tool %q is still installable", retired)
 		}
