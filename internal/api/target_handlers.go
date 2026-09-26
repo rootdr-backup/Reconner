@@ -320,8 +320,8 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusCreated, map[string]any{"data": target, "success": true})
 }
 
-// handleNetworkServices preserves read-only access to service inventory written
-// by older builds. This stability build does not create new network scan rows.
+// handleNetworkServices returns the verified inventory written by the explicit
+// network profiles while preserving rows created by older builds.
 func (h *Handler) handleNetworkServices(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(), `

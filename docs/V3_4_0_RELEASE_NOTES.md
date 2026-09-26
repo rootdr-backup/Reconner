@@ -1,4 +1,4 @@
-# Reconner v3.4.0 (draft — not released)
+# Reconner v3.4.0
 
 This release adds a proof-gated file-upload vulnerability detector for
 authorized bug-bounty and penetration-testing scopes.
@@ -37,6 +37,29 @@ Research sources, module-by-module gaps and the staged backlog are documented in
 - Changes the orange target headline to actionable medium-or-higher findings;
   informational/low Nuclei rows, raw backup inventory and operator-triaged false
   positives no longer inflate the vulnerability number.
+- Follows bounded same-host redirects and classifies only the final response.
+  Unresolved 3xx responses and redirects to generic content are not findings;
+  legacy 301/302-only rows are removed during migration.
+
+## Explicit network pipeline
+
+- Adds opt-in Network Fast, Normal and Deep profiles to the existing asset scan
+  dialog without introducing a separate navigation area.
+- Accepts single IPs, CIDRs and inclusive IP ranges, with a hard host-count
+  bound and configured scope exclusions applied before any port request.
+- Uses Naabu TCP-connect discovery and Nmap service, banner and bounded OS
+  fingerprinting. Small scopes retain a native TCP/banner fallback when an
+  external tool is unavailable.
+- Removes recognised CDN/WAF edges before discovery while retaining ordinary
+  cloud-hosted origins. ICMP discovery is informational and never a liveness
+  gate.
+- Passes only verified services into network-scoped Nuclei templates and reuses
+  the stable-control 401/403 verifier for discovered web services.
+- Keeps the Basic Authentication credential audit as a separate explicit deep
+  option. It requires a real Basic challenge, paces attempts, stops on lockout
+  or rate limiting, and promotes only two identical successful replays.
+- Stores host, rDNS, OS and service evidence in the target detail view. Web and
+  network modules cannot be combined accidentally in one task.
 
 ## XSS context coverage
 

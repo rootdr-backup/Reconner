@@ -230,9 +230,9 @@ Opening a program loads its current structured scope. Select the assets you want
 and create a Project, or create a Project manually from domains, wildcards,
 exact URLs/pages, JavaScript files and APIs. Exact page and JS assets are seeded
 directly into their relevant analysis pipeline instead of being reduced to a
-hostname. IP/CIDR assets remain visible when imported from a provider or an old
-database, but this stability release rejects network execution instead of
-pretending an unsupported scan succeeded.
+hostname. IP, CIDR and inclusive IP-range assets use the explicit network
+profiles documented below; network modules never run as a side effect of a web
+scan.
 
 Program scope remains controlled by the operator:
 
@@ -342,7 +342,7 @@ successful replays with materially different protected content. The detector
 does not guess usernames, passwords, or tokens. See the local-only matrix in
 [v3.3.1 authentication-header bypass evidence](docs/V3_3_1_AUTH_HEADER_BYPASS_EVIDENCE.md).
 
-The in-progress v3.4 work adds a standalone **File upload validation** module.
+Reconner v3.4 adds a standalone **File upload validation** module.
 It consumes scoped multipart plus structured/nested/flat JSON upload shapes and
 covers PHP, JSP/JSPX, ASP/ASPX, ColdFusion, SSI and CGI extension families;
 multi-extension/filter/ADS-style bypasses; MIME mismatches; GIF polyglots;

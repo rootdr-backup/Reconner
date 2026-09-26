@@ -2350,7 +2350,7 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 	case ModuleOriginIP:
 		return s.originIPScanner.Run(ctx, targetID, logFn)
 	case ModulePortScan:
-		return scanner.BlockedPhase("legacy portscan module is retired; network execution is unavailable")
+		return scanner.BlockedPhase("legacy portscan module is retired; select an explicit Network Fast, Normal, or Deep profile")
 	case ModuleShodan:
 		return s.shodanScanner.Run(ctx, targetID, logFn)
 	case ModuleRace:
