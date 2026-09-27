@@ -115,6 +115,9 @@ type domXSSHit struct {
 	Confidence int  // static-lead confidence (candidate band)
 	OneHop     bool // true when proven via a single intermediate assignment
 	Hops       int
+	// PoC is set only by analyzeDOMClobbering: the concrete HTML that clobbers
+	// the looked-up name, ready to show the operator verbatim.
+	PoC string
 }
 
 // domSanitizers are calls that neutralise a value before it reaches a sink, so a
@@ -133,6 +136,92 @@ func hasSanitizerBetween(seg string) bool {
 		}
 	}
 	return false
+}
+
+// domClobberingLookup matches a lookup-by-name DOM property access — the DOM
+// Clobbering source shape. Unlike a URL source, an attacker does not need a
+// crafted link: ANY markup they can place anywhere on the page (a comment, a
+// bio field, a sanitized upload whose sanitizer still allows id/name
+// attributes) can define an element whose id/name collides with the name the
+// app looks up, so the property resolves to attacker-controlled content
+// instead of the value the app expected. Each property captured here
+// (value/href/src/textContent/innerText) is a genuine string-returning
+// property on a real HTML element, so the PoC generated in domClobberingPoC
+// is a concrete, reproducible clobbering gadget — not a generic guess.
+var domClobberingLookup = regexp.MustCompile(
+	`document\.(?:getElementById\(\s*['"]([\w.-]+)['"]\s*\)|forms\[\s*['"]([\w.-]+)['"]\s*\]|forms\.([A-Za-z_$][\w$]*)|all\[\s*['"]([\w.-]+)['"]\s*\]|all\.([A-Za-z_$][\w$]*))\s*(?:\?\.|\.)\s*(value|href|src|textContent|innerText)\b`)
+
+// domClobberingPoC returns the concrete HTML that clobbers name so that
+// document.getElementById(name).<prop> (or the forms/all equivalent) resolves
+// to payload instead of the element the app expected.
+func domClobberingPoC(name, prop, payload string) string {
+	switch prop {
+	case "value":
+		return fmt.Sprintf(`<input id="%s" value="%s">`, name, payload)
+	case "href":
+		return fmt.Sprintf(`<a id="%s" href="%s"></a>`, name, payload)
+	case "src":
+		return fmt.Sprintf(`<img id="%s" src="%s">`, name, payload)
+	default: // textContent, innerText
+		return fmt.Sprintf(`<div id="%s">%s</div>`, name, payload)
+	}
+}
+
+// domClobberingName extracts whichever capture group of domClobberingLookup
+// matched (getElementById/forms[]/forms./all[]/all.).
+func domClobberingName(m []string) string {
+	// m[1..5] are the five alternatives' capture groups (getElementById,
+	// forms[], forms., all[], all.) — exactly one is non-empty per match.
+	for _, g := range m[1:6] {
+		if g != "" {
+			return g
+		}
+	}
+	return ""
+}
+
+// analyzeDOMClobbering flags JS that feeds a lookup-by-name DOM property
+// directly into a dangerous sink without validating that the result is
+// actually the element/value the app expects. Static lead only — never
+// auto-confirmed without browser proof, matching every other flow in this
+// file; the message this produces is deliberately distinct from the
+// URL-source message in storeDOMXSSFindings because the attack precondition
+// is different (planted markup, not a crafted link).
+func analyzeDOMClobbering(content string) []domXSSHit {
+	if content == "" {
+		return nil
+	}
+	var hits []domXSSHit
+	seen := map[string]bool{}
+	for _, sink := range htmlInjectionSinks {
+		for _, sm := range sink.re.FindAllStringSubmatch(content, -1) {
+			if len(sm) < 2 {
+				continue
+			}
+			arg := sm[1]
+			lm := domClobberingLookup.FindStringSubmatch(arg)
+			if lm == nil || hasSanitizerBetween(arg) {
+				continue
+			}
+			name, prop := domClobberingName(lm), lm[6]
+			if name == "" {
+				continue
+			}
+			key := sink.name + "|" + name + "|" + prop
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			hits = append(hits, domXSSHit{
+				Sink:       sink.name,
+				Source:     lm[0],
+				Snippet:    arg,
+				Confidence: ConfCandidateLo,
+				PoC:        domClobberingPoC(name, prop, "//attacker.example/x"),
+			})
+		}
+	}
+	return hits
 }
 
 var (
@@ -768,6 +857,25 @@ func (s *JSScanner) storeDOMXSSFindings(ctx context.Context, targetID, jsURL, co
 			URL: jsURL, Method: "STATIC", Parameter: h.Sink + " ← " + h.Source, Location: "javascript",
 			Evidence: ev, Source: "js-analysis", DetectionMethod: "source-to-sink",
 			Confidence: conf, Verdict: CandDetected,
+		}); err == nil {
+			stored++
+		}
+	}
+
+	// DOM Clobbering leads: a distinct message (planted markup, not a crafted
+	// link) and a distinct type, kept separate from the URL-source loop above
+	// so its evidence text stays accurate for its own attack precondition.
+	for _, h := range analyzeDOMClobbering(content) {
+		ev := fmt.Sprintf(
+			"Potential DOM Clobbering (STATIC, UNVERIFIED): the lookup `%s` is written directly to the HTML-injection sink `%s` with no check that the result is actually the element/value the app expects.\n  code: %s\n  found in: %s\n"+
+				"  Attack vector: an attacker who can place ANY markup on a page that loads this bundle — a comment, a bio field, an upload whose sanitizer still allows id/name attributes — plants %s anywhere on that page. The lookup then resolves to the attacker's value instead of the app's own element, and that value reaches the sink.\n"+
+				"  This is a static lead — the scanner promotes it to a CONFIRMED finding only when a headless browser observes the clobbered value actually reach the sink and execute.",
+			h.Source, h.Sink, h.Snippet, jsURL, h.PoC)
+		if _, err := RecordDetectorObservation(ctx, s.db, DetectorObservation{
+			TargetID: targetID, Type: "dom_clobbering", Subtype: "static-flow", Severity: "medium",
+			URL: jsURL, Method: "STATIC", Parameter: h.Sink + " ← " + h.Source, Location: "javascript",
+			Payload: h.PoC, Evidence: ev, Source: "js-analysis", DetectionMethod: "lookup-by-name-to-sink",
+			Confidence: h.Confidence, Verdict: CandDetected,
 		}); err == nil {
 			stored++
 		}

