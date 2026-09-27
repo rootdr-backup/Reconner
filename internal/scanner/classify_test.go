@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -109,6 +111,48 @@ func TestSSRFReflectionGuard(t *testing.T) {
 	realCreds := `{"Code":"Success","AccessKeyId":"ASIAX","SecretAccessKey":"abc"}`
 	if responseReflectsPayload(realCreds, payload) {
 		t.Error("real creds JSON must NOT be treated as reflection")
+	}
+}
+
+// TestSSRFRedirectChainPayloads proves the redirect-chain SSRF bypass is built
+// only from a CONFIRMED (verified=1) open redirect on the target's own
+// domain, and that the metadata target is substituted into the exact
+// parameter the redirect was proven vulnerable through — never a param this
+// scanner invented on its own, and never an unverified/candidate row.
+func TestSSRFRedirectChainPayloads(t *testing.T) {
+	db, tid := testDB(t)
+	_, err := db.Exec(`INSERT INTO open_redirect_findings (id, target_id, url, redirect_to, parameter, verified)
+		VALUES ('or1', ?, 'https://target.example/go?next=https%3A%2F%2Fgood.example%2F', 'evil.com', 'next', 1)`, tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unverified (candidate) redirect must NOT be turned into an SSRF payload.
+	_, err = db.Exec(`INSERT INTO open_redirect_findings (id, target_id, url, redirect_to, parameter, verified)
+		VALUES ('or2', ?, 'https://target.example/go2?dest=/relative', '', 'dest', 0)`, tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := &SSRFScanner{db: db}
+	got := s.redirectChainPayloads(context.Background(), tid)
+	if len(got) != len(redirectChainMetaTargets) {
+		t.Fatalf("expected %d payload(s) from the one verified redirect, got %d: %+v", len(redirectChainMetaTargets), len(got), got)
+	}
+	for _, p := range got {
+		u, err := url.Parse(p.url)
+		if err != nil {
+			t.Fatalf("payload is not a valid URL: %q", p.url)
+		}
+		if u.Host != "target.example" || u.Path != "/go" {
+			t.Errorf("expected the target's own trusted host/path to be preserved, got %q", p.url)
+		}
+		next := u.Query().Get("next")
+		if !strings.Contains(next, "169.254.169.254") && !strings.Contains(next, "2852039166") {
+			t.Errorf("expected the vulnerable parameter to carry a metadata URL, got %q", next)
+		}
+		if u.Query().Get("dest") != "" {
+			t.Errorf("must not touch the unverified redirect's parameter: %q", p.url)
+		}
 	}
 }
 
