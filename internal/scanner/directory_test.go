@@ -51,6 +51,75 @@ func TestShortNestedEnvIsCredibleWithoutMinimumSizeHeuristic(t *testing.T) {
 	}
 }
 
+// TestCredibleSensitiveBackupCatchesSecretsByContentNotExtension proves the
+// false negative this fix closes: detectFileType has no case for .json/.yaml/
+// .xml/no-extension (they become "json"/"yaml"/"xml"/"unknown"), and the
+// switch in credibleSensitiveBackup has no case for any of those either — so
+// a real leaked-secret dump served as /secrets.json, /serviceaccount.json,
+// /kubeconfig, /id_rsa etc. (all already requested by backupPatterns/
+// backup_magic.go) could never become a finding no matter what it contained.
+// A genuine credential-shaped body must now be credible regardless of
+// extension, while an ordinary JSON/YAML response at the same path types must
+// still be rejected (the false positive credibleSensitiveBackup exists to
+// kill).
+func TestCredibleSensitiveBackupCatchesSecretsByContentNotExtension(t *testing.T) {
+	awsCreds := []byte(`{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE","aws_secret_access_key":"x"}`)
+	if got := detectFileType("/secrets.json", awsCreds); got != "json" {
+		t.Fatalf("expected detectFileType to classify a .json path as json, got %q", got)
+	}
+	if !credibleSensitiveBackup("json", awsCreds, "") {
+		t.Fatal("a real AWS access key in a .json response must be credible regardless of extension")
+	}
+
+	serviceAccountKey := []byte(`{"type":"service_account","project_id":"x"}`)
+	if !credibleSensitiveBackup("json", serviceAccountKey, "") {
+		t.Fatal("a GCP service-account JSON dump must be credible")
+	}
+
+	privateKey := []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK...\n-----END RSA PRIVATE KEY-----")
+	if got := detectFileType("/id_rsa", privateKey); got != "unknown" {
+		t.Fatalf("expected a no-extension path to classify as unknown, got %q", got)
+	}
+	if !credibleSensitiveBackup("unknown", privateKey, "") {
+		t.Fatal("a real private key at a no-extension path (e.g. /id_rsa) must be credible")
+	}
+
+	kubeconfigSecret := []byte("apiVersion: v1\nkind: Config\nusers:\n- user:\n    token: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.abc123def456")
+	if !credibleSensitiveBackup("yaml", kubeconfigSecret, "") {
+		t.Fatal("a kubeconfig-shaped YAML body carrying a real JWT must be credible")
+	}
+
+	// Negative controls: an ORDINARY API/JSON response at the same path types
+	// must still be rejected — the whole point is content, not extension.
+	ordinaryJSON := []byte(`{"status":"ok","items":[1,2,3],"page":1}`)
+	if credibleSensitiveBackup("json", ordinaryJSON, "") {
+		t.Fatal("an ordinary JSON API response must NOT be reported as a leaked secret")
+	}
+	ordinaryYAML := []byte("name: my-app\nversion: 1.2.3\ndescription: a normal service\n")
+	if credibleSensitiveBackup("yaml", ordinaryYAML, "") {
+		t.Fatal("an ordinary YAML manifest must NOT be reported as a leaked secret")
+	}
+	shortJunk := []byte(`{"ok":true}`)
+	if credibleSensitiveBackup("json", shortJunk, "") {
+		t.Fatal("trivially short JSON must NOT be reported as a leaked secret")
+	}
+}
+
+// TestCheckMagicBytesRecognizesJKS proves a leaked Java KeyStore (already
+// requested by backupPatterns as /keystore.jks) is magic-confirmed — before
+// this fix it had neither a magic signature nor a detectFileType/
+// credibleSensitiveBackup case, so a real hit could never be reported despite
+// carrying TLS/signing private keys.
+func TestCheckMagicBytesRecognizesJKS(t *testing.T) {
+	jks := append([]byte("\xfe\xed\xfe\xed\x00\x00\x00\x02"), bytes.Repeat([]byte{0}, 32)...)
+	if got := checkMagicBytes(jks); got != "Java KeyStore (JKS)" {
+		t.Fatalf("checkMagicBytes(JKS) = %q, want %q", got, "Java KeyStore (JKS)")
+	}
+	if got := checkMagicBytes([]byte("not a keystore at all")); got != "" {
+		t.Fatalf("checkMagicBytes(plain text) = %q, want empty", got)
+	}
+}
+
 func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 	withLoopbackAllowed(t)
 	body := "DB_PASSWORD=s3cr3t\nAPI_KEY=0123456789abcdef\n"
@@ -147,20 +216,5 @@ func TestTrueSizeStreamCountsChunked(t *testing.T) {
 	resp2 := &http.Response{ContentLength: 9 * 1024 * 1024, Header: http.Header{}}
 	if got := trueSize(resp2, already); got != 9*1024*1024 {
 		t.Fatalf("must trust Content-Length: got %d", got)
-	}
-}
-
-func TestSensitiveBackupTypeFPGuard(t *testing.T) {
-	// genuinely sensitive → allowed as a backup finding
-	for _, ft := range []string{"sql_dump", "archive", "env_file", "git_repo", "backup", "log_file", "config"} {
-		if !sensitiveBackupType(ft) {
-			t.Errorf("%s must be treated as sensitive", ft)
-		}
-	}
-	// noisy web assets → NOT backups (the false-positive class)
-	for _, ft := range []string{"json", "xml", "yaml", "unknown"} {
-		if sensitiveBackupType(ft) {
-			t.Errorf("%s must NOT be reported as a backup (false positive)", ft)
-		}
 	}
 }

@@ -126,6 +126,23 @@ func ctFamily(ct string) string {
 // DirScanner method) because it touches no DirScanner state — shared with
 // Historical network-result rows use the same finding shape.
 func soft404Baseline(ctx context.Context, base string) soft404 {
+	return soft404BaselineRanged(ctx, base, "")
+}
+
+// soft404BaselineRanged behaves exactly like soft404Baseline, but issues the
+// probe with the SAME Range header the real candidate requests will use, when
+// rangeHeader is non-empty. This matters for any caller whose actual
+// candidate requests send Range (currently only scanBackupCandidatesWithCorpus,
+// which sends "Range: bytes=0-262143"): a baseline captured WITHOUT that
+// header comes back as status 200, but a Range-honoring server (nginx,
+// Apache, most CDNs — very common) answers a Ranged candidate request with
+// 206. soft404.matches short-circuits on any status mismatch
+// (!b.active || status != b.statusCode), so a 200-captured baseline can NEVER
+// match a 206 candidate response — silently disabling the entire soft-404/
+// catch-all rejection for that host, on exactly the servers content
+// discovery runs against most often. Every other caller passes "" and gets
+// byte-identical behavior to the original implementation.
+func soft404BaselineRanged(ctx context.Context, base, rangeHeader string) soft404 {
 	probes := []string{"/x9k2j7q1zNope404check", "/this_should_not_exist_" + uuid.New().String()[:8]}
 	out := soft404{}
 	var lens []int
@@ -135,14 +152,22 @@ func soft404Baseline(ctx context.Context, base string) soft404 {
 			continue
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
 		resp, err := dirHTTPClient.Do(req)
 		if err != nil {
 			continue
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 		resp.Body.Close()
-		// Only a 200 to a bogus path is a soft-404 (a proper 404/403 is fine).
-		if resp.StatusCode == 200 {
+		// Only a 200 to a bogus path is a soft-404 (a proper 404/403 is fine). A
+		// Ranged request additionally accepts 206: a server that honors Range
+		// answers a bogus-but-otherwise-servable path with 206, and the real
+		// candidate requests below will get 206 for the SAME reason — the
+		// baseline must be captured at whichever status this exact request
+		// shape actually produces, or matches() can never fire for it.
+		if resp.StatusCode == 200 || (rangeHeader != "" && resp.StatusCode == http.StatusPartialContent) {
 			lens = append(lens, len(body))
 			out = soft404{
 				active: true, statusCode: resp.StatusCode, bodyLen: len(body),
@@ -608,18 +633,6 @@ func trueSize(resp *http.Response, alreadyRead int) int {
 	return alreadyRead + int(n)
 }
 
-// sensitiveBackupType reports whether a detected file type is a genuinely
-// sensitive backup/secret (vs a normal web asset). Only these — or a magic-byte
-// confirmation — become backup findings, killing the "any non-HTML 200 = backup"
-// false positives (JSON APIs, JS/CSS, images, generic XML/YAML).
-func sensitiveBackupType(fileType string) bool {
-	switch fileType {
-	case "sql_dump", "archive", "env_file", "git_repo", "backup", "log_file", "config":
-		return true
-	}
-	return false
-}
-
 func (s *DirScanner) storeDirFinding(targetID, foundURL string, statusCode, contentLength int, redirectURL string) bool {
 	id := uuid.New().String()
 	_, err := s.db.Exec(`
@@ -679,6 +692,13 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 	return scanBackupCandidatesWithCorpus(ctx, db, targetID, services, domain, backupPatterns, adaptiveWords...)
 }
 
+// backupRangeHeader is sent on every real backup-candidate request AND on this
+// module's own soft-404 baseline probe (soft404BaselineRanged) — they must
+// stay identical, or the baseline's captured status (200 vs 206) can silently
+// stop matching the candidates' actual responses. See soft404BaselineRanged's
+// doc comment.
+const backupRangeHeader = "bytes=0-262143"
+
 func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, targetID string, services []string, domain string, corpus []string, adaptiveWords ...[]string) int {
 	var observedURLs []string
 	rows, err := db.QueryContext(ctx, `SELECT url FROM directory_findings WHERE target_id=?
@@ -722,7 +742,11 @@ serviceLoop:
 		// Soft-404 baseline: many sites (SPAs, custom error pages) return 200
 		// with the same page for ANY path. Establish what a bogus path looks
 		// like so we can discard those instead of reporting hundreds of fakes.
-		bl := soft404Baseline(ctx, base)
+		// Captured WITH the same Range header the candidate requests below use
+		// (backupRangeHeader) — see soft404BaselineRanged's doc comment for why
+		// a plain (un-Ranged) baseline would silently disable this entirely on
+		// any Range-honoring server.
+		bl := soft404BaselineRanged(ctx, base, backupRangeHeader)
 		var priorityWG sync.WaitGroup
 
 		for patternIndex, pattern := range patterns {
@@ -754,8 +778,9 @@ serviceLoop:
 				// Backup validation only needs the leading bytes (magic signatures,
 				// SQL markers, env/config evidence). Asking for a bounded range avoids
 				// downloading multi-gigabyte dumps while still accepting servers that
-				// ignore Range and answer 200.
-				req.Header.Set("Range", "bytes=0-262143")
+				// ignore Range and answer 200. Must stay in sync with the baseline
+				// probe above (backupRangeHeader) — see soft404BaselineRanged.
+				req.Header.Set("Range", backupRangeHeader)
 				resp, err := dirHTTPClient.Do(req)
 				if err != nil {
 					return
@@ -770,6 +795,17 @@ serviceLoop:
 				// like HTML, it's the catch-all, not a config file.
 				ct := strings.ToLower(resp.Header.Get("Content-Type"))
 				if strings.Contains(ct, "text/html") || looksLikeHTML(body) {
+					return
+				}
+				// Reject a WAF/edge block or challenge answering the candidate
+				// request. Most vendor block pages are HTML (already caught above),
+				// but some return a non-HTML (JSON/plain-text) challenge for
+				// non-browser-shaped requests — exactly what a .sql/.zip/.env-style
+				// path looks like — which would otherwise reach the loose per-type
+				// bar below (e.g. "backup"/"log_file" only require len>=16) and be
+				// misreported as a confirmed backup. This module had NO WAF
+				// awareness at all before, unlike every injection detector.
+				if looksLikeBlockPage(resp.StatusCode, string(body)) {
 					return
 				}
 
@@ -987,6 +1023,23 @@ func credibleSensitiveBackup(fileType string, body []byte, magic string) bool {
 	if trimmed == "" {
 		return false
 	}
+	// A high-confidence, vendor-specific secret signature in the body is
+	// credible regardless of the requested path's extension. Without this, a
+	// genuine leaked secret dump shaped as .json/.yaml/.xml/.txt/no-extension
+	// (detectFileType classifies these as "json"/"yaml"/"xml"/"unknown", none
+	// of which the switch below has a case for — it falls to default:false)
+	// could NEVER become a finding no matter what it actually contained. That
+	// was a real false negative: backupPatterns/backup_magic.go already send
+	// requests for /secrets.json, /credentials.json, /aws.json, /gcp.json,
+	// /serviceaccount.json, /kubeconfig, /id_rsa, /server.key, /secrets.yml,
+	// /config/credentials.yml.enc and more, but their responses could never be
+	// promoted regardless of content. Requiring an actual credential-shaped
+	// match (not just "it parses as JSON") keeps the "any 200 = backup" false
+	// positive this function exists to kill: an ordinary API response is never
+	// mistaken for a secret dump merely for being JSON.
+	if len(trimmed) >= 16 && bodyMatchesHighConfidenceSecret(body) {
+		return true
+	}
 	switch fileType {
 	case "env_file":
 		return looksLikeEnvContent(trimmed)
@@ -1007,6 +1060,28 @@ func credibleSensitiveBackup(fileType string, body []byte, magic string) bool {
 	default:
 		return false
 	}
+}
+
+// bodyMatchesHighConfidenceSecret reports whether body contains a high- or
+// critical-severity secret signature from the shared vendor-specific corpus
+// (js_scanner.go's jsPatterns + secret_patterns.go's extraSecretPatterns) —
+// the same low-FP pattern set the JS/exposure scanners already use to flag a
+// leaked credential. Used here to validate a JSON/YAML/XML/unknown-extension
+// backup candidate by ACTUAL CONTENT rather than trusting a suggestive path
+// alone: info/medium-severity patterns (bare endpoint URLs, config var names,
+// generic bearer mentions) are deliberately excluded, since those are common
+// in ordinary application responses and would reintroduce the "any 200 =
+// backup" false positive this module exists to kill.
+func bodyMatchesHighConfidenceSecret(body []byte) bool {
+	for _, p := range jsPatterns {
+		if p.Severity != "high" && p.Severity != "critical" {
+			continue
+		}
+		if p.Pattern.Match(body) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeEnvContent(body string) bool {

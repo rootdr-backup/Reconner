@@ -36,6 +36,12 @@ var magicSignatures = []struct {
 	// 0xFD2FB528). Was absent, so a .zst backup was invisible to signature
 	// confirmation and only caught (if at all) by the weaker extension heuristic.
 	{[]byte("\x28\xb5\x2f\xfd"), "ZSTD"},
+	// Java KeyStore — the corpus already requests /keystore.jks, but a real hit
+	// could never be magic-confirmed (and detectFileType has no .jks case, so
+	// credibleSensitiveBackup's extension switch had nothing to match either).
+	// A leaked JKS keystore carries TLS/signing private keys, so this is a
+	// real, high-value confirmation gap, not a cosmetic one.
+	{[]byte("\xfe\xed\xfe\xed"), "Java KeyStore (JKS)"},
 }
 
 // sqlTextMarkers identify a plaintext SQL dump.

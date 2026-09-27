@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -114,5 +115,52 @@ func TestExternalDirectoryHitsPassSharedSoft404Gate(t *testing.T) {
 	}
 	if foundURL != srv.URL+"/real" {
 		t.Fatalf("stored URL=%q want real endpoint", foundURL)
+	}
+}
+
+// TestSoft404BaselineRangedMatchesRangedCandidates proves the Range-header
+// mismatch this fix closes. On a server that honors Range (http.ServeContent,
+// like nginx/Apache/most CDNs), a plain baseline probe (no Range) is captured
+// at status 200, but scanBackupCandidatesWithCorpus's real candidate requests
+// carry "Range: bytes=0-262143" and get 206 back for the SAME catch-all page —
+// soft404.matches short-circuits on status mismatch, so the un-Ranged baseline
+// can NEVER recognize that catch-all and every one of its (fake) backup hits
+// would leak through. soft404BaselineRanged, given the same Range header the
+// candidates use, must recognize it.
+func TestSoft404BaselineRangedMatchesRangedCandidates(t *testing.T) {
+	shell := bytes.Repeat([]byte("SPA-SHELL-CONTENT-"), 100) // > the 262144-byte range cap's worth is unnecessary; just needs to be a stable, sizeable body
+	modTime := time.Unix(0, 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "shell", modTime, bytes.NewReader(shell))
+	}))
+	defer srv.Close()
+
+	// Sanity-check the fixture actually behaves like a Range-honoring server.
+	req, _ := http.NewRequest("GET", srv.URL+"/some/candidate/path", nil)
+	req.Header.Set("Range", backupRangeHeader)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("fixture must honor Range with 206, got %d", resp.StatusCode)
+	}
+
+	unranged := soft404Baseline(context.Background(), srv.URL)
+	if unranged.statusCode != 200 {
+		t.Fatalf("un-Ranged baseline must capture status 200, got %d", unranged.statusCode)
+	}
+	if unranged.matches(resp.StatusCode, candidateBody, resp.Header.Get("Content-Type")) {
+		t.Fatal("this negative control should already fail on old code: a 200-captured baseline must not match a 206 response by construction of soft404.matches — if this assertion itself fails, the test fixture is wrong, not the fix")
+	}
+
+	ranged := soft404BaselineRanged(context.Background(), srv.URL, backupRangeHeader)
+	if ranged.statusCode != http.StatusPartialContent {
+		t.Fatalf("Ranged baseline must capture status 206 to match Ranged candidates, got %d", ranged.statusCode)
+	}
+	if !ranged.matches(resp.StatusCode, candidateBody, resp.Header.Get("Content-Type")) {
+		t.Fatal("Ranged baseline must recognize the SAME catch-all a Ranged candidate request receives")
 	}
 }
