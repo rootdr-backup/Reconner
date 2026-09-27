@@ -623,7 +623,7 @@ func (s *VerifyScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 		// (403-bypass, CORS, host-header, CRLF, prototype-pollution, jwt-no-exp…)
 		// to Candidates while a replay-confirmed bug stays a Finding.
 		status := StatusCandidate
-		if conf >= ConfEvidence && !canonicalPending {
+		if IsFinding(conf) && !canonicalPending {
 			status = StatusFinding
 		}
 		if replayed && conf == 45 {

@@ -218,15 +218,23 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 	// (e.g. an API endpoint reflecting a `clientId` into its JSON body). Decide the
 	// HTML-sink question ONCE, here, from the probe's own Content-Type.
 	probeHTMLSink := browserRendersResponse(probe.Status, probe.ContentType, probe.Body, probe.NoSniff)
-	if looksLikeBlockPage(probe.Status, probe.Body) {
+	// A WAF/edge block on the XSS-shaped probe payload only proves that THIS
+	// payload was blocked — it says nothing about whether a differently-shaped
+	// SQLi probe (sent independently below) would also be blocked. The old code
+	// returned immediately here, which silently skipped the SQL-error
+	// differential check further down for every insertion point where the XSS
+	// probe alone tripped a WAF, even though many WAFs allow-list or don't
+	// pattern-match on a single quote the way they do on `<script>`-shaped
+	// input. Continue to the SQLi check instead of returning early.
+	xssProbeBlocked := looksLikeBlockPage(probe.Status, probe.Body)
+	if xssProbeBlocked {
 		c := s.xssCandidate(targetID, ip, a.Context, "XSS probe reached a WAF/edge block page; application behavior is unknown")
 		_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{
 			Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "dast-waf",
 			Reason: fmt.Sprintf("WAF/edge block or challenge during XSS probe (HTTP %d)", probe.Status),
 		}, FindingMeta{Actor: "dast"})
-		return out
 	}
-	if a.Reflected {
+	if a.Reflected && !xssProbeBlocked {
 		switch {
 		case !probeHTMLSink && scriptLikeContentType(probe.ContentType):
 			// JavaScript/ECMAScript responses are inert on a top-level navigation,
@@ -347,7 +355,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					Confidence: confidence, Method: method, Reason: reason}, FindingMeta{Actor: "dast"})
 			}
 		}
-	} else if probeHTMLSink && xssOnly {
+	} else if probeHTMLSink && xssOnly && !xssProbeBlocked {
 		// SPA / DOM XSS: the probe is NOT reflected in the raw HTML, but the response
 		// IS an HTML document — the classic client-rendered app where the reflection is
 		// written into the DOM by JavaScript after load (invisible to the raw-HTML
@@ -552,28 +560,30 @@ func browserRendersResponse(status int, contentType, body string, nosniff bool) 
 	return browserRendersAsHTML(contentType, body, nosniff)
 }
 
-// wafBlockSignatures are phrases characteristic of a WAF / edge block or challenge
-// page. A payload "reflected" on such a page is not an app reflection — the WAF
-// echoes the offending value into its own block template — and it never executes,
-// so treating it as an XSS hit is a false positive. Lower-cased comparison.
-var wafBlockSignatures = []string{
-	"access denied", "request blocked", "you have been blocked",
-	"attention required", "cloudflare", "akamai", "incapsula", "imperva",
-	"mod_security", "modsecurity", "web application firewall", "waf",
-	"forbidden", "403 forbidden", "not acceptable", "captcha",
-	"ray id", "blocked by", "security policy", "request rejected",
-	"unusual traffic", "bot detection", "perimeterx", "datadome",
-}
-
 // looksLikeBlockPage reports whether an HTTP response is a WAF/edge block or
-// challenge page rather than the real application response. It combines the status
-// code (403/406/429/503 are the classic block codes) with body signatures so a
-// legitimate 403 app page that merely contains one phrase is not over-matched: a
-// short body carrying a signature, or a block status WITH a signature, qualifies.
+// challenge page rather than the real application response. It shares its
+// vendor-specific signature list (wafBlockBodySignatures, waf.go) with
+// looksLikeWAFBlock instead of keeping a second, separate list: an earlier
+// version of this function matched generic words like "forbidden", "captcha",
+// "waf" and "security policy" on their own, which fired on ordinary legitimate
+// application 401/403/429/503 error pages that happen to use one of those words
+// (e.g. "Sorry, you are forbidden from viewing this resource") — a real,
+// silent false-negative source across nearly every detector that calls this
+// function (XSS, SQLi, SSRF, SSTI, XXE, CSTI, NoSQLi, cache poisoning), since a
+// genuine app error page was mistaken for a security-intermediary block and its
+// signal was discarded. A vendor-specific phrase (a Cloudflare Ray ID, a
+// ModSecurity/Sucuri/Incapsula banner, a bot-challenge script) is what actually
+// distinguishes a WAF/edge block from the application's own response.
 func looksLikeBlockPage(status int, body string) bool {
+	if status == 429 || status == 406 {
+		return true
+	}
+	if body == "" {
+		return false
+	}
 	low := strings.ToLower(body)
 	sig := false
-	for _, s := range wafBlockSignatures {
+	for _, s := range wafBlockBodySignatures {
 		if strings.Contains(low, s) {
 			sig = true
 			break
@@ -583,11 +593,12 @@ func looksLikeBlockPage(status int, body string) bool {
 		return false
 	}
 	switch status {
-	case 403, 406, 429, 503, 401:
+	case 403, 503, 401:
 		return true
 	}
-	// 200-with-signature is a block only when the body is small (a block template),
-	// not a large real page that happens to mention one of these words.
+	// Any other status (including 200) with a vendor signature is a block only
+	// when the body is small (a block/challenge template), not a large real page
+	// that happens to mention a vendor name in prose.
 	return len(body) < 4096
 }
 
