@@ -100,9 +100,29 @@ func (h *Handler) handleListCorpora(w http.ResponseWriter, _ *http.Request) {
 	h.writeSuccess(w, scanner.CorpusCatalog(h.cfg.WordlistsDir))
 }
 
+// corpusMaxUploadBytes is the ceiling on an operator-supplied wordlist/payload
+// merge request body. Raised from 2 MiB to 500 MiB: an operator's own
+// wordlist (subdomains, directories, custom payloads) can legitimately run
+// into the hundreds of megabytes, and this endpoint is admin-only, so the
+// larger ceiling only widens what the operator can do to their own instance.
+const corpusMaxUploadBytes = 500 << 20
+
+// corpusUploadReadTimeout bounds how long a single corpus-merge request may
+// take to transfer. The server's global ReadTimeout/WriteTimeout (30s/120s,
+// see cmd/reconner/main.go) is sized for ordinary API calls and would abort a
+// genuinely large upload long before it finishes on anything but a very fast
+// link; this handler extends BOTH deadlines for itself only; every other
+// endpoint keeps the shorter, slow-client-safe server defaults.
+const corpusUploadReadTimeout = 15 * time.Minute
+
 func (h *Handler) handleMergeCorpus(w http.ResponseWriter, r *http.Request) {
 	category := mux.Vars(r)["category"]
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if rc := http.NewResponseController(w); rc != nil {
+		deadline := time.Now().Add(corpusUploadReadTimeout)
+		_ = rc.SetReadDeadline(deadline)
+		_ = rc.SetWriteDeadline(deadline)
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, corpusMaxUploadBytes)
 	var body struct {
 		Entries []string `json:"entries"`
 		Text    string   `json:"text"`

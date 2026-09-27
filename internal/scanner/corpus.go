@@ -40,6 +40,18 @@ type corpusSpec struct {
 	defaults                 func() []string
 }
 
+// corpusMaxMergeEntries bounds a single merge call, independent of the HTTP
+// body-size ceiling (internal/api's corpusMaxUploadBytes) that gates how the
+// request reaches here at all. Raised from 20000 to 5000000: a genuinely
+// large real-world wordlist (a big subdomain permutation set, a large
+// password/directory list) commonly runs into the millions of lines, and the
+// byte-size ceiling alone does not help if this narrower entry-count limit
+// still rejects the merge outright. Scan-time pacing (per-host concurrency,
+// AIMD throttling, scan-speed profiles) is what actually paces how fast a
+// large custom corpus gets used against a target — that is already handled
+// elsewhere and does not need a second, redundant cap here.
+const corpusMaxMergeEntries = 5_000_000
+
 var corpusSpecs = map[string]corpusSpec{
 	"subdomain": {"Subdomains", "wordlist", "DNS brute-force and permutation seeds.", func() []string { return append([]string{}, bruteWords...) }},
 	"vhost":     {"Virtual hosts", "wordlist", "Host-header discovery prefixes.", func() []string { return append([]string{}, vhostWordlist...) }},
@@ -281,8 +293,8 @@ func MergeCorpus(dir, id string, input []string) (CorpusMergeResult, error) {
 	if !ok {
 		return CorpusMergeResult{}, fmt.Errorf("unknown corpus category %q", id)
 	}
-	if len(input) > 20000 {
-		return CorpusMergeResult{}, fmt.Errorf("at most 20000 entries may be added at once")
+	if len(input) > corpusMaxMergeEntries {
+		return CorpusMergeResult{}, fmt.Errorf("at most %d entries may be added at once", corpusMaxMergeEntries)
 	}
 	defaults := uniqueCorpus(id, spec.defaults())
 	custom := customOnlyCorpus(id, defaults, readCustomCorpus(dir, id))

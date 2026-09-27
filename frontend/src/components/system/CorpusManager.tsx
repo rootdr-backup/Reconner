@@ -4,6 +4,13 @@ import { useUIStore } from '../../store/ui'
 import { Button, Spinner } from '../ui'
 import { cn } from '../../lib/utils'
 
+// Must stay in sync with the backend's corpusMaxUploadBytes
+// (internal/api/system_handlers.go) — this is a UX-only pre-check so an
+// operator gets an immediate, clear rejection instead of waiting for a
+// request to fail against the server's own ceiling.
+const MAX_WORDLIST_BYTES = 500 * 1024 * 1024
+const LARGE_WORDLIST_WARN_BYTES = 20 * 1024 * 1024
+
 const XSS_TEMPLATE_EXAMPLES = [
   `<svg onload="top.document.title='%s'">`,
   `"><img src=x onerror="top.document.title='%s'">`,
@@ -84,7 +91,10 @@ export function CorpusManager() {
 
   const importFile = async (file?: File) => {
     if (!file) return
-    if (file.size > 2 * 1024 * 1024) { addToast('error', 'Wordlist files must be 2 MB or smaller'); return }
+    if (file.size > MAX_WORDLIST_BYTES) { addToast('error', 'Wordlist files must be 500 MB or smaller'); return }
+    if (file.size > LARGE_WORDLIST_WARN_BYTES) {
+      addToast('info', 'Large wordlist — the editor may feel slow while it loads and renders.')
+    }
     try {
       const text = await file.text()
       setDraft(current => current ? `${current.replace(/\s+$/, '')}\n${text}` : text)

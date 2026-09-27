@@ -87,4 +87,29 @@ describe('CorpusManager', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Why was 1 line rejected?')
     expect(editor).toHaveValue('<script>alert(1)</script>')
   })
+
+  it('rejects a wordlist file over 500 MB and warns (but accepts) a large one under it', async () => {
+    const fetchMock = vi.fn(async () => ok([category()]))
+    vi.stubGlobal('fetch', fetchMock)
+    const { container } = render(<CorpusManager />)
+    await screen.findAllByText('Backups & secrets')
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+
+    // Overriding .size (rather than allocating real 500 MB content) keeps
+    // this test fast — importFile's size check runs before it ever reads
+    // the file's actual bytes.
+    const tooBig = new File(['x'], 'huge.txt', { type: 'text/plain' })
+    Object.defineProperty(tooBig, 'size', { value: 500 * 1024 * 1024 + 1 })
+    await userEvent.upload(input, tooBig)
+    await waitFor(() => expect(useUIStore.getState().toasts[useUIStore.getState().toasts.length - 1]?.message).toMatch(/500 MB or smaller/))
+    expect(screen.getByLabelText('Paste one entry per line')).toHaveValue('')
+
+    useUIStore.setState({ toasts: [] })
+    const large = new File(['word1\nword2'], 'large.txt', { type: 'text/plain' })
+    Object.defineProperty(large, 'size', { value: 30 * 1024 * 1024 })
+    await userEvent.upload(input, large)
+    await waitFor(() => expect(useUIStore.getState().toasts[useUIStore.getState().toasts.length - 1]?.message).toMatch(/may feel slow/))
+    expect(screen.getByLabelText('Paste one entry per line')).toHaveValue('word1\nword2')
+  })
 })

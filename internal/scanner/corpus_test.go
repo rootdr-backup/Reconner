@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -136,5 +137,30 @@ func TestNestedBackupCandidatesAreBoundedAndCoverCommonAndObservedPaths(t *testi
 			t.Fatalf("duplicate nested candidate %q", candidate)
 		}
 		seen[candidate] = true
+	}
+}
+
+// TestCorpusMergeAcceptsWordlistsLargerThanTheOldEntryCap proves a large
+// operator wordlist (comfortably above the OLD 20000-entry cap, which would
+// have rejected this merge outright with "at most 20000 entries may be added
+// at once") is now accepted end to end. corpusMaxMergeEntries is exercised at
+// a realistic size here rather than its full 5,000,000 ceiling, which would
+// make this test needlessly slow without testing anything more meaningful.
+func TestCorpusMergeAcceptsWordlistsLargerThanTheOldEntryCap(t *testing.T) {
+	if corpusMaxMergeEntries <= 20000 {
+		t.Fatalf("corpusMaxMergeEntries=%d must be raised well above the old 20000 cap", corpusMaxMergeEntries)
+	}
+	const n = 25000
+	input := make([]string, n)
+	for i := range input {
+		input[i] = fmt.Sprintf("word%d", i)
+	}
+	dir := t.TempDir()
+	result, err := MergeCorpus(dir, "subdomain", input)
+	if err != nil {
+		t.Fatalf("a %d-entry merge (above the old 20000 cap) must succeed: %v", n, err)
+	}
+	if result.Added != n {
+		t.Fatalf("added=%d want %d", result.Added, n)
 	}
 }
