@@ -25,6 +25,7 @@ var V3ModuleContracts = map[string]ModuleContract{
 	ModuleTimeMachine:     {"discovery", "Wayback service and valid domain", "in-scope archived URLs processed", "archive provenance; strict hostname scope", "scanner/enrichment_contract_test.go"},
 	ModuleParamReflection: {"discovery", "parameter inventory", "eligible parameters checked", "MIME-aware reflected marker", "scanner/reflect_redirect_test.go"},
 	ModuleParamFuzz:       {"discovery", "stable live endpoint", "bounded hidden names compared", "repeatable differential with controls", "scanner/paramfuzz_reliability_test.go"},
+	ModuleAPIDataExposure: {"detector", "API endpoints plus JavaScript/request parameter vocabulary", "bounded unauthenticated read shapes and advertised POST contracts attempted", "two replay-stable structured sensitive-data schemas; raw values are never persisted", "scanner/api_data_exposure_test.go"},
 	ModuleDirDiscovery:    {"detector", "live HTTP service", "bounded path corpus attempted", "soft-404 and content-family differential", "scanner/directory_softnoise_test.go"},
 	ModuleBackupDiscovery: {"detector", "live HTTP service", "bounded backup corpus attempted", "file-type signature beyond status/length", "scanner/directory_test.go"},
 	ModuleOpenRedirect:    {"detector", "routable insertion point", "supported points tested", "external destination plus encoded/sibling controls", "scanner/open_redirect_encoding_test.go"},

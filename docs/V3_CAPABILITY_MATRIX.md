@@ -23,6 +23,7 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `timemachine` | Discovery | Archive service and valid domain | Strict-hostname archived URL provenance |
 | `param_reflection` | Discovery | Parameter inventory | MIME-aware reflected marker |
 | `paramfuzz` | Discovery | Stable live endpoint | Repeatable controlled differential |
+| `api_data_exposure` | Detector | API endpoints plus JS/request parameter vocabulary | Unauthenticated structured sensitive-data schema reproduced twice; raw values never persisted |
 | `dir_discovery` | Detector | Live HTTP service | Soft-404/content-family differential; high-sensitive panels require product, credential-form, redirect, or authorization evidence and are content-grouped |
 | `backup_discovery` | Detector | Live HTTP service | Archive/SQL signature or sensitive config-content schema beyond status/path |
 | `open_redirect` | Detector | Routable insertion point | External destination plus encoded/sibling controls |

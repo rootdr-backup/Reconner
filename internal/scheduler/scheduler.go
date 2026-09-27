@@ -35,6 +35,7 @@ const (
 	ModuleTimeMachine     = "timemachine"
 	ModuleParamReflection = "param_reflection"
 	ModuleParamFuzz       = "paramfuzz"
+	ModuleAPIDataExposure = "api_data_exposure"
 	ModuleDirDiscovery    = "dir_discovery"
 	ModuleBackupDiscovery = "backup_discovery"
 	ModuleOpenRedirect    = "open_redirect"
@@ -95,6 +96,7 @@ var AllModules = []string{
 	ModuleTimeMachine,
 	ModuleParamReflection,
 	ModuleParamFuzz,
+	ModuleAPIDataExposure,
 	ModuleDirDiscovery,
 	ModuleBackupDiscovery,
 	ModuleOpenRedirect,
@@ -155,6 +157,7 @@ type Scheduler struct {
 	paramScanner       *scanner.ParamScanner
 	timeMachineScanner *scanner.TimeMachineScanner
 	paramFuzzScanner   *scanner.ParamFuzzScanner
+	apiDataScanner     *scanner.APIDataExposureScanner
 	dirScanner         *scanner.DirScanner
 	nucleiScanner      *scanner.NucleiScanner
 	networkScanner     *scanner.NetworkScanner
@@ -246,6 +249,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.paramScanner = scanner.NewParamScanner(db, exec, cfg, log, bc)
 	s.timeMachineScanner = scanner.NewTimeMachineScanner(db, exec, cfg, log, bc)
 	s.paramFuzzScanner = scanner.NewParamFuzzScanner(db, exec, cfg, log, bc)
+	s.apiDataScanner = scanner.NewAPIDataExposureScanner(db, cfg, log, bc)
 	s.dirScanner = scanner.NewDirScanner(db, exec, cfg, log)
 	s.nucleiScanner = scanner.NewNucleiScanner(db, exec, cfg, log)
 	s.networkScanner = scanner.NewNetworkScanner(db, exec, cfg, log)
@@ -2287,6 +2291,8 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.paramScanner.CheckReflection(ctx, targetID, logFn)
 	case ModuleParamFuzz:
 		return s.paramFuzzScanner.Run(ctx, targetID, logFn)
+	case ModuleAPIDataExposure:
+		return s.apiDataScanner.Run(ctx, targetID, logFn)
 	case ModuleDirDiscovery:
 		return s.dirScanner.Run(ctx, targetID, logFn)
 	case ModuleBackupDiscovery:

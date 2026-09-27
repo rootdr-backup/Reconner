@@ -503,7 +503,7 @@ func (b *TelegramBot) startTelegramScan(ctx context.Context, target telegramTarg
 	webSafe := []string{scheduler.ModuleHTTPProbe, scheduler.ModuleJSAnalysis, scheduler.ModuleJSEndpoints,
 		scheduler.ModuleParamDiscovery, scheduler.ModulePassive, scheduler.ModuleExposure, scheduler.ModuleIntel}
 	webStandard := append(append([]string{}, webSafe...), scheduler.ModuleParamReflection, scheduler.ModuleBackupDiscovery,
-		scheduler.ModuleOpenRedirect, scheduler.ModuleXSS, scheduler.ModuleSQLi, scheduler.ModuleCORS, scheduler.ModuleJWT)
+		scheduler.ModuleAPIDataExposure, scheduler.ModuleOpenRedirect, scheduler.ModuleXSS, scheduler.ModuleSQLi, scheduler.ModuleCORS, scheduler.ModuleJWT)
 	switch profile {
 	case "safe":
 		modules = webSafe

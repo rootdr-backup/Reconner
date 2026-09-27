@@ -98,6 +98,34 @@ func TestRequestIdentityOptOutAndToolArgs(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedRequestIdentityKeepsAttributionButDropsSecrets(t *testing.T) {
+	id := requestIdentity{
+		userAgent: "Authorized Researcher",
+		headers: http.Header{
+			"X-Program":     {"public-bounty"},
+			"X-Researcher":  {"team"},
+			"Authorization": {"Bearer secret"},
+			"Cookie":        {"session=secret"},
+			"X-Api-Token":   {"secret"},
+		},
+		hosts: []string{"example.com"},
+	}
+	ctx := context.WithValue(context.Background(), requestIdentityKey{}, id)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com/data", nil)
+	got := ApplyUnauthenticatedRequestIdentity(req)
+	if got.Header.Get("User-Agent") != "Authorized Researcher" || got.Header.Get("X-Program") != "public-bounty" || got.Header.Get("X-Researcher") != "team" {
+		t.Fatalf("non-secret attribution missing: %#v", got.Header)
+	}
+	for _, name := range []string{"Authorization", "Cookie", "X-Api-Token"} {
+		if got.Header.Get(name) != "" {
+			t.Fatalf("credential-like header %s leaked: %#v", name, got.Header)
+		}
+	}
+	if applied := ApplyRequestIdentity(got); applied.Header.Get("Authorization") != "" || applied.Header.Get("Cookie") != "" {
+		t.Fatalf("full identity was re-applied after opt-out: %#v", applied.Header)
+	}
+}
+
 func TestRequestURLInTargetScopeHandlesMultipleAssets(t *testing.T) {
 	ctx := context.Background()
 	if !requestURLInTargetScope(ctx, "one.example,https://two.example/app", "https://api.two.example/data") {

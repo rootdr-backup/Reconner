@@ -93,20 +93,21 @@ var capParams = []string{
 // so their closures reference the params bundle only.
 var moduleRequires = map[string][]string{
 	// parameter / endpoint driven
-	ModuleSQLi:         capParams,
-	ModuleNoSQLi:       capParams,
-	ModuleLFI:          capParams,
-	ModuleSSTI:         capParams,
-	ModuleCSTI:         capParams,
-	ModuleDAST:         capParams,
-	ModuleXSS:          capParams, // standalone reflected-XSS objective
-	ModuleVulnScan:     capParams,
-	ModuleIDOR:         capParams,
-	ModuleJWT:          capParams,
-	ModuleOpenRedirect: capParams,
-	ModuleRace:         capParams,
-	ModuleAuthz:        capParams,
-	ModuleATO:          capParams, // redirect analysis is internal (checkOpenRedirectURL)
+	ModuleSQLi:            capParams,
+	ModuleNoSQLi:          capParams,
+	ModuleLFI:             capParams,
+	ModuleSSTI:            capParams,
+	ModuleCSTI:            capParams,
+	ModuleDAST:            capParams,
+	ModuleXSS:             capParams, // standalone reflected-XSS objective
+	ModuleVulnScan:        capParams,
+	ModuleIDOR:            capParams,
+	ModuleJWT:             capParams,
+	ModuleOpenRedirect:    capParams,
+	ModuleRace:            capParams,
+	ModuleAuthz:           capParams,
+	ModuleATO:             capParams, // redirect analysis is internal (checkOpenRedirectURL)
+	ModuleAPIDataExposure: capParams,
 	// blind classes own their OOB confirmation internally (shared oobCapability),
 	// so they need only the params bundle — NOT a multi-class OAST detector module.
 	ModuleSSRF:       capParams,

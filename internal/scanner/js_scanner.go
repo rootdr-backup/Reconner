@@ -108,7 +108,7 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 				  AND status NOT IN ('CONFIRMED','VERIFIED')
 			)
 		  )`, targetID, targetID)
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM js_findings WHERE target_id=? AND type='dom_param'`, targetID)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM js_findings WHERE target_id=? AND type IN ('dom_param','api_param')`, targetID)
 
 	var targetDomain string
 	_ = s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id = ?`, targetID).Scan(&targetDomain)
@@ -774,6 +774,7 @@ func (s *JSScanner) analyzeJSContent(ctx context.Context, targetID, jsURL string
 		jsFileID = existingID
 	}
 	s.storeDOMParamHints(ctx, targetID, jsFileID, string(content))
+	s.storeAPIParamHints(ctx, targetID, jsFileID, string(content))
 
 	findings := s.extractFindings(string(content), jsURL)
 
@@ -790,6 +791,7 @@ func (s *JSScanner) analyzeJSContent(ctx context.Context, targetID, jsURL string
 		findings = append(findings, s.extractFindings(recovered, jsURL+" (source-map)")...)
 		s.storeDOMXSSFindings(ctx, targetID, jsURL+" (source-map)", recovered, true)
 		s.storeDOMParamHints(ctx, targetID, jsFileID, recovered)
+		s.storeAPIParamHints(ctx, targetID, jsFileID, recovered)
 	}
 
 	for _, f := range findings {

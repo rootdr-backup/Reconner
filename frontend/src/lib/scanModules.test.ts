@@ -43,4 +43,13 @@ describe('scan module catalog', () => {
     expect(resolved.has('xss')).toBe(false)
     expect(resolved.has('xxe')).toBe(false)
   })
+
+  it('plans API data exposure with the request-vocabulary pipeline', () => {
+    const resolved = resolveModuleSelection(new Set(['api_data_exposure']))
+    for (const id of ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'param_reflection', 'api_data_exposure', 'verify']) {
+      expect(resolved.has(id), id).toBe(true)
+    }
+    expect(resolved.has('subdomain_enum')).toBe(false)
+    expect(resolved.has('sqli')).toBe(false)
+  })
 })

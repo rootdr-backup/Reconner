@@ -471,7 +471,7 @@ func TestEveryModuleIsPlannable(t *testing.T) {
 	}
 }
 
-// TestNewlyPlannedDetectorsExpand proves the four modules that were previously
+// TestNewlyPlannedDetectorsExpand proves the modules that were previously
 // gaps (dir_discovery, backup_discovery, blh, monitor) now expand into a real
 // pipeline when selected alone: recon runs, the module runs, no unrelated
 // detector is scheduled.
@@ -479,6 +479,7 @@ func TestNewlyPlannedDetectorsExpand(t *testing.T) {
 	want := map[string][]string{
 		ModuleDirDiscovery:    {ModuleHTTPProbe, ModuleDirDiscovery},
 		ModuleBackupDiscovery: {ModuleHTTPProbe, ModuleBackupDiscovery},
+		ModuleAPIDataExposure: {ModuleHTTPProbe, ModuleJSAnalysis, ModuleJSEndpoints, ModuleParamDiscovery, ModuleParamReflection, ModuleAPIDataExposure},
 		ModuleBLH:             {ModuleHTTPProbe, ModuleBLH},
 		ModuleMonitor:         {ModuleHTTPProbe, ModuleJSAnalysis, ModuleMonitor},
 	}

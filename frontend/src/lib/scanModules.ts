@@ -43,6 +43,7 @@ export const SCAN_MODULES: ScanModule[] = [
   { id: 'shodan', label: 'Shodan intelligence', desc: 'Passive Shodan enrichment; requires an API key.', group: 'exposure', tier: 'safe', requires: core },
 
   { id: 'open_redirect', label: 'Open redirect', desc: 'Focused redirect validation over discovered parameters.', group: 'validation', tier: 'active', requires: params },
+  { id: 'api_data_exposure', label: 'API data exposure', desc: 'Correlate JavaScript parameters across API routes, negotiate advertised read methods, and confirm unauthenticated sensitive-data schemas with stable replay.', group: 'validation', tier: 'active', requires: params },
   { id: 'xss', label: 'XSS', desc: 'Context-aware XSS validation; findings require real browser execution proof.', group: 'validation', tier: 'active', requires: params },
   { id: 'sqli', label: 'SQL injection', desc: 'Differential SQL injection detection over preserved request contracts.', group: 'validation', tier: 'active', requires: params },
   { id: 'nosqli', label: 'NoSQL injection', desc: 'Focused NoSQL operator and error-differential checks.', group: 'validation', tier: 'active', requires: params },
@@ -79,7 +80,7 @@ export const DETECTOR_IDS = new Set(SCAN_MODULES.filter(module =>
   'open_redirect', 'xss', 'sqli', 'nosqli', 'ssrf', 'lfi', 'ssti', 'csti', 'xxe', 'file_upload', 'cmdi',
   'cors', 'csrf', 'vuln_scan', 'blh', 'jwt', 'idor', 'authz', 'ato', 'oast', 'cache_poison',
   'race', 'smuggling', 'nuclei', 'takeover', 'origin_ip', 'shodan', 'passive', 'exposure', 'intel',
-  'dir_discovery', 'backup_discovery',
+  'dir_discovery', 'backup_discovery', 'api_data_exposure',
 ]))
 
 export function resolveModuleSelection(explicit: Set<string>): Set<string> {
@@ -109,4 +110,4 @@ export const SCAN_BUNDLES = [
 ]
 
 export const SAFE_PROFILE = ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'passive', 'exposure', 'intel']
-export const STANDARD_PROFILE = [...SAFE_PROFILE, 'param_reflection', 'backup_discovery', 'open_redirect', 'xss', 'sqli', 'cors', 'jwt']
+export const STANDARD_PROFILE = [...SAFE_PROFILE, 'param_reflection', 'backup_discovery', 'api_data_exposure', 'open_redirect', 'xss', 'sqli', 'cors', 'jwt']

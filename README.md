@@ -176,6 +176,9 @@ zero false positives or false negatives on arbitrary applications. See the
   browser discovery;
 - recursive JavaScript dependencies, source maps, endpoints, API schemas,
   GraphQL, forms, query/path/header/cookie/JSON/XML insertion points;
+- cross-asset API data-exposure workflows that correlate high-signal JavaScript
+  parameters, negotiate advertised read methods/content types, and retain only
+  replay-stable redacted schema evidence;
 - directory, backup/config exposure, takeover, broken-link, origin, and admin
   panel intelligence;
 - reflected and DOM XSS with context selection and browser execution proof;

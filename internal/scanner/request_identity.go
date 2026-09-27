@@ -190,6 +190,48 @@ func ApplyRequestIdentity(req *http.Request) *http.Request {
 	return clone
 }
 
+// ApplyUnauthenticatedRequestIdentity keeps the operator's non-secret traffic
+// attribution (User-Agent, X-Researcher, program identifiers, etc.) while
+// guaranteeing that an unauthenticated proof cannot inherit a configured
+// Cookie, Authorization or token-like header. The returned request is marked so
+// identityRoundTripper does not add the full identity again at send time.
+func ApplyUnauthenticatedRequestIdentity(req *http.Request) *http.Request {
+	if req == nil {
+		return req
+	}
+	id, ok := req.Context().Value(requestIdentityKey{}).(requestIdentity)
+	if !ok || !requestIdentityApplies(id, req) {
+		return SkipRequestIdentity(req)
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if id.userAgent != "" {
+		clone.Header.Set("User-Agent", id.userAgent)
+	}
+	for name, values := range id.headers {
+		if credentialLikeScanHeader(name) || clone.Header.Get(name) != "" || strings.EqualFold(name, "User-Agent") {
+			continue
+		}
+		for _, value := range values {
+			clone.Header.Add(name, value)
+		}
+	}
+	return SkipRequestIdentity(clone)
+}
+
+func credentialLikeScanHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "authorization" || lower == "proxy-authorization" || lower == "cookie" || lower == "set-cookie" {
+		return true
+	}
+	for _, token := range []string{"token", "secret", "session", "csrf", "xsrf", "api-key", "apikey"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 // SkipRequestIdentity preserves probes where User-Agent itself is the payload
 // (header SQLi and Shellshock). Other requests must not bypass compliance.
 func SkipRequestIdentity(req *http.Request) *http.Request {

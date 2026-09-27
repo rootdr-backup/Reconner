@@ -129,7 +129,7 @@ architecture, coverage, precision, or performance.
 
 ## Plan for every current Reconner module
 
-The table maps all 43 contracts in `V3ModuleContracts`; it proposes work but
+The table maps all current contracts in `V3ModuleContracts`; it proposes work but
 does not change the existing parallel execution model.
 
 | Module | Main gap to close | Planned upgrade and release gate | Priority |
@@ -143,6 +143,7 @@ does not change the existing parallel execution model.
 | `timemachine` | Archive noise and stale scope | Snapshot clustering, live-vs-archive diff, historical parameter/asset provenance and strict host admission | P2 |
 | `param_reflection` | Encoded/transformed reflection | Byte/decoder/DOM normalization chain, multi-context retention and response-family controls | P0 |
 | `paramfuzz` | Cost and hidden-name confidence | Schema/content-type-specific dictionaries, shape sampling, two-control differential and adaptive expansion | P1 |
+| `api_data_exposure` | Cross-host contract correlation and unauthenticated data minimization | JS/request parameter scoring, advertised read-method/content-type negotiation, schema-only PII classification, negative controls and stable replay without persisting raw values | P0 |
 | `dir_discovery` | SPA/catch-all and duplicate content | Semantic response families, redirect chains, soft-404 calibration per prefix and representative-first expansion | P1 |
 | `backup_discovery` | Name/location combinatorics and weak status signals | Asset-derived stems, nested path context, archive/config/database magic signatures, compressed member manifest, duplicate-content clustering | P1 |
 | `open_redirect` | Client-side and parser differences | Server and rendered navigation traces, URL parser/encoding normalization, scheme/host controls and safe external sentinel | P1 |

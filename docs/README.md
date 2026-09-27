@@ -13,6 +13,7 @@ you need detector-level detail.
 | [Scanning guide](SCANNING_GUIDE.md) | Scope types, web/network plans, phase controls, corpora, evidence, and exports |
 | [Docker reference](../README.Docker.md) | Image composition, Compose layout, persistence, and runtime capabilities |
 | [Capability matrix](V3_CAPABILITY_MATRIX.md) | Module prerequisites, positive-proof contracts, and support boundaries |
+| [API data-exposure workflow](API_DATA_EXPOSURE_WORKFLOW.md) | Research basis, request-safety gates, method negotiation, and local regression corpus |
 
 ## Quality and verification evidence
 

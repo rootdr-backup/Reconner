@@ -125,6 +125,7 @@ const REMEDIATION: Record<string, string> = {
   cache_poison: 'Do not reflect unkeyed request inputs into cacheable responses; include all response-affecting inputs in the cache key or mark responses no-store.',
   cache_poisoning: 'Do not reflect unkeyed request inputs into shared-cacheable responses; include every response-affecting input in the cache key or mark the response private/no-store.',
   takeover: 'Remove the dangling DNS record or reclaim the referenced third-party resource; monitor for dangling CNAMEs.',
+  api_data_exposure: 'Require authentication and object/property authorization before returning personal or secret data. Return only allowlisted fields needed by the client, apply no-store/private caching, rotate any exposed credentials, and remove sensitive values from unauthenticated responses.',
 }
 function remediationFor(t: string): string {
   return REMEDIATION[String(t || '').toLowerCase()] ||
@@ -396,6 +397,7 @@ export default function TargetDetail() {
         param_reflection: 'params',
         dir_discovery: 'dirs',
         backup_discovery: 'backups',
+        api_data_exposure: 'vulns',
         open_redirect: 'redirects',
         nuclei: 'nuclei',
         vuln_scan: 'vulns',

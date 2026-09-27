@@ -30,8 +30,8 @@ Web profiles are module presets, not claims about coverage completeness.
 - **Safe** prioritizes surface mapping and low-impact observation: HTTP,
   JavaScript, endpoints, parameters, passive checks, exposures, and technology
   intelligence.
-- **Standard** adds reflection, backup discovery, open redirect, XSS, SQLi,
-  CORS, and JWT checks.
+- **Standard** adds reflection, backup discovery, API data-exposure correlation,
+  open redirect, XSS, SQLi, CORS, and JWT checks.
 - **Custom** lets the operator select individual modules and higher-cost or
   timing-sensitive checks.
 
