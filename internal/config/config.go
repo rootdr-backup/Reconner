@@ -203,96 +203,10 @@ type Config struct {
 	// that point in the current run — this field is the FLOOR, not a hard ceiling
 	// that ignores target size.
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
-	// Legacy network-executor notes below describe removed v2 configuration keys.
-	// There are deliberately no corresponding Config fields in this build: JSON's
-	// unknown keys are ignored for upgrade compatibility, and scan admission
-	// rejects network projects instead of pretending these controls are active.
-	// NetworkFullPortScan made naabu scan all 65535 ports instead of the curated
-	// high-signal set. Slower but exhaustive; off by default.
-	// NetworkBasicAuthCheck enables the DEFAULT-credential check against exposed
-	// HTTP Basic-auth panels found during a network scan, using a curated set
-	// compiled from the well-known public datasets (SecLists default-passwords +
-	// DefaultCreds cheat-sheet). On by default.
-	// NetworkBruteforce turns on Reconner's native credential brute-force for
-	// exposed SSH/RDP/SMB/VNC services (our own Go engines — no hydra). ACTIVE and
-	// aggressive: OFF by default so it never runs by accident or locks out
-	// accounts. Only enable against in-scope network targets you're authorized to
-	// test. Paced + capped + stop-on-first-success.
-	// NetworkBruteUsersFile / NetworkBrutePassFile optionally point at wordlist
-	// files (e.g. SecLists) that OVERRIDE the built-in curated lists for a full
-	// brute-force run. Empty ⇒ use the built-in high-signal defaults.
-	// NetworkBruteDebug writes a per-host handshake DIAGNOSTIC trace (raw bytes,
-	// NT/CredSSP status codes, TLS stages) for the native SMB/RDP/VNC engines to
-	// <DataDir>/brute-debug.log — hand that file back to debug a protocol edge
-	// case. Off by default.
-	// Brute-force concurrency knobs. Higher = faster, but too high gets you blocked
-	// or locks out accounts (RDP is the sensitive one — keep it modest). 0 ⇒ the
-	// balanced built-in default is used.
-	//   ssh/vnc: native Go worker count.  smb/rdp: hydra parallel tasks.
-	// Tuned for aggressive network-range spraying (many hosts, short password
-	// list) rather than a single-host deep wordlist run. STILL bounded — RDP in
-	// particular can trip Windows account-lockout policy or connection-flood
-	// protections above roughly 20-30 concurrent NLA attempts per host; going
-	// higher risks locking out real accounts (an availability/ROE issue, not
-	// just noise). Tune down per-engagement if the target's lockout threshold
-	// is tight.
-	// NetworkBruteHostConcurrency bounds how many DIFFERENT host:port brute
-	// targets run in parallel across the whole BruteRun phase (the cross-host
-	// spray fan-out — the main lever for "spray a /24 fast" rather than
-	// per-host thread count). 0 ⇒ built-in default.
-	// NetworkVerifyFindings re-confirms every cracked network credential with a
-	// fresh, independent second attempt before it is written as a CONFIRMED finding
-	// — the anti-false-positive backstop for the brute-force phase. A hit that does
-	// not reproduce is recorded as UNVERIFIED (lower severity/confidence) instead of
-	// a confirmed critical. On by default; turn off only for speed on trusted paths.
-	// IngramEnabled turns on the bundled third-party "Ingram" IP-camera/DVR/NVR
-	// vulnerability scanner (github.com/jorhelp/Ingram — a separate Python tool
-	// the operator installs alongside Reconner, NOT vendored into this repo) as
-	// part of the network module pipeline. It fingerprints ~15 camera/DVR
-	// vendors (Dahua/Hikvision/Xiongmai/Uniview/Avtech/...) against every live
-	// host and, for each match, runs vendor-specific PoCs: mostly weak/default
-	// credential checks (same class as NetworkBruteforce) plus a handful of
-	// known-CVE auth-bypass/RCE confirmations. ACTIVE and aggressive, same as
-	// NetworkBruteforce: off by default, only enable against network targets
-	// you're authorized to test.
-	// IngramPath is the absolute path to Ingram's run_ingram.py entrypoint.
-	// Empty ⇒ Ingram is skipped even if IngramEnabled is true (nothing to run).
-	// IngramPythonPath is the Python 3 interpreter used to run Ingram. Empty ⇒
-	// "python3" from PATH. Point this at a venv interpreter if Ingram's deps
-	// (see its requirements.txt) are installed in one.
-	// IngramThreads / IngramTimeoutMinutes tune Ingram's own concurrency and
-	// bound how long a single network target's Ingram pass can run for (phase
-	// timeout, mirrors BruteRun's 2h cap) so it can't approach the overall scan
-	// watchdog. 0 ⇒ built-in defaults (100 threads, adaptive up to 360 minutes).
-	// A NEGATIVE IngramTimeoutMinutes removes the phase bound entirely so a
-	// camera/DVR sweep runs to completion in a single pass instead of being cut
-	// off and resumed on the next run.
-	// NetworkInitialAccess turns on Reconner's initial-access engine: for every
-	// discovered service it actively confirms the ones that grant access with NO
-	// credentials (unauthenticated Redis/Docker/Kubernetes/MongoDB/Elasticsearch/
-	// etcd/Jenkins-console/Portainer/Jupyter/…, anonymous FTP/LDAP/rsync, no-auth
-	// VNC) plus a curated set of pre-auth file-read / auth-bypass CVEs on edge
-	// gear (Fortinet CVE-2018-13379, F5 CVE-2020-5902, Citrix CVE-2019-19781,
-	// Apache CVE-2021-41773). Every check is read-only and gated by a strong
-	// positive signature, so a hit is a real, reproducible foothold. ACTIVE and
-	// opt-in, same posture as NetworkBruteforce/Ingram: OFF by default — only
-	// enable against network targets you're authorized to test.
-	// NetworkInitialAccessTimeoutMinutes bounds the initial-access phase (mirrors
-	// BruteRun's 2h / Ingram's cap) so it can't approach the scan watchdog. 0 ⇒
-	// built-in default (30 minutes); the checks are short single round-trips, so
-	// this covers a large range comfortably.
-	// NetworkADRealm optionally sets the Active Directory Kerberos realm (e.g.
-	// "CORP.LOCAL") used by the AS-REP roasting pass. When empty the realm is
-	// derived automatically from an anonymous LDAP rootDSE on the same host; set
-	// this only when anonymous LDAP is blocked but Kerberos (88) is reachable.
-	// NetworkBruteSpray switches the credential engine from per-service depth
-	// (user×password, stop on first hit) to PASSWORD SPRAYING: one password tried
-	// across every user before moving to the next, with a delay between rounds, and
-	// EVERY valid pair collected. This is the lockout-safe, AD-appropriate strategy
-	// for a red-team engagement. Only meaningful when NetworkBruteforce is on.
-	// NetworkBruteSprayDelaySeconds is the pause between spray rounds (each round =
-	// one password against all users). 0 ⇒ built-in default (5s). Raise it to stay
-	// well under a domain's lockout observation window.
+	// Removed v2 network configuration keys are intentionally absent. v3.4 uses
+	// explicit, asset-gated Network Fast/Normal/Deep plan tokens; old JSON keys are
+	// ignored for upgrade compatibility instead of implying an inactive feature
+	// still runs. The only credential phase is the explicit HTTP Basic audit.
 	// OOBRawPort is the TCP port the watchtower's raw out-of-band listener binds
 	// while the service is running to catch NON-HTTP callbacks — specifically the
 	// LDAP/JNDI connection a Log4Shell (CVE-2021-44228) payload makes back to us.
@@ -301,11 +215,6 @@ type Config struct {
 	// port 1389. Needs BlindXSSCallbackURL set (for the reachable host) and this
 	// port open to the target. Only bound in serve mode.
 	OOBRawPort int `json:"oob_raw_port"`
-	// IngramSnapshotsDisabled was a removed camera-snapshot control. Snapshots are
-	// ON by default (this flag is inverted so the zero-value = enabled): for every
-	// device Ingram cracks it grabs one still image from the live feed and
-	// Reconner stores it as a screenshot linked to the finding's evidence. Set
-	// "ingram_snapshots_disabled": true to skip the extra image download.
 	// EnableDAST turns on Reconner's native context-aware DAST engine — per-
 	// parameter reflection-context classification + differential markup-injection
 	// confirmation (XSS) and broken-quote error-differential (SQLi candidates for

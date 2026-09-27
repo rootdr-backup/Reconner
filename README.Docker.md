@@ -1,9 +1,9 @@
 # Running Reconner with Docker
 
 A single, reproducible container image that bundles the Go backend, the built
-React dashboard, **and** the whole recon tool-chain (subfinder, httpx, nuclei,
-katana, naabu, dnsx, dalfox, subzy, gau, waybackurls, …) plus headless Chromium
-and nmap — so there is nothing to `go install` on the host and no version drift.
+React dashboard, the pinned recon toolchain, headless Chromium, and Nmap. There
+is nothing to `go install` on the host and the finished image executes every
+required command during its build before publication.
 
 ## Files
 
@@ -19,11 +19,14 @@ and nmap — so there is nothing to `go install` on the host and no version drif
 Drop these into the **root of the repository** (next to `go.mod`, `cmd/`,
 `internal/`, `frontend/`).
 
-## Quick start
+## Quick start with the published image
 
 ```bash
-cp .env.example .env          # set HOST_PORT + admin credentials
-docker compose up -d --build  # build the image and start it
+cp .env.example .env
+docker compose pull reconner
+docker compose up -d reconner
+docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
 ```
 
 Open the dashboard at `http://<host>:8080/`.
@@ -31,8 +34,31 @@ Open the dashboard at `http://<host>:8080/`.
 ```bash
 docker compose logs -f        # follow logs
 docker compose down           # stop (data is kept in the volume)
-docker compose up -d --build  # update to newer code, DB untouched
 ```
+
+For a local build of the checked-out source, use
+`docker compose up -d --build reconner` instead. A clean build compiles the
+complete multi-stage toolchain and takes substantially longer than pulling the
+published image.
+
+## Upgrade
+
+Back up `/data`, wait for active scans to finish, then run:
+
+```bash
+git fetch --tags origin
+git switch main
+git pull --ff-only origin main
+docker compose pull reconner
+docker compose up -d --no-deps reconner
+docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
+```
+
+Normal replacement keeps the named volume. Never add `-v` to `docker compose
+down` during an update; it deletes the persistent data volume. See the
+[operator guide](docs/OPERATOR_GUIDE.md) for backups, version pinning, resource
+sizing, and recovery.
 
 ## Login credentials
 
@@ -95,9 +121,8 @@ table. Do not set `limits.max_memory_mb` above the Compose memory limit.
   it runs `--no-sandbox` (already handled in code) and gets `shm_size: 512m`.
 - **First-run nuclei templates**: provisioned automatically on the first scan;
   they are cached in the volume afterwards.
-- **Reproducible tool versions**: the tool-chain is pinned by the module proxy at
-  build time. To freeze exact versions, change an `@latest` in the `Dockerfile`
-  tools stage to a tag (e.g. `nuclei/v3/cmd/nuclei@v3.3.5`).
+- **Reproducible tool versions**: every Go and downloaded binary version is
+  pinned by a Docker build argument; release-asset checksums are verified.
 - **Registry image name**: the CI workflow pushes to
   `ghcr.io/rootdr-backup/reconner` (lowercase, as ghcr requires). Adjust the
   `IMAGE` env in the workflow and the `image:` in compose if your path differs.

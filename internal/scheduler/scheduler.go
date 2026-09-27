@@ -72,10 +72,10 @@ const (
 	ModuleSmuggling       = "smuggling"
 	ModuleVerify          = "verify"
 	ModuleMonitor         = "monitor"
-	// Legacy network module tokens remain defined only so old queued tasks and
-	// API clients receive an explicit unsupported error. They are rejected at
-	// admission and are intentionally absent from AllModules in this web-only
-	// release; none of them has an executor.
+	// Network phase IDs are planned through the asset-gated network pipeline and
+	// intentionally stay outside AllModules, whose contract table describes the
+	// web pipeline. Only the four phases admitted by isNetworkModule execute;
+	// older network tokens remain defined so upgrades fail them explicitly.
 	ModuleNetwork              = "network"
 	ModuleNetworkBrute         = "network_brute"
 	ModuleNetworkBackup        = "network_backup"

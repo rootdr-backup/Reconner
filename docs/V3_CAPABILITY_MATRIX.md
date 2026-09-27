@@ -1,9 +1,11 @@
-# Reconner v3 Supported Capability Matrix
+# Reconner v3.4 Supported Capability Matrix
 
-This matrix freezes the v3 web-scanning surface. The executable authority is
+This matrix describes the shipped v3.4 web and explicit network execution
+surfaces. The web-module authority is
 `internal/scheduler/module_contracts.go`; its regression test requires exactly
 one complete contract and an existing proof suite for every entry in
-`scheduler.AllModules`.
+`scheduler.AllModules`. Network modules are admitted through a separate,
+asset-gated plan so they cannot be mixed accidentally with web modules.
 
 A completed phase means its eligible inputs were attempted. It does not mean
 the target is clean when prerequisites were missing. Those cases must be
@@ -56,10 +58,24 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 | `verify` | Postprocess | Pending verifiable candidate | Independent class-specific verifier result |
 | `monitor` | Monitor | Live or previous snapshot | Stable repeated diff against persisted baseline |
 
+## Explicit network pipeline
+
+Network profile names are planning tokens, not executable phases. Each profile
+always includes `network`; Normal and Deep add only the compatible validation
+modules described below.
+
+| Module | Class | Minimum prerequisite | Positive-proof contract |
+|---|---|---|---|
+| `network` | Discovery | Admitted single IP, CIDR, or inclusive IP range | Verified TCP connectivity plus persisted host/port/service/banner evidence; bounded OS evidence when capabilities permit |
+| `network_nuclei_only` | Detector | Verified open network services and Nuclei binary | Parsed network/TCP template evidence with the same severity, exclusion, and noise gates as web Nuclei intake |
+| `network_initial_access` | Detector | Discovered HTTP service returning a stable 401/403 control | Two stable denied controls followed by two materially different, identical successful replays |
+| `network_brute` | Detector | Real HTTP Basic challenge and explicit operator selection | Paced credential attempt with two identical success replays; lockout/rate-limit response aborts the audit |
+
 ## Supported target and request boundaries
 
-- New execution supports web domains, web hosts, full HTTP(S) URLs, and
-  JavaScript URL seeds admitted by the target scope rules.
+- New execution supports web domains, web hosts, full HTTP(S) URLs, JavaScript
+  URL seeds, single IPs, CIDRs, and bounded inclusive IP ranges admitted by the
+  target scope rules.
 - Query, path, form, JSON, XML, headers, cookies, browser, authenticated replay,
   and OAST are supported only by the modules whose prerequisite contract
   declares that surface. A selected module with no eligible shape must expose
@@ -69,7 +85,8 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
 - Provider-backed phases require their configured credential and distinguish an
   empty provider result from a provider/request failure.
 - External-tool phases must report missing or failed tools. The runtime
-  inventory is pinned and contains only tools called by supported web paths.
+  inventory is pinned and contains only tools called by supported web or
+  explicit network paths.
 - Operator corpora extend, but never replace, compiled defaults. Normalization,
   deduplication and category-specific proof-template validation happen before a
   custom entry becomes eligible for scanner use.
@@ -77,15 +94,16 @@ reported as `blocked`, `unsupported`, `failed`, `timed_out`, `skipped`, or
   identity. Every redirect hop is scope-checked and failed assets remain visible
   in the bundle manifest.
 
-## Explicitly unsupported in v3.0.0 stability scope
+## Network boundaries and retired tokens
 
-Network/CIDR scanning, service/port discovery, network credential testing, and
-camera/DVR discovery have no executor in this source tree. New network or mixed
-targets and all legacy network module tokens are rejected before task creation
-by the web API, scheduler, and Telegram management bot. Existing legacy rows
-remain readable/exportable so upgrades do not destroy user data.
-
-This boundary is intentional release truth, not a permanent product decision.
-Those capabilities may return only after they have a real executor, phase
-ledger semantics, proof contracts, negative controls, packaging, cancellation,
-and end-to-end tests.
+- Network execution is never implied by a web profile. A compatible asset and
+  explicit Network Fast, Normal, or Deep selection are both required.
+- Recognized CDN/WAF edges and configured IP/CIDR exclusions are removed before
+  probing. ICMP is evidence only and never a liveness gate.
+- `network_backup`, `network_ingram`, `network_devices`, and their legacy alias
+  tokens remain rejected because they have no v3.4 executor or proof contract.
+  Existing historical rows remain readable/exportable so upgrades do not
+  destroy user data.
+- There is no separate camera/DVR credential or device-takeover executor.
+  Service fingerprints may still appear as network discovery evidence, but
+  discovery is not promoted into a vulnerability by product name alone.
