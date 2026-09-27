@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -65,16 +66,22 @@ func TestOpenRedirectExternalVsInternal(t *testing.T) {
 	}
 }
 
-func TestStripScriptStyleReflection(t *testing.T) {
-	// Probe only inside <script> → must NOT count.
-	jsOnly := "<html><body>hello</body><script>var x='" + reflectProbe + "';</script></html>"
-	if strings.Contains(stripScriptStyle(jsOnly), reflectProbe) {
-		t.Error("JS-only reflection should be stripped")
-	}
-	// Probe in real HTML body → must count.
-	htmlBody := "<html><body>echo " + reflectProbe + "</body></html>"
-	if !strings.Contains(stripScriptStyle(htmlBody), reflectProbe) {
-		t.Error("HTML-body reflection should remain")
+// TestCheckParamReflectionCountsScriptOnlyEcho proves a reflection landing
+// ONLY inside a <script> block still sets is_reflected — this is exactly the
+// JS-string/JS-expression context xss_context.go's CtxJSString/CtxJSExpr
+// analysis is built to prove executable, so it must not be invisible to the
+// parameter-reflection inventory that gates verify.go's final reflected-XSS
+// pass. An earlier version stripped <script>/<style> before checking and
+// silently discarded this whole class.
+func TestCheckParamReflectionCountsScriptOnlyEcho(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body>hello</body><script>var x='%s';</script></html>", r.URL.Query().Get("q"))
+	}))
+	defer srv.Close()
+	if reflected, htmlSink := checkParamReflection(srv.URL+"/?q=seed", "q"); !reflected || !htmlSink {
+		t.Errorf("script-only reflection must count as reflected (reflected=%v htmlSink=%v)", reflected, htmlSink)
 	}
 }
 

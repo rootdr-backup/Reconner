@@ -13,12 +13,6 @@ import (
 	"time"
 )
 
-// reflectProbe is a fixed marker kept only for the fallback path. The primary
-// reflection check now uses a UNIQUE random canary per request (ex-param style),
-// so a value that merely happens to sit on the page can't be mistaken for a
-// reflection of our injected input.
-const reflectProbe = "r3fl3ct9xPROBE"
-
 // reflectMarker is the branded, human-recognizable canary base injected into the
 // parameter's value. It carries a unique random suffix per request so a value
 // that merely happens to sit on the page can't be mistaken for a reflection of
@@ -44,11 +38,24 @@ var reflectClient = &http.Client{
 }
 
 // checkParamReflection injects a unique canary into `param` and reports whether it
-// is reflected VERBATIM into the HTML body (outside <script>/<style>), plus whether
-// the response is an HTML document at all (htmlSink) so the caller can decide to
-// escalate a non-reflected-but-HTML param to a real browser (SPA/DOM reflection).
-// It retries once on a transient/WAF failure. A random per-request canary rules out
-// coincidental matches; script/style stripping rules out JS-only echoes.
+// is reflected VERBATIM anywhere in the HTML-rendered body — INCLUDING inside
+// <script>/<style> blocks, which xss_context.go's CtxJSString/CtxJSExpr/CtxCSS
+// analysis is specifically built to prove executable (a JS-context reflection is
+// often the most exploitable kind, not a case to discard). An earlier version
+// stripped <script>/<style> before checking, on the theory that it "ruled out
+// JS-only echoes" — but the canary is a random per-request token, never a
+// coincidental JS identifier, so a verbatim match inside a script block is
+// exactly as real a reflection as one in the surrounding markup. Stripping it
+// made every JS/CSS-context-only reflected parameter invisible to
+// parameters.is_reflected, and therefore invisible to verify.go's final
+// catch-all reflected-XSS pass, which filters strictly on that flag — a silent
+// false negative for the entire JS-context reflected-XSS class whenever the
+// main DAST pass hadn't already tested that exact insertion point.
+// checkParamReflection also reports whether the response is an HTML document at
+// all (htmlSink) so the caller can decide to escalate a non-reflected-but-HTML
+// param to a real browser (SPA/DOM reflection). It retries once on a
+// transient/WAF failure; a random per-request canary rules out coincidental
+// matches.
 func checkParamReflection(rawURL, param string) (reflected, htmlSink bool) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -100,18 +107,9 @@ func checkParamReflection(rawURL, param string) (reflected, htmlSink bool) {
 		return false, false
 	}
 
-	// Count a reflection that appears VERBATIM in the returned HTML body (outside
-	// <script>/<style>).
-	html := stripScriptStyle(string(body))
-	return strings.Contains(html, canary), true
-}
-
-var reScriptStyleBlock = regexp.MustCompile(`(?is)<(script|style)\b[^>]*>.*?</(script|style)>`)
-
-// stripScriptStyle removes <script> and <style> blocks so reflections that live
-// only inside JS/CSS don't count as HTML-context reflected parameters.
-func stripScriptStyle(html string) string {
-	return reScriptStyleBlock.ReplaceAllString(html, "")
+	// Count a reflection that appears VERBATIM anywhere in the returned body,
+	// script/style blocks included (see the function doc comment above).
+	return strings.Contains(string(body), canary), true
 }
 
 // redirectClass is the verdict of an open-redirect probe.
