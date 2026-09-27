@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"mime/quotedprintable"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,21 @@ import (
 	"strings"
 	"testing"
 )
+
+// qpEncode quoted-printable-encodes s, mirroring what a real
+// php://filter/convert.quoted-printable-encode response body looks like.
+func qpEncode(t *testing.T, s string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	w := quotedprintable.NewWriter(&buf)
+	if _, err := w.Write([]byte(s)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
 
 var regexpOrderBy = regexp.MustCompile(`ORDER BY (\d+)`)
 
@@ -82,6 +99,12 @@ func TestLFINewSignatures(t *testing.T) {
 		{"data wrapper miss", "data://text/plain;base64,x", "<html>404</html>", ""},
 		{"expect hit", "expect://id", "uid=33(www-data) gid=33(www-data) groups=33(www-data)", "expect:// wrapper command execution"},
 		{"expect miss", "expect://id", "<html>command not found</html>", ""},
+		{"log poisoning hit", "/var/log/apache2/access.log", "...rcnLFI_" + lfiLogPoisonMarker + "...", "log poisoning code execution"},
+		{"log poisoning miss", "/var/log/apache2/access.log", "127.0.0.1 - - [GET /index.html] 200", ""},
+		{"rot13 hit", "php://filter/string.rot13/resource=index.php", rot13("<?php echo 'secret'; ?>"), "php://filter rot13 source disclosure"},
+		{"rot13 miss", "php://filter/string.rot13/resource=index.php", "<html>plain page</html>", ""},
+		{"quoted-printable hit", "php://filter/convert.quoted-printable-encode/resource=index.php", qpEncode(t, "<?php echo 'secret'; ?>"), "php://filter quoted-printable source disclosure"},
+		{"quoted-printable miss", "php://filter/convert.quoted-printable-encode/resource=index.php", "<html>plain page</html>", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

