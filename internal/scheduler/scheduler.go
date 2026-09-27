@@ -407,19 +407,21 @@ func (s *Scheduler) recoverPendingTasks() {
 	// its in-memory context is gone, so it can never make progress or be
 	// cancelled. Mark it cancelled rather than blindly resurrecting it — that was
 	// the cause of "stuck running / can't cancel" after a restart.
-	rows, err := s.db.Query(`SELECT id FROM tasks WHERE status IN ('running','paused')`)
+	rows, err := s.db.Query(`SELECT id, target_id FROM tasks WHERE status IN ('running','paused')`)
 	if err == nil {
 		var stale []string
+		staleTargets := map[string]string{}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
+			var id, targetID string
+			if err := rows.Scan(&id, &targetID); err == nil {
 				stale = append(stale, id)
+				staleTargets[id] = targetID
 			}
 		}
 		rows.Close()
 		for _, id := range stale {
 			_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-			s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id})
+			s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id, "target_id": staleTargets[id]})
 		}
 		if len(stale) > 0 {
 			s.logger.Info("Cleaned up zombie running/paused tasks from previous run", "count", len(stale))
@@ -913,7 +915,7 @@ func (s *Scheduler) CancelTask(taskID string) error {
 		return fmt.Errorf("task is already finished and cannot be cancelled")
 	}
 
-	s.hub.Broadcast("task_cancelled", map[string]string{"task_id": taskID})
+	s.hub.Broadcast("task_cancelled", map[string]string{"task_id": taskID, "target_id": targetID})
 	if targetID != "" {
 		s.refreshTargetScanStatus(targetID, "idle", false)
 	}
@@ -967,7 +969,7 @@ func (s *Scheduler) CancelTasksForTarget(targetID string) error {
 			WHERE id=? AND status IN ('running','pending','paused','interrupted')`, id); err != nil {
 			return err
 		}
-		s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id})
+		s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id, "target_id": targetID})
 	}
 	if len(ids) > 0 {
 		s.logger.Info("Cancelled running tasks for deleted target", "target", targetID, "count", len(ids))
@@ -1626,11 +1628,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		`, taskID, level, message, module)
 
 		s.hub.Broadcast("task_log", map[string]any{
-			"task_id": taskID,
-			"level":   level,
-			"module":  module,
-			"message": message,
-			"time":    time.Now().Format(time.RFC3339),
+			"task_id":   taskID,
+			"target_id": targetID,
+			"level":     level,
+			"module":    module,
+			"message":   message,
+			"time":      time.Now().Format(time.RFC3339),
 		})
 	}
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
@@ -1747,6 +1750,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 		s.hub.Broadcast("task_progress", map[string]any{
 			"task_id":            taskID,
+			"target_id":          targetID,
 			"progress":           i,
 			"total":              len(modules),
 			"current_module":     module,

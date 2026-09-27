@@ -51,6 +51,15 @@ func NewHandler(db *database.DB, hub *websocket.Hub, sched *scheduler.Scheduler,
 	if sched != nil {
 		catalog = sched.BountyCatalog()
 	}
+	if hub != nil {
+		hub.SetOwnerLookup(func(targetID string) (int64, bool) {
+			var owner int64
+			if err := db.QueryRow("SELECT owner_id FROM targets WHERE id = ?", targetID).Scan(&owner); err != nil {
+				return 0, false
+			}
+			return owner, true
+		})
+	}
 	return &Handler{
 		db:      db,
 		hub:     hub,
@@ -75,7 +84,7 @@ func (h *Handler) Router() http.Handler {
 
 	// Static files
 	frontendDir := filepath.Join(".", "frontend", "dist")
-	r.HandleFunc("/ws", h.requireAuth(h.hub.ServeWS))
+	r.HandleFunc("/ws", h.requireAuth(h.serveWS))
 	r.PathPrefix("/assets/").Handler(http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(frontendDir, "assets")))))
 	r.HandleFunc("/screenshots/{id}", h.requireAuth(h.serveScreenshot))
 
@@ -341,6 +350,15 @@ func (h *Handler) callerScope(r *http.Request) (userID int64, isAdmin bool) {
 		return uid, false
 	}
 	return uid, u.Role == auth.RoleAdmin
+}
+
+// serveWS upgrades the websocket connection scoped to the caller's own
+// identity, so the hub can restrict live event delivery (findings, task/scan
+// activity) to targets the caller actually owns — an admin still sees
+// everything. requireAuth already ran, so a valid session is guaranteed here.
+func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request) {
+	uid, isAdmin := h.callerScope(r)
+	h.hub.ServeWS(w, r, uid, isAdmin)
 }
 
 // targetOwnerID returns the owner user id of a target (0 for legacy/unknown).
