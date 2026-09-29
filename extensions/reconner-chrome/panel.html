@@ -8,18 +8,48 @@
 </head>
 <body>
   <main>
-    <header><div><h1>Reconner Guided Capture</h1><p>Passive, scoped request/response collection</p></div><span id="state" class="off">Stopped</span></header>
+    <header><div><h1>Reconner Guided Capture</h1><p>Passive, scoped request/response collection + local cross-identity triage</p></div><span id="state" class="off">Stopped</span></header>
     <label>Target scope <small>one hostname or URL prefix per line</small></label>
     <textarea id="scope" rows="4" placeholder="app.example.com&#10;https://api.example.com/v2/"></textarea>
     <div class="row">
-      <label class="grow">Identity label<input id="identity" value="User A" maxlength="80"></label>
+      <label class="grow">Identity label <small>switch this when you switch logged-in user</small><input id="identity" value="User A" maxlength="80"></label>
       <label class="grow">Capture label<input id="label" placeholder="checkout flow" maxlength="120"></label>
     </div>
-    <div class="actions"><button id="toggle" class="primary">Start capture</button><button id="clear">Clear</button><button id="export" disabled>Export JSON</button></div>
+    <div class="actions"><button id="toggle" class="primary">Start capture</button><button id="clear">Clear</button><button id="export" disabled>Export capture JSON</button></div>
     <section class="stats"><div><strong id="unique">0</strong><span>unique</span></div><div><strong id="seen">0</strong><span>seen</span></div><div><strong id="duplicates">0</strong><span>duplicates</span></div><div><strong id="bytes">0 B</strong><span>body data</span></div></section>
     <div id="notice">Open DevTools before browsing. Only traffic matching the scope above is retained.</div>
-    <table><thead><tr><th>#</th><th>Method</th><th>URL</th><th>Status</th><th>Size</th></tr></thead><tbody id="rows"></tbody></table>
+    <table><thead><tr><th>#</th><th>Identity</th><th>Method</th><th>URL</th><th>Status</th><th>Size</th></tr></thead><tbody id="rows"></tbody></table>
+
+    <section class="triage">
+      <h2>Cross-identity IDOR / BAC triage <small>local, passive, heuristic — never replays a request</small></h2>
+      <p class="muted">Runs automatically once traffic from two different identity labels overlaps on the same endpoint or object. Configure the fields below to also catch privilege-escalation and sensitive-path access.</p>
+
+      <details class="config" open>
+        <summary>Identities seen (<span id="identityCount">0</span>) — assign a role tier to unlock privilege-escalation checks</summary>
+        <div id="autoNotice" class="hint-box">Switch the <em>Identity label</em> above and capture the same flow again as a second user to unlock automatic cross-identity checks.</div>
+        <div id="identities"></div>
+      </details>
+
+      <details class="config">
+        <summary>Sensitive / admin-only path patterns <small>optional — one per line, plain substring or /regex/flags</small></summary>
+        <textarea id="sensitivePatterns" rows="3" placeholder="/admin&#10;/internal/&#10;/api/v1/(users|accounts)/[^/]+/export"></textarea>
+      </details>
+
+      <details class="config">
+        <summary>Extra object-id parameter/field names <small>optional — comma or newline separated, added to the built-in list</small></summary>
+        <textarea id="extraIdParams" rows="2" placeholder="acct, ref_no, tenantId"></textarea>
+      </details>
+
+      <div class="row findings-header">
+        <h3>Findings</h3>
+        <span id="findingCounts" class="muted">0 total</span>
+        <span class="grow"></span>
+        <button id="copyFindingsMd">Copy as Markdown</button>
+        <button id="exportFindings" disabled>Export findings JSON</button>
+      </div>
+      <div id="findings"></div>
+    </section>
   </main>
-  <script src="panel.js"></script>
+  <script type="module" src="panel.js"></script>
 </body>
 </html>

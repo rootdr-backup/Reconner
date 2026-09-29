@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Reconner Guided Capture",
-  "version": "0.1.0",
-  "description": "Capture explicitly scoped DevTools traffic into Reconner's passive interchange format.",
+  "version": "0.2.0",
+  "description": "Capture explicitly scoped DevTools traffic into Reconner's passive interchange format, with local cross-identity IDOR/BAC triage.",
   "devtools_page": "devtools.html",
   "permissions": ["storage"],
   "minimum_chrome_version": "114"
