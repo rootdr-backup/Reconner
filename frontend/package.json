@@ -1,6 +1,6 @@
 {
   "name": "reconner-frontend",
-  "version": "4.6.3",
+  "version": "4.6.4",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

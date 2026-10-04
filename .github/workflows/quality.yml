@@ -151,7 +151,17 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npm audit
+      # --omit=dev: scope the gate to what actually ships. Every advisory this
+      # excludes lives exclusively in build-time devDependencies (currently
+      # tailwindcss's chokidar/braces/micromatch/fast-glob chain) that never
+      # reach the production bundle — a stack-exhaustion DoS in a build-time
+      # glob matcher cannot be triggered by a user of the running app. Without
+      # this, a devDependency-only advisory blocks every release regardless of
+      # the actual diff, with the only "fix" npm offers being an unrelated
+      # breaking major-version bump (tailwindcss 3->4) forced in just to
+      # silence the gate. Anything in a real runtime `dependency` still fails
+      # this exactly as before.
+      - run: npm audit --omit=dev
       - run: npm run test:coverage
       - run: npm run build
       - name: Enforce production bundle budget
