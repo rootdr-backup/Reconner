@@ -171,6 +171,64 @@ func looksLikeDBLookup(val string) bool {
 		reLookupHexID.MatchString(v) || reLookupNumSep.MatchString(v)
 }
 
+// concurrency derives the number of SQLi candidates probed in parallel from
+// the deployment's configured HTTP request budget, mirroring
+// DirScanner.directoryToolThreads()'s shape (internal/scanner/directory.go):
+// scale with cfg.Limits.HTTPRateLimit, floor/ceiling clamped.
+//
+// Unlike directory discovery, SQLi has no "host workers" divisor to apply:
+// XSS/SQLi are deliberately given no parallel-group id (see
+// injectionParallelGroup's doc in internal/scheduler/priority_scan.go)
+// specifically so each runs ALONE against its host — no sibling module's
+// worker pool is ever hitting the same host at the same time. Before this,
+// every deployment paid for that isolation with a flat concurrency of 8
+// regardless of how generous an operator's configured budget was, so an
+// operator who explicitly raised HTTPRateLimit for an authorized, aggressive
+// scan still got stuck at 8 simultaneous candidates — each of which can run
+// dozens of sequential requests through its proof ladder (see quickProbe),
+// so that flat cap directly set the module's wall-clock floor.
+//
+// The divisor (18) is calibrated so the platform's own default/floor budget
+// (150, see config.Default/config.Autotune) reproduces today's effective 8 —
+// an operator who has not touched the rate-limit config sees no behavior
+// change. A higher configured budget scales this up, capped at 20 (same
+// ceiling directoryToolThreads uses). Raising this NEVER bypasses the shared
+// per-host adaptive governor (hostMaxInFlight in throttle.go, currently 12):
+// every request still funnels through hostRequestAcquire, so a goroutine
+// above that shared ceiling simply queues for a slot — harmless, and it lets
+// a multi-host scan (candidates spanning several distinct hosts, each with
+// its own independent 12-slot bucket) actually benefit from the extra
+// parallelism instead of self-limiting at 8 across every host at once.
+func (s *SQLiScanner) concurrency() int {
+	rate := 150
+	if s.cfg != nil && s.cfg.Limits.HTTPRateLimit > 0 {
+		rate = s.cfg.Limits.HTTPRateLimit
+	}
+	threads := rate / 18
+	if threads < 1 {
+		threads = 1
+	}
+	if threads > 20 {
+		threads = 20
+	}
+	return threads
+}
+
+// timingConcurrency is the low-concurrency pool size for the statistical
+// time-based pass (sqli_timing.go's timeBasedPass): half of concurrency(),
+// same ratio the historical flat 8/4 split used, because each time-based
+// confirmation holds a connection open for several seconds (0/2/5s linear-
+// scaling proof) rather than one quick round trip. Halving concurrency()
+// instead of hardcoding keeps that same intentionally-more-conservative
+// relationship while still scaling with an operator's configured budget.
+func (s *SQLiScanner) timingConcurrency() int {
+	threads := s.concurrency() / 2
+	if threads < 1 {
+		threads = 1
+	}
+	return threads
+}
+
 // Run performs deterministic SQLi checks over every discovered insertion point,
 // prioritising likely DB-backed fields without excluding unfamiliar names.
 // Deterministic tests per candidate (error-based + boolean/content + arithmetic),
@@ -182,7 +240,7 @@ func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	logFn("info", "sqli", fmt.Sprintf("Selected %d high-value insertion points for SQLi testing", len(candidates)))
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, s.concurrency())
 	var wg sync.WaitGroup
 	var found atomic.Int64
 	var flaggedMu sync.Mutex
@@ -997,7 +1055,7 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth ma
 	}
 	logFn("info", "sqli", fmt.Sprintf("Testing Cookie/header SQLi on %d live URL(s)...", len(urls)))
 
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, s.concurrency())
 	var wg sync.WaitGroup
 	for _, u := range urls {
 		if ctx.Err() != nil {

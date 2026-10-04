@@ -285,7 +285,7 @@ func (s *SQLiScanner) timeBasedPass(ctx context.Context, targetID string, candid
 	}
 	logFn("info", "sqli", fmt.Sprintf("Time-based SQLi (statistical, linear-scaling proof) over %d insertion point(s)...", len(todo)))
 
-	sem := make(chan struct{}, 4) // low: each confirmation holds a connection for seconds
+	sem := make(chan struct{}, s.timingConcurrency()) // low: each confirmation holds a connection for seconds
 	var wg sync.WaitGroup
 	for _, ip := range todo {
 		if ctx.Err() != nil {
