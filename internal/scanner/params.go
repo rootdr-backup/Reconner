@@ -22,6 +22,25 @@ import (
 	xhtml "golang.org/x/net/html"
 )
 
+// hakrawlerArgs builds the invocation args for hakrawler (hakluke/hakrawler,
+// pinned version per the Dockerfile's HAKRAWLER_VERSION build arg). This
+// exists as one shared, testable function because its predecessor shape
+// ("-url u -depth 2 -insecure" / "-url u -js -insecure") was a real,
+// completely silent bug: hakrawler takes its crawl target on STDIN, not a
+// -url flag, its depth flag is -d (not -depth), and it has no -js flag at
+// all. An unrecognized flag makes hakrawler print its usage to stderr and
+// exit 0 — not a nonzero exit, not an error RunWithCallback/Run would
+// surface — so every single hakrawler invocation in this codebase produced
+// zero crawled URLs, with no failure visible anywhere, for as long as that
+// shape was in use. Callers MUST pipe the target URL via stdin (one per
+// line) using RunWithInputCallback, never pass it as an arg here.
+func hakrawlerArgs(ctx context.Context) []string {
+	// -timeout is hakrawler's OWN per-URL cap (hakrawler's flag, not ours),
+	// kept just under the caller's outer context timeout as defense in depth.
+	args := []string{"-d", "3", "-insecure", "-timeout", "25"}
+	return append(args, ToolRequestIdentityArgs(ctx, "hakrawler")...)
+}
+
 type ParamScanner struct {
 	broadcast BroadcastFunc
 	db        *database.DB
@@ -242,8 +261,13 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	passiveWg.Wait()
 	logFn("info", "param_discovery", fmt.Sprintf("Historical URL sources done, total: %d parameterized URLs", len(allURLs)))
 
-	// Crawl hosts concurrently with a hard per-host time budget (was sequential
-	// at depth 3 with no timeout — the main cause of multi-minute scans).
+	// Crawl hosts concurrently with a hard per-host time budget. The old
+	// sequential run at depth 3 with no timeout was the main cause of
+	// multi-minute scans — the fix was the per-host ceiling below (bounded
+	// -ct crawl-duration + bounded hostCtx + parallel hosts), not the shallower
+	// depth; now that the ceiling exists, depth is restored to katana's own
+	// default (3) instead of staying one level shallower than it, with the
+	// ceiling raised slightly to give that extra level room to run.
 	const crawlConcurrency = 8
 	if s.exec.IsToolAvailable("katana") {
 		logFn("info", "param_discovery", fmt.Sprintf("Crawling with katana (%d hosts, parallel)...", len(targetURLs)))
@@ -258,9 +282,9 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 			go func(u string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				hostCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+				hostCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 				defer cancel()
-				args := []string{"-u", u, "-silent", "-depth", "2", "-c", "10", "-ct", "30", "-timeout", "8", "-jc"}
+				args := []string{"-u", u, "-silent", "-depth", "3", "-c", "10", "-ct", "40", "-timeout", "8", "-jc"}
 				args = append(args, ToolRequestIdentityArgs(hostCtx, "katana")...)
 				_ = s.exec.RunWithCallback(hostCtx, targetID, func(line string) {
 					addURL(line)
@@ -286,16 +310,10 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 				defer func() { <-sem }()
 				hostCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
-				args := []string{"-url", u, "-depth", "2", "-insecure"}
-				args = append(args, ToolRequestIdentityArgs(hostCtx, "hakrawler")...)
-				result, err := s.exec.Run(hostCtx, "hakrawler", args...)
-				if err != nil {
-					return
-				}
-				sc := bufio.NewScanner(strings.NewReader(result.Stdout))
-				for sc.Scan() {
-					addURL(sc.Text())
-				}
+				args := hakrawlerArgs(hostCtx)
+				_ = s.exec.RunWithInputCallback(hostCtx, strings.NewReader(u+"\n"), targetID, func(line string) {
+					addURL(strings.TrimSpace(line))
+				}, "hakrawler", args...)
 			}(targetURL)
 		}
 		wg.Wait()

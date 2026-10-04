@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,43 @@ func TestExternalDirectoryHitsPassSharedSoft404Gate(t *testing.T) {
 	}
 	if foundURL != srv.URL+"/real" {
 		t.Fatalf("stored URL=%q want real endpoint", foundURL)
+	}
+}
+
+// TestRunDirsearchPassesBoundedRecursionFlags proves dirsearch is invoked with
+// recursion enabled (-r), bounded to a shallow depth (-R 2) and to
+// alive/redirecting status codes only (--recursion-status), plus --crawl to
+// mine additional path candidates out of already-fetched responses. A flat,
+// single-pass dirsearch run never looks inside a directory it already found
+// (e.g. /admin/ or /api/v1/) — real missed coverage this re-enables, safely
+// bounded by the existing 150s per-host outer ceiling (runDirsearch's dctx)
+// and dirsearch's own --max-time, so recursion only spends that SAME budget
+// more thoroughly, never a longer one.
+func TestRunDirsearchPassesBoundedRecursionFlags(t *testing.T) {
+	toolDir := t.TempDir()
+	argvFile := filepath.Join(toolDir, "argv.txt")
+	fake := fmt.Sprintf("#!/bin/sh\necho \"$@\" > %q\n", argvFile)
+	if err := os.WriteFile(filepath.Join(toolDir, "dirsearch"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{ToolsDir: toolDir, Limits: config.ResourceLimits{MaxToolExecutions: 2}}
+	log := logger.NewWithWriter("error", io.Discard)
+	exec := tools.NewExecutor(cfg, log)
+	s := NewDirScanner(nil, exec, cfg, log)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.runDirsearch(ctx, "t1", "https://example.test", soft404{}, func(string, string, string) {})
+
+	captured, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("dirsearch was not invoked: %v", err)
+	}
+	argv := string(captured)
+	for _, want := range []string{"-r", "-R 2", "--recursion-status 200,301,302", "--crawl"} {
+		if !strings.Contains(argv, want) {
+			t.Fatalf("dirsearch argv missing %q: %s", want, argv)
+		}
 	}
 }
 

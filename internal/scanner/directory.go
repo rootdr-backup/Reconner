@@ -445,8 +445,13 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 	// or with full URL: [HH:MM:SS] STATUS - SIZE - https://host/path
 	base := strings.TrimRight(svcURL, "/")
 	// Hard per-service ceiling so one slow/huge host can't stall the whole module
-	// (previously --crawl + --max-time 300 let a single host burn 5+ minutes, and
-	// 12 hosts serialised into ~16 min). Cap each host and let the rest proceed.
+	// (an earlier --crawl + --max-time 300 with NO outer ceiling let a single
+	// host burn 5+ minutes, and 12 hosts serialised into ~16 min). This 150s wall
+	// plus dirsearch's own --max-time below is what makes it safe to re-enable
+	// --crawl/-r now: either one time-boxes the SAME worst case that regression
+	// hit, so recursion only makes better use of the existing budget — digging
+	// into a found directory instead of leaving it entirely unexplored — never a
+	// longer one. Cap each host and let the rest proceed.
 	dctx, dcancel := context.WithTimeout(ctx, 150*time.Second)
 	defer dcancel()
 	submitValidation, finishValidation := s.externalDirectoryRevalidator(dctx, targetID, svcURL, baseline)
@@ -505,6 +510,18 @@ func (s *DirScanner) runDirsearch(ctx context.Context, targetID, svcURL string, 
 		"-e", strings.Join(extensions, ","),
 		"-i", "200,204,301,302,307,401,403,405",
 		"--timeout", "6", "--full-url", "-t", strconv.Itoa(s.directoryToolThreads()), "--max-time", "120",
+		// Recurse into a found directory instead of only ever scanning one level
+		// deep — a flat single-pass dirsearch run never looks inside /admin/ or
+		// /api/v1/ once it's found, which is real missed coverage on exactly the
+		// paths most worth going deeper on. Bounded to depth 2 and to
+		// alive/redirecting status codes only (recursing into a 401/403 wastes
+		// requests for no extra coverage — there's nothing reachable to brute-
+		// force behind it). --crawl additionally mines new path candidates out of
+		// response bodies already fetched — no extra requests of its own, pure
+		// recall. Both are safe to re-enable now: the 150s outer ceiling above
+		// plus --max-time below already bound the worst case, so recursion only
+		// spends that SAME budget more thoroughly, never a longer one.
+		"-r", "-R", "2", "--recursion-status", "200,301,302", "--crawl",
 	}
 	args = append(args, ToolRequestIdentityArgs(ctx, "dirsearch")...)
 	err := s.exec.RunWithCallback(dctx, targetID, callback, "dirsearch", args...)

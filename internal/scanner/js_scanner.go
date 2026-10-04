@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -178,10 +177,12 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 			go func(u string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				// -ct 30: stop crawling a host after 30s; -depth 2; -timeout 8.
-				hostCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+				// -ct 40: stop crawling a host after 40s; -depth 3 (katana's own
+				// default — restored now that the per-host ceiling below bounds the
+				// worst case, same reasoning as param_discovery's katana crawl).
+				hostCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 				defer cancel()
-				args := []string{"-u", u, "-jc", "-silent", "-depth", "2", "-ct", "30", "-timeout", "8", "-kf", "all"}
+				args := []string{"-u", u, "-jc", "-silent", "-depth", "3", "-ct", "40", "-timeout", "8", "-kf", "all"}
 				args = append(args, ToolRequestIdentityArgs(hostCtx, "katana")...)
 				_ = s.exec.RunWithCallback(hostCtx, targetID, func(line string) {
 					line = strings.TrimSpace(line)
@@ -209,19 +210,15 @@ func (s *JSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) err
 				defer func() { <-sem }()
 				hostCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
-				args := []string{"-url", u, "-js", "-insecure"}
-				args = append(args, ToolRequestIdentityArgs(hostCtx, "hakrawler")...)
-				result, err := s.exec.Run(hostCtx, "hakrawler", args...)
-				if err != nil {
-					return
-				}
-				sc := bufio.NewScanner(strings.NewReader(result.Stdout))
-				for sc.Scan() {
-					line := strings.TrimSpace(sc.Text())
+				// JS filtering is (and was already) done client-side below via
+				// isJSURL on whatever hakrawlerArgs's invocation actually outputs.
+				args := hakrawlerArgs(hostCtx)
+				_ = s.exec.RunWithInputCallback(hostCtx, strings.NewReader(u+"\n"), targetID, func(line string) {
+					line = strings.TrimSpace(line)
 					if isJSURL(line) {
 						addInScope(line, &jsMu, jsFiles)
 					}
-				}
+				}, "hakrawler", args...)
 			}(svcURL)
 		}
 		wg.Wait()
