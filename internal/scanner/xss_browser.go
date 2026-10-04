@@ -75,6 +75,23 @@ type browserXSSConfirmer struct {
 	// an empty/just-reset shared tab simultaneously) both proceed to call
 	// chromedp.Run concurrently against the same allocator — a data race
 	// caught by `go test -race`, not merely a benchmark artifact.
+	//
+	// startMu + navGate together guarantee only ONE goroutine is ever inside
+	// chromedp.Run(tabCtx) establishing a browser at a time — but a SEPARATE,
+	// upstream data race lived inside chromedp itself regardless of that
+	// serialization: ExecAllocator.Allocate (chromedp@v0.13.6 allocate.go)
+	// spawns a goroutine that assigns to its OWN captured `wsURL`/`err`
+	// locals once Chromium prints its devtools websocket URL, but if that
+	// takes longer than wsURLReadTimeout (20s default), Allocate's main path
+	// ALSO assigns to that same shared `err` on the timeout branch and
+	// returns — leaving the first goroutine to later write the very same
+	// memory with no synchronization between the two. A single slow browser
+	// launch (CI resource contention, a cold container, -race's own 2-20x
+	// overhead) is enough to trigger it; no concurrent Reconner candidate is
+	// required. It was fixed upstream in chromedp v0.13.7 (the timeout
+	// branch now returns its own error directly instead of writing the
+	// shared var), which is why go.mod pins >= v0.13.7 — downgrading
+	// reintroduces this exact race class under `go test -race`.
 	startMu     sync.Mutex
 	alloc       context.Context
 	allocCancel context.CancelFunc
