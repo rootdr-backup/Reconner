@@ -77,9 +77,23 @@ func (s *JSEndpointScanner) Run(ctx context.Context, targetID string, logFn LogF
 	logFn("info", "js_endpoints", fmt.Sprintf("Probing %d JS-derived endpoint candidates...", len(candidates)))
 
 	auth := loadAuthHeaders(ctx, s.db, targetID)
+	// Parameter NAMES Reconner's own JS analysis already mined from
+	// fetch/axios/JSON.stringify/URLSearchParams request bodies and DOM reads
+	// (api_contract.go's storeAPIParamHints, dom_xss.go's storeDOMParamHints) —
+	// stored in js_findings but, until now, never read by anything that
+	// populates the `parameters` table, so a field name the scanner's own JS
+	// analysis had already identified (e.g. a JSON body's "authorDisplayName")
+	// was never tested by XSS/SQLi/SSTI/etc at all unless that exact name also
+	// happened to appear in a crawled query string or HTML form. These hints
+	// carry no endpoint of their own (the source JS gives a field name, not a
+	// specific URL), so they're paired below with the live, JS-derived
+	// endpoints this scanner already resolves — the same best-effort name-to-
+	// endpoint pairing paramfuzz.go's own wordlist mining already relies on.
+	jsParamHints := jsParamHintNames(s.db, targetID)
 	sem := make(chan struct{}, 15)
 	var wg sync.WaitGroup
-	var live, params atomic.Int64
+	var live, params, hintBudget atomic.Int64
+	hintBudget.Store(20000) // bounded cross-product: candidates × hint names
 
 	for _, u := range candidates {
 		if ctx.Err() != nil {
@@ -102,6 +116,11 @@ func (s *JSEndpointScanner) Run(ctx context.Context, targetID string, logFn LogF
 			// Harvest any query params for the active modules.
 			if p := storeQueryParams(s.db, targetID, candidate); p > 0 {
 				params.Add(int64(p))
+			}
+			if len(jsParamHints) > 0 && hintBudget.Load() > 0 {
+				p := storeJSONBodyParamHints(s.db, targetID, candidate, jsParamHints)
+				params.Add(int64(p))
+				hintBudget.Add(-int64(p))
 			}
 		}(u)
 	}
@@ -209,6 +228,54 @@ func (s *JSEndpointScanner) storeService(targetID, u string, status int, ctype s
 	}
 	n, _ := res.RowsAffected()
 	return n > 0
+}
+
+// jsParamHintNames returns the distinct parameter names already mined from
+// JS request bodies (api_param) and DOM reads (dom_param) — see this
+// function's callers for why these were previously dead-ended in js_findings.
+func jsParamHintNames(db *database.DB, targetID string) []string {
+	rows, err := db.Query(`
+		SELECT DISTINCT value FROM js_findings
+		WHERE target_id = ? AND type IN ('api_param','dom_param') AND value != ''
+		LIMIT 500
+	`, targetID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if rows.Scan(&v) == nil && v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// storeJSONBodyParamHints pairs JS-mined parameter names (see jsParamHintNames)
+// with one live, JS-derived endpoint as speculative JSON-body insertion points.
+// Harmless when wrong: an endpoint that doesn't actually accept the field, or
+// doesn't accept POST at all, just answers normally and the insertion point
+// tests as inert — the only cost is one bounded extra parameter row, the same
+// tradeoff paramfuzz.go's own wordlist mining already makes pairing names
+// with URLs it cannot be certain about.
+func storeJSONBodyParamHints(db *database.DB, targetID, endpoint string, names []string) int {
+	n := 0
+	for _, name := range names {
+		id := uuid.New().String()
+		res, err := db.Exec(`
+			INSERT INTO parameters (id,target_id,url,parameter,value,source,method,content_type,location)
+			VALUES (?,?,?,?,'','js','POST','application/json','json:string')
+			ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING
+		`, id, targetID, endpoint, name)
+		if err == nil {
+			if a, _ := res.RowsAffected(); a > 0 {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // storeQueryParams extracts ?a=b params from a URL into the parameters table.

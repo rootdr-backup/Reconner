@@ -657,6 +657,7 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 	svg := `<svg onload="top.document.title='%s'">`
 	doubleBreak := `"><img src=x onerror="top.document.title='%s'">`
 	singleBreak := `'><img src=x onerror="top.document.title='%s'">`
+	unquotedBreak := `><img src=x onerror="top.document.title='%s'">`
 	// mXSS: <noscript> is parsed as RAW TEXT only when the scripting flag is
 	// enabled (an ordinary browser tab, which chromedp is) — so the literal
 	// "</noscript>" sequence inside what looks like a quoted attribute value
@@ -748,17 +749,38 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 			if strings.Contains(a.Escaped, "`") && strings.Contains(a.Surviving, `\`) {
 				out = append([]string{"\\`;top.document.title='%s';//"}, out...)
 			}
+		} else if a.JSQuote == 0 {
+			// No JS quote at all around the reflection — a bare statement/
+			// expression position (e.g. onclick=MARKER or
+			// onclick=doStuff(MARKER)), not inside an existing string or right
+			// after an open paren. The `"`/`)`-prefixed payloads below assume
+			// one of those two positions and are syntax errors here (a leading
+			// quote OPENS an unterminated string instead of closing one).
+			// Mirrors CtxJSExpr's bare statement-separator payload.
+			out = []string{`;top.document.title='%s';//`}
 		} else {
 			out = []string{`";top.document.title='%s';//`, `);top.document.title='%s';//`}
 			if strings.Contains(a.Escaped, `"`) && strings.Contains(a.Surviving, `\`) {
 				out = append([]string{`\";top.document.title='%s';//`}, out...)
 			}
 		}
-		if a.Context == CtxEventHandler && a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote)) {
-			if a.Quote == '\'' {
+		if a.Context == CtxEventHandler {
+			switch {
+			case a.Quote == '\'' && strings.Contains(a.Surviving, "'"):
 				out = append(out, singleBreak)
-			} else {
+			case a.Quote == '"' && strings.Contains(a.Surviving, `"`):
 				out = append(out, doubleBreak)
+			case a.Quote == 0:
+				// Fully unquoted attribute too (onclick=MARKER, no HTML quote
+				// at all) — a bare `>` still ends it and closes the tag. There
+				// is no quote character to check "survived" here, unlike the
+				// two cases above; previously this fallback was skipped
+				// entirely whenever a.Quote==0 (the condition required
+				// a.Quote != 0, and even a corrected `Quote==0` case here
+				// would still never fire gated behind
+				// strings.Contains(a.Surviving, string(rune(0))), which can
+				// never match).
+				out = append(out, unquotedBreak)
 			}
 		}
 		out = append(out, `</script><script>top.document.title='%s'</script>`)

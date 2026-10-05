@@ -178,16 +178,32 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		// Nested JavaScript-in-HTML context. Tagless JS breakouts require runtime
 		// proof; an HTML-quote breakout also gets the parsed-element ladder.
 		direct := []xssExecPayload{{`';` + xssAlert + `//`, "", `';` + xssAlert}}
-		if a.JSQuote == '"' {
+		switch a.JSQuote {
+		case '"':
 			direct[0] = xssExecPayload{`";` + xssAlert + `//`, "", `";` + xssAlert}
-		} else if a.JSQuote == '`' {
+		case '`':
 			direct[0] = xssExecPayload{"${" + xssAlert + "}", "", "${" + xssAlert}
+		case 0:
+			// No JS quote at all around the reflection — it sits in a bare
+			// statement/expression position (e.g. onclick=MARKER or
+			// onclick=doStuff(MARKER)), not inside an existing string. A
+			// leading quote there OPENS an unterminated string (a syntax
+			// error that never executes) instead of closing one. Mirrors
+			// CtxJSExpr's bare statement-separator payload below.
+			direct[0] = xssExecPayload{`;` + xssAlert + `//`, "", `;` + xssAlert}
 		}
 		if a.JSQuote != 0 && strings.Contains(a.Escaped, string(a.JSQuote)) && strings.Contains(a.Surviving, `\`) {
 			direct = append([]xssExecPayload{{`\` + direct[0].Payload, "", `\` + direct[0].Token}}, direct...)
 		}
 		if a.Quote != 0 {
 			direct = append(direct, prefixLadder(string(a.Quote)+`>`)...)
+		} else {
+			// Fully unquoted attribute value too (onclick=MARKER, no HTML
+			// quote at all) — a bare `>` still ends it and closes the tag,
+			// same as CtxUnquotedAttr's own ladder. Previously this branch was
+			// skipped entirely whenever a.Quote==0, leaving ONLY the single
+			// in-place JS payload above as a candidate for this combination.
+			direct = append(direct, prefixLadder(`>`)...)
 		}
 		return direct
 	case CtxJSString:
