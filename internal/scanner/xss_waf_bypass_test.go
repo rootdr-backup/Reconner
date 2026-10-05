@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -128,21 +128,20 @@ func TestTryBrowserlessExecPayloadPlainPathStillWorksWhenUnblocked(t *testing.T)
 	}
 }
 
-// proveExecutingXSS used to give up entirely (return "inconclusive") the
-// instant a browser existed but its per-scan budget was exhausted — the
-// deterministic browserless ladder below was reachable ONLY when no browser
-// was ever found. On a large target (trivially >150 candidates needing
-// browser escalation) that meant every candidate past the budget got zero
-// further testing. This proves the fix: budget=0 still reaches, and can
-// succeed through, the browserless ladder.
-func TestProveExecutingXSSFallsThroughToLadderWhenBrowserBudgetExhausted(t *testing.T) {
+// proveExecutingXSS no longer accepts a browser budget at all: it only runs
+// after a real breakout signal already survived (a.Executable), so it must
+// never be arbitrarily skipped by a shared per-scan counter the way the
+// speculative DOM/SPA canary escalation legitimately still is (see
+// dastBrowserBudget's doc comment in dast.go). This proves the deterministic
+// browserless ladder still works as the fallback when no browser is
+// available at all — the other, and now only, way to reach it.
+func TestProveExecutingXSSFallsThroughToLadderWhenNoBrowserAvailable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-only")
 	}
 	withLoopbackAllowed(t)
 
-	// Force getXSSBrowser() to report a browser is available, without ever
-	// actually launching chromedp (browserBudget.take() below fails first).
+	// Force getXSSBrowser() to report no browser is available at all.
 	xssBrowserMu.Lock()
 	savedInst, savedTry := xssBrowserInst, xssBrowserLastTry
 	xssBrowserInst, xssBrowserLastTry = nil, time.Time{}
@@ -152,14 +151,17 @@ func TestProveExecutingXSSFallsThroughToLadderWhenBrowserBudgetExhausted(t *test
 		xssBrowserInst, xssBrowserLastTry = savedInst, savedTry
 		xssBrowserMu.Unlock()
 	})
-	dir := t.TempDir()
-	working := filepath.Join(dir, "working-chrome")
-	if err := os.WriteFile(working, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("RECONNER_CHROME", working)
-	if getXSSBrowser() == nil {
-		t.Fatal("test setup failed: expected getXSSBrowser to report the fake browser as available")
+	// Neutralize the PATH/absolute-path fallbacks too — a host or CI runner that
+	// happens to have a real browser installed would otherwise still be found
+	// and make the "no browser" setup below false. See
+	// TestGetXSSBrowserRetriesAfterFailedAttempt for the same pattern.
+	savedLookPath, savedAbsPaths := chromeLookPath, chromeAbsolutePaths
+	chromeLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	chromeAbsolutePaths = nil
+	t.Cleanup(func() { chromeLookPath, chromeAbsolutePaths = savedLookPath, savedAbsPaths })
+	t.Setenv("RECONNER_CHROME", filepath.Join(t.TempDir(), "no-such-chrome"))
+	if getXSSBrowser() != nil {
+		t.Fatal("test setup failed: expected getXSSBrowser to report no browser available")
 	}
 
 	// Vulnerable, unfiltered app: the browserless ladder must find it.
@@ -172,11 +174,10 @@ func TestProveExecutingXSSFallsThroughToLadderWhenBrowserBudgetExhausted(t *test
 	ip := insertionPoint{URL: srv.URL + "/?q=1", Param: "q", Method: "GET"}
 	a := ReflectionAnalysis{Context: CtxHTMLText, Reflected: true, Executable: true}
 	s := &DASTScanner{}
-	exhaustedBudget := newXSSBrowserBudget(0)
 
-	payload, proof, confidence, executed := s.proveExecutingXSS(context.Background(), ip, a, []ReflectionAnalysis{a}, nil, "", exhaustedBudget)
+	payload, proof, confidence, executed := s.proveExecutingXSS(context.Background(), ip, a, []ReflectionAnalysis{a}, nil, "")
 	if payload == "" || proof == "inconclusive" {
-		t.Fatalf("expected the exhausted-budget path to fall through to the browserless ladder and find the vulnerability, got payload=%q proof=%q", payload, proof)
+		t.Fatalf("expected the no-browser path to fall through to the browserless ladder and find the vulnerability, got payload=%q proof=%q", payload, proof)
 	}
 	if executed {
 		t.Fatal("the browserless ladder must never claim real execution (executed=true) — only the live browser proof may")

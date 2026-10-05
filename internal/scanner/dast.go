@@ -87,11 +87,24 @@ const (
 	dastMaxPoints = 600         // hard cap on insertion points per run
 	dastWorkers   = 12          // concurrent insertion points
 
-	// dastBrowserBudget caps how many non-raw-reflected params get escalated to the
-	// headless browser (the DOM/SPA XSS path) per scan. The single browser tab
-	// serializes navigations, so this bounds the worst case while still covering a
-	// meaningful sample of a client-rendered app's parameters.
-	dastBrowserBudget = 150
+	// dastBrowserBudget caps how many SPECULATIVE browser escalations run per
+	// scan: the script-resource check (reflected into a JS/JSONP response, not
+	// yet breakout-confirmed) and the DOM/SPA canary (no raw-HTML reflection at
+	// all — every non-reflected param gets a speculative navigation). Both test
+	// candidates with NO prior breakout signal, so bounding their volume is a
+	// real tradeoff, not a correctness requirement. It must NEVER be consumed by
+	// proveExecutingXSS's main confirmation attempt: that path only runs after a
+	// real breakout signal already survived (a.Executable), so a shared counter
+	// meant a scan with a few thousand raw-reflected candidates silently
+	// exhausted the ENTIRE scan's browser allowance on the confirmed-signal path
+	// alone — every candidate after that fell to the browserless ladder, which
+	// can mark "Inconclusive" but, per this system's own no-finding-without-proof
+	// design, can never produce a CONFIRMED finding. On a large multi-asset scan
+	// (thousands of parameters) that meant only roughly the first ~150
+	// already-signaled candidates could ever become real findings, no matter how
+	// many more genuinely vulnerable ones followed. Raised from 150 now that it
+	// only governs genuinely speculative navigations.
+	dastBrowserBudget = 1000
 )
 
 // Run drives the DAST engine across the target's insertion points.
@@ -290,7 +303,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					return
 				}
 				proofAttempted = true
-				proofPayload, proofMethod, proofConfidence, proofExecuted = s.proveExecutingXSS(ctx, ip, a, analyses, auth, baseline, browserBudget)
+				proofPayload, proofMethod, proofConfidence, proofExecuted = s.proveExecutingXSS(ctx, ip, a, analyses, auth, baseline)
 			}
 			// A URL attribute controlled from its first byte does not need a quote
 			// breakout: javascript: is itself the execution primitive. The benign
@@ -652,11 +665,27 @@ func exploitExample(ctxName, injected string) string {
 // branch, CSP edge case or parser difference can all make executable-looking
 // markup non-executing. This distinction is what keeps reflected HTML injection
 // out of the confirmed-XSS bucket.
-func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, analyses []ReflectionAnalysis, auth map[string]string, baseline string, browserBudget *xssBrowserBudget) (payload, proof string, confidence int, executed bool) {
+func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, a ReflectionAnalysis, analyses []ReflectionAnalysis, auth map[string]string, baseline string) (payload, proof string, confidence int, executed bool) {
 	// Real-browser execution is the only promotion path, so run it first. The old
 	// order sprayed the complete raw-response ladder (often 30+ requests) and then
 	// performed the browser proof that actually decided the verdict.
-	if b := getXSSBrowser(); b != nil && browserBudget.take() {
+	//
+	// Deliberately UNGATED by dastBrowserBudget: this function only runs after a
+	// real breakout signal already survived (a.Executable) — the candidate is
+	// already strongly signaled, not a speculative probe. It used to share the
+	// same counter as the DOM/SPA canary escalation, which has NO prior signal
+	// (every non-reflected param gets a speculative navigation); on a large
+	// multi-asset scan with thousands of already-signaled candidates, that
+	// shared counter silently exhausted the scan's ENTIRE browser allowance on
+	// roughly the first ~150 candidates processed, with no relation to how many
+	// were actually confirmed. Every candidate after that fell to the
+	// browserless ladder below, which can mark "Inconclusive" but — per this
+	// system's no-finding-without-proof design — can never produce a CONFIRMED
+	// finding, no matter how real the vulnerability was. The single shared tab
+	// (navGate in xss_browser.go) already serializes actual browser work to one
+	// navigation at a time, so removing this cap only lets the scan spend more
+	// wall-clock time proving real signals, never more concurrent load.
+	if b := getXSSBrowser(); b != nil {
 		var custom []string
 		if s.cfg != nil {
 			custom = CustomCorpus(s.cfg.WordlistsDir, "xss")
@@ -669,15 +698,11 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 		// of abandoning the candidate outright.
 	}
 
-	// Reached when Chromium is unavailable, OR this scan's per-run browser
-	// budget (dastBrowserBudget) is already spent, OR a live browser attempt
-	// didn't confirm. This branch used to be reachable ONLY in the "no browser
-	// at all" case — the moment the budget ran out on a large target (a
-	// 1000-subdomain scope trivially produces more than 150 candidates needing
-	// browser escalation), every remaining candidate skipped straight to
-	// "inconclusive" with zero further testing, silently losing XSS coverage
-	// for the rest of the scan. The deterministic, WAF-tamper-aware browserless
-	// ladder below is a strictly-better fallback than giving up.
+	// Reached when Chromium is unavailable, OR a live browser attempt didn't
+	// confirm. This branch used to ALSO be reached once the (now-removed) shared
+	// budget ran dry on a large target — the deterministic, WAF-tamper-aware
+	// browserless ladder below is a strictly-better fallback than giving up, but
+	// it still can never promote past "Inconclusive".
 	const fallbackLimit = 10
 	for i, p := range buildExecPayloads(a) {
 		if i >= fallbackLimit || ctx.Err() != nil {
