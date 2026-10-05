@@ -102,9 +102,12 @@ const (
 	// design, can never produce a CONFIRMED finding. On a large multi-asset scan
 	// (thousands of parameters) that meant only roughly the first ~150
 	// already-signaled candidates could ever become real findings, no matter how
-	// many more genuinely vulnerable ones followed. Raised from 150 now that it
-	// only governs genuinely speculative navigations.
-	dastBrowserBudget = 1000
+	// many more genuinely vulnerable ones followed. Raised from 150, then from
+	// 1000 — now effectively unbounded for any real target, so the operator
+	// decides whether a scan this wide is worth the wall-clock time, not a
+	// silent built-in ceiling. It only governs genuinely speculative
+	// navigations (no prior signal), never the confirmed-signal path above.
+	dastBrowserBudget = 20000
 )
 
 // Run drives the DAST engine across the target's insertion points.
