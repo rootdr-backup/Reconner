@@ -181,13 +181,19 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 
 	// Logical-surface dedup + safety cap. One representative real URL per
 	// fingerprint; distinct paths/hosts/meaningful-param-sets stay distinct.
+	// 300000 is effectively unbounded for any real target — a hardcoded 8000/2000
+	// silently dropped the tail of a large multi-asset scan with nothing but a
+	// warning log line to show it (the operator has to notice the log AND know
+	// to raise nuclei_max_surfaces/nuclei_max_per_host in config.json). An
+	// operator who wants a real ceiling sets one explicitly; the default no
+	// longer imposes one on their behalf.
 	surfaceCap := s.cfg.NucleiMaxSurfaces
 	if surfaceCap <= 0 {
-		surfaceCap = 8000
+		surfaceCap = 300000
 	}
 	perHostCap := s.cfg.NucleiMaxPerHost
 	if perHostCap <= 0 {
-		perHostCap = 2000
+		perHostCap = 300000
 	}
 	targets, collapsed := dedupeNucleiSurfaces(rawURLs, surfaceCap, perHostCap)
 	if len(targets) == 0 {
@@ -235,6 +241,11 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 	maxProcs := 4
 	if s.cfg.NucleiParallelProcesses > 0 {
 		maxProcs = s.cfg.NucleiParallelProcesses
+	} else if safe := nucleiSafeMaxProcs(maxProcs); safe < maxProcs {
+		logFn("warn", "nuclei", fmt.Sprintf(
+			"Memory headroom is tight — running %d parallel nuclei process(es) instead of %d to avoid an OOM kill (each process loads the full template corpus independently). Set nuclei_parallel_processes in config.json to override.",
+			safe, maxProcs))
+		maxProcs = safe
 	}
 	chunkSize := 500
 	if s.cfg.NucleiChunkSize > 0 {
@@ -411,6 +422,47 @@ func networkNucleiTags(servicesSeen map[string]bool) []string {
 		}
 	}
 	return tags
+}
+
+// nucleiSafeMaxProcs clamps the auto-computed parallel-process count to what
+// current memory headroom can actually afford. Each nuclei process
+// independently loads and compiles the FULL template corpus — syncExtraTemplates
+// can grow that to 10k+ templates across the official set, fuzzing-templates,
+// and extra community repos — so running several processes at once, not the
+// target count, is nuclei's real memory cost. A production scan that had just
+// synced its template store for the first time saw two of four parallel nuclei
+// processes get "signal: killed" (confirmed not a context timeout: ctx.Err()
+// was nil when runNucleiProcess logged the error, so this was the OS/cgroup
+// OOM killer), silently losing that share of the vulnerability scan with
+// nothing but a warning line to show it. This never reduces an operator's
+// EXPLICIT nuclei_parallel_processes — only the auto-computed default, and
+// only when cgroup memory accounting is actually available (bare metal with
+// no cgroup limit falls back to trusting the requested value, unchanged).
+func nucleiSafeMaxProcs(requested int) int {
+	if requested <= 1 {
+		return requested
+	}
+	used, limit, ok := config.CgroupMemoryStats()
+	if !ok || limit <= 0 {
+		return requested
+	}
+	freeMB := limit - used
+	if freeMB < 0 {
+		freeMB = 0
+	}
+	// ~1.5 GB of headroom per extra parallel process: generous enough for a
+	// large synced template corpus (regex/matcher compilation, in-flight
+	// request/response buffers at -c 100+/-bulk-size 80) without trying to
+	// model nuclei's exact memory curve.
+	const perProcBudgetMB = 1536
+	afford := freeMB / perProcBudgetMB
+	if afford < 1 {
+		afford = 1
+	}
+	if afford < requested {
+		return afford
+	}
+	return requested
 }
 
 // regroupIntoChunks splits items into at most maxChunks roughly-equal groups,

@@ -130,21 +130,30 @@ type Config struct {
 	// NucleiMaxSurfaces caps how many CANONICAL nuclei surfaces a single target may
 	// scan after logical-endpoint deduplication (P0). It bounds the worst case so a
 	// param-heavy site can't hand nuclei tens of thousands of near-equivalent URLs.
-	// 0 ⇒ a sane built-in default is used. Distinct from URLLimit (raw row cap).
+	// 0 ⇒ a sane built-in default is used (300000 — see nuclei.go; effectively
+	// unbounded for any real target, so it never silently drops coverage. Set a
+	// smaller explicit value here to reinstate a real ceiling). Distinct from
+	// URLLimit (raw row cap).
 	NucleiMaxSurfaces int `json:"nuclei_max_surfaces"`
 	// NucleiMaxPerHost caps how many canonical surfaces a SINGLE host may contribute
 	// to the nuclei run. On a huge param/slug-heavy site (e.g. a video portal whose
 	// Wayback history is tens of thousands of /v/<slug> and /profile/<user> URLs)
 	// one host would otherwise consume the entire NucleiMaxSurfaces budget and stall
-	// the scan. 0 ⇒ built-in default. Works together with adaptive path-segment
-	// folding, which collapses high-cardinality slug/id segments to one surface.
+	// the scan. 0 ⇒ built-in default (300000, matching NucleiMaxSurfaces — this
+	// fairness guard is itself an artificial cap, so it's wide open by default now;
+	// set an explicit smaller value to restore the old "no single host monopolizes
+	// the budget" behavior on a multi-host/multi-asset scan). Works together with
+	// adaptive path-segment folding, which collapses high-cardinality slug/id
+	// segments to one surface.
 	NucleiMaxPerHost int `json:"nuclei_max_per_host"`
 	// DirDiscoveryMaxHosts caps how many alive HTTP hosts directory/backup
 	// discovery will scan per target — content-discovery is memory-heavy per
 	// host, so this stays a real cap, but it's now a config knob instead of a
 	// silent hardcoded 150 with no way to raise it for a large target. 0 ⇒
-	// built-in default (150). The dir_discovery/backup_discovery modules log a
-	// warning when this cap actually drops hosts.
+	// built-in default (300000 — effectively unbounded; the operator decides if a
+	// scan this wide is worth the time, not a silent built-in ceiling). The
+	// dir_discovery/backup_discovery modules log a warning when this cap actually
+	// drops hosts.
 	DirDiscoveryMaxHosts int `json:"dir_discovery_max_hosts"`
 	// NucleiBulkSize is nuclei's -bulk-size (hosts scanned in parallel per
 	// template). 0 ⇒ built-in default (80, was a hardcoded 40).
@@ -466,21 +475,24 @@ func defaultConfig() *Config {
 		ScanUserAgent:      "",
 		ScanHeaders:        map[string]string{},
 		CSRFSecret:         "",
-		EnableSQLmap:       false,             // heavy proof pass is explicit opt-in
-		SQLiTimeBased:      true,              // statistical time-based SQLi (linear-scaling proof)
-		NucleiVerify:       true,              // route nuclei sqli/xss/redirect hits through the verifier
-		NucleiExtraTargets: true,              // scan discovered parameterized URLs, not just site roots
-		NucleiDAST:         false,             // parameter-fuzzing templates are explicit opt-in
-		NucleiMaxSurfaces:  8000,              // cap canonical nuclei surfaces per target (post-dedup safety bound)
-		NucleiMaxPerHost:   2000,              // cap canonical surfaces contributed by any single host
-		ScanWatchdogHours:  24,                // per-phase watchdog floor; reset on progress and scaled for large targets
-		EnableDAST:         true,              // native context-aware DAST (XSS/SQLi) over all insertion points
-		AIModel:            "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
-		AIMaxIterations:    40,                // hard cap on the agent loop
-		AuthzMode:          "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
-		AuthzDestructive:   false,             // cross-user DELETE stays opt-in
-		Workers:            workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
-		Limits:             limits,            // auto-scaled to host CPU/RAM
+		EnableSQLmap:       false, // heavy proof pass is explicit opt-in
+		SQLiTimeBased:      true,  // statistical time-based SQLi (linear-scaling proof)
+		NucleiVerify:       true,  // route nuclei sqli/xss/redirect hits through the verifier
+		NucleiExtraTargets: true,  // scan discovered parameterized URLs, not just site roots
+		NucleiDAST:         false, // parameter-fuzzing templates are explicit opt-in
+		// NucleiMaxSurfaces/NucleiMaxPerHost/DirDiscoveryMaxHosts deliberately stay
+		// 0 here so they follow their documented "0 ⇒ built-in default" contract
+		// (see the field comments) instead of baking a fixed numeric ceiling into
+		// every config.json ever saved — an operator who wants a REAL cap sets one
+		// explicitly; a fresh install gets the generous built-in default.
+		ScanWatchdogHours: 24,                // per-phase watchdog floor; reset on progress and scaled for large targets
+		EnableDAST:        true,              // native context-aware DAST (XSS/SQLi) over all insertion points
+		AIModel:           "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
+		AIMaxIterations:   40,                // hard cap on the agent loop
+		AuthzMode:         "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
+		AuthzDestructive:  false,             // cross-user DELETE stays opt-in
+		Workers:           workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
+		Limits:            limits,            // auto-scaled to host CPU/RAM
 	}
 }
 

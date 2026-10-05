@@ -195,14 +195,16 @@ func soft404BaselineRanged(ctx context.Context, base, rangeHeader string) soft40
 }
 
 // dirDiscoveryHostCap returns the per-scan host cap for content-discovery
-// (dir/backup/open-redirect) — intentionally capped because content-discovery
-// is memory-heavy per host, but configurable (was a silent hardcoded 150 with
-// no way to raise it and no warning when it bit a large target).
+// (dir/backup/open-redirect) — configurable, and now effectively unbounded by
+// default (300000): the operator decides whether a scan this wide is worth the
+// time, not a silent built-in ceiling that drops the tail of a large target
+// with only a log warning to show it. Set dir_discovery_max_hosts explicitly
+// for a real cap.
 func (s *DirScanner) dirDiscoveryHostCap() int {
 	if s.cfg != nil && s.cfg.DirDiscoveryMaxHosts > 0 {
 		return s.cfg.DirDiscoveryMaxHosts
 	}
-	return 150
+	return 300000
 }
 
 func (s *DirScanner) directoryHostConcurrency() int {
@@ -378,30 +380,49 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 	var wg sync.WaitGroup
 	var found atomic.Int64
 	baselines := make(map[string]soft404, len(services))
+	var baselinesMu sync.Mutex
 	logFn("info", "dir_discovery", fmt.Sprintf("Probing common paths on %d services...", len(services)))
 
+	// Hosts run their own soft-404 baseline + path probes CONCURRENTLY, bounded
+	// by directoryHostConcurrency() — previously a single sequential loop meant
+	// host N+1's baseline (up to a couple of blocking HTTP requests) could not
+	// even start until every one of host N's path-probe goroutines had been
+	// enqueued. On a large admitted host set (see dirDiscoveryHostCap, now
+	// effectively unbounded) that serial per-host startup, not the bounded sem
+	// below, was the real wall-clock bottleneck.
+	hostSem := make(chan struct{}, s.directoryHostConcurrency())
+	var hostWG sync.WaitGroup
 	for _, svcURL := range services {
 		if ctx.Err() != nil {
 			break
 		}
-		base := strings.TrimRight(svcURL, "/")
-		bl := soft404Baseline(ctx, base) // discard catch-all 200 pages
-		baselines[svcURL] = bl
-		for _, path := range probePaths {
-			if ctx.Err() != nil {
-				break
-			}
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(b, p string, baseline soft404) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				if s.probeAndStore(ctx, targetID, b+p, baseline) {
-					found.Add(1)
+		hostWG.Add(1)
+		hostSem <- struct{}{}
+		go func(svcURL string) {
+			defer hostWG.Done()
+			defer func() { <-hostSem }()
+			base := strings.TrimRight(svcURL, "/")
+			bl := soft404Baseline(ctx, base) // discard catch-all 200 pages
+			baselinesMu.Lock()
+			baselines[svcURL] = bl
+			baselinesMu.Unlock()
+			for _, path := range probePaths {
+				if ctx.Err() != nil {
+					return
 				}
-			}(base, path, bl)
-		}
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(b, p string, baseline soft404) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					if s.probeAndStore(ctx, targetID, b+p, baseline) {
+						found.Add(1)
+					}
+				}(base, path, bl)
+			}
+		}(svcURL)
 	}
+	hostWG.Wait()
 	wg.Wait()
 	logFn("info", "dir_discovery", fmt.Sprintf("Built-in prober found %d paths", found.Load()))
 
@@ -426,12 +447,23 @@ func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 		dwg.Wait()
 	} else if s.exec.IsToolAvailable("feroxbuster") {
 		logFn("info", "dir_discovery", fmt.Sprintf("Augmenting with feroxbuster on %d services...", len(services)))
+		// Previously fully sequential (no semaphore at all) — one host at a time,
+		// each waiting for the full feroxbuster run before the next even started.
+		fsem := make(chan struct{}, s.directoryHostConcurrency())
+		var fwg sync.WaitGroup
 		for _, svcURL := range services {
 			if ctx.Err() != nil {
 				break
 			}
-			s.runFeroxbuster(ctx, targetID, svcURL, baselines[svcURL], logFn)
+			fwg.Add(1)
+			fsem <- struct{}{}
+			go func(u string) {
+				defer fwg.Done()
+				defer func() { <-fsem }()
+				s.runFeroxbuster(ctx, targetID, u, baselines[u], logFn)
+			}(svcURL)
 		}
+		fwg.Wait()
 	} else {
 		logFn("info", "dir_discovery", "dirsearch/feroxbuster not installed — built-in prober only")
 	}
@@ -692,7 +724,7 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 		corpusDir = s.cfg.WordlistsDir
 	}
 	patterns := LoadCorpus(corpusDir, "backup", backupPatterns)
-	found := scanBackupCandidatesWithCorpus(ctx, s.db, targetID, services, domain, patterns, adaptiveWords)
+	found := scanBackupCandidatesWithCorpus(ctx, s.db, targetID, services, domain, patterns, s.cfg, adaptiveWords)
 	logFn("info", "backup_discovery", fmt.Sprintf("Backup discovery done. Found %d files.", found))
 	return nil
 }
@@ -705,8 +737,8 @@ func (s *DirScanner) RunBackupDiscovery(ctx context.Context, targetID string, lo
 // endpoints never flowed through this at all before (they live in
 // network_services, not http_services, so RunBackupDiscovery above never saw
 // them), which is the gap this shared extraction closes.
-func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string, services []string, domain string, adaptiveWords ...[]string) int {
-	return scanBackupCandidatesWithCorpus(ctx, db, targetID, services, domain, backupPatterns, adaptiveWords...)
+func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string, services []string, domain string, cfg *config.Config, adaptiveWords ...[]string) int {
+	return scanBackupCandidatesWithCorpus(ctx, db, targetID, services, domain, backupPatterns, cfg, adaptiveWords...)
 }
 
 // backupRangeHeader is sent on every real backup-candidate request AND on this
@@ -716,7 +748,40 @@ func scanBackupCandidates(ctx context.Context, db *database.DB, targetID string,
 // doc comment.
 const backupRangeHeader = "bytes=0-262143"
 
-func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, targetID string, services []string, domain string, corpus []string, adaptiveWords ...[]string) int {
+// backupHostConcurrency reuses the same "how many hosts can run content-
+// discovery in parallel" budget as the dirsearch/feroxbuster augmentation
+// passes above (Workers.DirectoryDiscovery), so one config knob governs
+// host-level parallelism across every content-discovery stage.
+func backupHostConcurrency(cfg *config.Config) int {
+	if cfg != nil && cfg.Workers.DirectoryDiscovery > 0 {
+		return cfg.Workers.DirectoryDiscovery
+	}
+	return 6
+}
+
+// backupRequestConcurrency scales the fine-grained per-request throttle
+// (shared across however many hosts are running in parallel at once) with the
+// deployment's configured HTTP budget, the same way directoryToolThreads/
+// SQLiScanner.concurrency already do, instead of a flat 40 that stayed fixed
+// no matter how many hosts dir_discovery_max_hosts admits. rate*40/150
+// reproduces the historical flat 40 exactly at the default rate of 150, and
+// scales proportionally above/below it.
+func backupRequestConcurrency(cfg *config.Config) int {
+	rate := 150
+	if cfg != nil && cfg.Limits.HTTPRateLimit > 0 {
+		rate = cfg.Limits.HTTPRateLimit
+	}
+	c := rate * 40 / 150
+	if c < 20 {
+		c = 20
+	}
+	if c > 400 {
+		c = 400
+	}
+	return c
+}
+
+func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, targetID string, services []string, domain string, corpus []string, cfg *config.Config, adaptiveWords ...[]string) int {
 	var observedURLs []string
 	rows, err := db.QueryContext(ctx, `SELECT url FROM directory_findings WHERE target_id=?
 		UNION SELECT url FROM parameters WHERE target_id=? LIMIT 400`, targetID, targetID)
@@ -762,135 +827,151 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 	patterns = append(patterns, generateBackupCandidates(domain)...)
 	patterns = uniquePaths(patterns)
 
-	// Raised from 20: the wordlist merge (backup_magic.go) roughly 5x'd the
-	// per-host candidate count, so more concurrency keeps wall-clock time sane.
-	sem := make(chan struct{}, 40)
+	// Scaled with the deployment's configured budget (see backupRequestConcurrency)
+	// instead of a flat 40 that stayed fixed no matter how many hosts
+	// dir_discovery_max_hosts admits.
+	sem := make(chan struct{}, backupRequestConcurrency(cfg))
 	var wg sync.WaitGroup
 	var found atomic.Int64
 
-serviceLoop:
+	// Hosts run their own soft-404 baseline + pattern probing CONCURRENTLY,
+	// bounded by backupHostConcurrency — previously a single sequential loop
+	// meant host N+1's baseline (up to two blocking HTTP requests) could not
+	// even start until EVERY one of host N's pattern-probe goroutines had been
+	// enqueued. On a large admitted host set that serial per-host startup was
+	// the real reason this phase could take hours even with dozens of hosts
+	// capped out.
+	hostSem := make(chan struct{}, backupHostConcurrency(cfg))
+	var hostWG sync.WaitGroup
 	for _, svcURL := range services {
 		if ctx.Err() != nil {
 			break
 		}
-		base := strings.TrimRight(svcURL, "/")
+		hostWG.Add(1)
+		hostSem <- struct{}{}
+		go func(svcURL string) {
+			defer hostWG.Done()
+			defer func() { <-hostSem }()
+			base := strings.TrimRight(svcURL, "/")
 
-		// Soft-404 baseline: many sites (SPAs, custom error pages) return 200
-		// with the same page for ANY path. Establish what a bogus path looks
-		// like so we can discard those instead of reporting hundreds of fakes.
-		// Captured WITH the same Range header the candidate requests below use
-		// (backupRangeHeader) — see soft404BaselineRanged's doc comment for why
-		// a plain (un-Ranged) baseline would silently disable this entirely on
-		// any Range-honoring server.
-		bl := soft404BaselineRanged(ctx, base, backupRangeHeader)
-		var priorityWG sync.WaitGroup
+			// Soft-404 baseline: many sites (SPAs, custom error pages) return 200
+			// with the same page for ANY path. Establish what a bogus path looks
+			// like so we can discard those instead of reporting hundreds of fakes.
+			// Captured WITH the same Range header the candidate requests below use
+			// (backupRangeHeader) — see soft404BaselineRanged's doc comment for why
+			// a plain (un-Ranged) baseline would silently disable this entirely on
+			// any Range-honoring server.
+			bl := soft404BaselineRanged(ctx, base, backupRangeHeader)
+			var priorityWG sync.WaitGroup
 
-		for patternIndex, pattern := range patterns {
-			if ctx.Err() != nil {
-				break
-			}
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				break serviceLoop
-			}
-			isPriority := patternIndex < cap(sem)
-			wg.Add(1)
-			if isPriority {
-				priorityWG.Add(1)
-			}
-			go func(b, p string, base soft404, priority bool) {
-				defer wg.Done()
-				if priority {
-					defer priorityWG.Done()
-				}
-				defer func() { <-sem }()
-				targetURL := b + p
-				req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-				if err != nil {
+			for patternIndex, pattern := range patterns {
+				if ctx.Err() != nil {
 					return
 				}
-				req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
-				// Backup validation only needs the leading bytes (magic signatures,
-				// SQL markers, env/config evidence). Asking for a bounded range avoids
-				// downloading multi-gigabyte dumps while still accepting servers that
-				// ignore Range and answer 200. Must stay in sync with the baseline
-				// probe above (backupRangeHeader) — see soft404BaselineRanged.
-				req.Header.Set("Range", backupRangeHeader)
-				resp, err := dirHTTPClient.Do(req)
-				if err != nil {
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
 					return
 				}
-				defer resp.Body.Close()
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
-
-				// Reject the SPA / catch-all: a real backup/config file
-				// (.json/.yml/.bak/.env/.sql/.config…) is NEVER served as an HTML
-				// page. Many hosts return index.html (200, text/html) for ANY path,
-				// producing dozens of identical fake "backups". If the body looks
-				// like HTML, it's the catch-all, not a config file.
-				ct := strings.ToLower(resp.Header.Get("Content-Type"))
-				if strings.Contains(ct, "text/html") || looksLikeHTML(body) {
-					return
+				isPriority := patternIndex < cap(sem)
+				wg.Add(1)
+				if isPriority {
+					priorityWG.Add(1)
 				}
-				// Reject a WAF/edge block or challenge answering the candidate
-				// request. Most vendor block pages are HTML (already caught above),
-				// but some return a non-HTML (JSON/plain-text) challenge for
-				// non-browser-shaped requests — exactly what a .sql/.zip/.env-style
-				// path looks like — which would otherwise reach the loose per-type
-				// bar below (e.g. "backup"/"log_file" only require len>=16) and be
-				// misreported as a confirmed backup. This module had NO WAF
-				// awareness at all before, unlike every injection detector.
-				if looksLikeBlockPage(resp.StatusCode, string(body)) {
-					return
-				}
-
-				if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) &&
-					!base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
-					magic := checkMagicBytes(body)
-					fileType := detectFileType(p, body)
-
-					// Reject noisy non-secrets: a real backup/secret is either
-					// magic-byte-confirmed (archive/DB dump) OR a genuinely
-					// sensitive type (.sql/.env/.bak/.git/.log/.config). A plain
-					// non-HTML 200 (JSON API, JS/CSS, image, generic xml/yaml) is
-					// NOT a backup — skip it to kill the false positives.
-					if !credibleSensitiveBackup(fileType, body, magic) {
+				go func(b, p string, base soft404, priority bool) {
+					defer wg.Done()
+					if priority {
+						defer priorityWG.Done()
+					}
+					defer func() { <-sem }()
+					targetURL := b + p
+					req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+					if err != nil {
 						return
 					}
-					if magic != "" {
-						fileType = magic + " (confirmed)"
+					req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
+					// Backup validation only needs the leading bytes (magic signatures,
+					// SQL markers, env/config evidence). Asking for a bounded range avoids
+					// downloading multi-gigabyte dumps while still accepting servers that
+					// ignore Range and answer 200. Must stay in sync with the baseline
+					// probe above (backupRangeHeader) — see soft404BaselineRanged.
+					req.Header.Set("Range", backupRangeHeader)
+					resp, err := dirHTTPClient.Do(req)
+					if err != nil {
+						return
 					}
-					size := backupResponseSize(resp, len(body))
-					id := uuid.New().String()
-					result, err := db.Exec(`
+					defer resp.Body.Close()
+					body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+
+					// Reject the SPA / catch-all: a real backup/config file
+					// (.json/.yml/.bak/.env/.sql/.config…) is NEVER served as an HTML
+					// page. Many hosts return index.html (200, text/html) for ANY path,
+					// producing dozens of identical fake "backups". If the body looks
+					// like HTML, it's the catch-all, not a config file.
+					ct := strings.ToLower(resp.Header.Get("Content-Type"))
+					if strings.Contains(ct, "text/html") || looksLikeHTML(body) {
+						return
+					}
+					// Reject a WAF/edge block or challenge answering the candidate
+					// request. Most vendor block pages are HTML (already caught above),
+					// but some return a non-HTML (JSON/plain-text) challenge for
+					// non-browser-shaped requests — exactly what a .sql/.zip/.env-style
+					// path looks like — which would otherwise reach the loose per-type
+					// bar below (e.g. "backup"/"log_file" only require len>=16) and be
+					// misreported as a confirmed backup. This module had NO WAF
+					// awareness at all before, unlike every injection detector.
+					if looksLikeBlockPage(resp.StatusCode, string(body)) {
+						return
+					}
+
+					if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) &&
+						!base.matches(resp.StatusCode, body, resp.Header.Get("Content-Type")) {
+						magic := checkMagicBytes(body)
+						fileType := detectFileType(p, body)
+
+						// Reject noisy non-secrets: a real backup/secret is either
+						// magic-byte-confirmed (archive/DB dump) OR a genuinely
+						// sensitive type (.sql/.env/.bak/.git/.log/.config). A plain
+						// non-HTML 200 (JSON API, JS/CSS, image, generic xml/yaml) is
+						// NOT a backup — skip it to kill the false positives.
+						if !credibleSensitiveBackup(fileType, body, magic) {
+							return
+						}
+						if magic != "" {
+							fileType = magic + " (confirmed)"
+						}
+						size := backupResponseSize(resp, len(body))
+						id := uuid.New().String()
+						result, err := db.Exec(`
 						INSERT INTO backup_findings (id, target_id, url, status_code, content_length, file_type)
 						VALUES (?, ?, ?, ?, ?, ?)
 						ON CONFLICT(target_id, url) DO NOTHING
 					`, id, targetID, targetURL, resp.StatusCode, size, fileType)
-					if err != nil {
-						return
+						if err != nil {
+							return
+						}
+						inserted, _ := result.RowsAffected()
+						if inserted == 0 {
+							return
+						}
+						found.Add(1)
+						if magic != "" {
+							storeExposedBackup(db, targetID, targetURL, magic, size)
+						}
 					}
-					inserted, _ := result.RowsAffected()
-					if inserted == 0 {
-						return
-					}
-					found.Add(1)
-					if magic != "" {
-						storeExposedBackup(db, targetID, targetURL, magic, size)
-					}
-				}
-			}(base, pattern, bl, isPriority)
+				}(base, pattern, bl, isPriority)
 
-			// Do not let the large generic corpus race ahead of the first
-			// high-signal batch. The batch itself remains fully parallel; this
-			// barrier only makes its time-to-signal priority deterministic.
-			if patternIndex == cap(sem)-1 {
-				priorityWG.Wait()
+				// Do not let the large generic corpus race ahead of the first
+				// high-signal batch. The batch itself remains fully parallel; this
+				// barrier only makes its time-to-signal priority deterministic.
+				if patternIndex == cap(sem)-1 {
+					priorityWG.Wait()
+				}
 			}
-		}
+		}(svcURL)
 	}
 
+	hostWG.Wait()
 	wg.Wait()
 	return int(found.Load())
 }

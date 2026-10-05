@@ -155,7 +155,7 @@ func TestBackupDiscoveryFindsBackDotEnv(t *testing.T) {
 	}
 	// No injected corpus entry: this proves the default contextual plan itself
 	// covers /back/.env, instead of merely testing a caller-provided exact path.
-	if found := scanBackupCandidatesWithCorpus(context.Background(), db, "target", []string{srv.URL}, "example.test", nil); found < 1 {
+	if found := scanBackupCandidatesWithCorpus(context.Background(), db, "target", []string{srv.URL}, "example.test", nil, nil); found < 1 {
 		t.Fatal("/back/.env was not discovered by the default plan")
 	}
 	// Two requests establish the soft-404 baseline; /back/.env is then in the

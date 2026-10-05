@@ -480,15 +480,39 @@ func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool)
 // (a builtin wordlist under the target domain, plus already-found names) that do
 // NOT resolve in DNS. A candidate whose response differs meaningfully from the
 // baseline is a real vhost and is stored with source='vhost'.
+// vhostProbeConcurrency scales the vhost Host-header probe throttle with the
+// deployment's configured HTTP budget, the same way directoryToolThreads/
+// SQLiScanner.concurrency already do — instead of a flat 12 that stayed fixed
+// regardless of how many IPs/candidates this pass now admits (raised
+// alongside vhostCandidateCap and the known-IP cap above). rate*12/150
+// reproduces the historical flat 12 exactly at the default rate of 150.
+func (s *SubdomainScanner) vhostProbeConcurrency() int {
+	rate := 150
+	if s.cfg != nil && s.cfg.Limits.HTTPRateLimit > 0 {
+		rate = s.cfg.Limits.HTTPRateLimit
+	}
+	c := rate * 12 / 150
+	if c < 6 {
+		c = 6
+	}
+	if c > 60 {
+		c = 60
+	}
+	return c
+}
+
 func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
 	if ctx.Err() != nil {
 		return
 	}
-	// Distinct known IPs (cap to keep the pass bounded).
+	// Distinct known IPs (cap to keep the pass bounded; raised from 40 — a huge
+	// multi-asset scan can legitimately have far more than 40 distinct hosting
+	// IPs, and silently dropping the rest means whole IP ranges never get
+	// Host-header probed at all).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT ip FROM subdomains
 		 WHERE target_id=? AND ip!='' AND (subdomain=? OR subdomain LIKE ?)
-		 LIMIT 40`, targetID, domain, "%."+domain)
+		 LIMIT 100`, targetID, domain, "%."+domain)
 	if err != nil {
 		return
 	}
@@ -542,8 +566,8 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 		// names are valuable Host-header candidates. Feed a bounded slice into the
 		// differential vhost verifier instead of accepting their wildcard DNS answer.
 		words := s.deepDNSWords(ctx, domain, nil)
-		if len(words) > 650 {
-			words = words[:650]
+		if len(words) > 1500 {
+			words = words[:1500]
 		}
 		for _, p := range words {
 			add(p + "." + domain)
@@ -561,7 +585,11 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	for _, n := range known {
 		add(n)
 	}
-	const vhostCandidateCap = 800
+	// Raised from 800: a hardcoded ceiling this low silently dropped most of a
+	// large multi-asset scan's candidate hostnames with nothing but a warning
+	// log to show it. Paired with the higher vhostProbeConcurrency below so the
+	// larger candidate volume doesn't just make this stage crawl.
+	const vhostCandidateCap = 4000
 	if len(candidates) > vhostCandidateCap {
 		logFn("warn", "vhost", fmt.Sprintf("vhost candidate cap hit: %d candidates; prioritising the curated/tool names and first %d stable candidates", len(candidates), vhostCandidateCap))
 		candidates = candidates[:vhostCandidateCap]
@@ -574,7 +602,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan: %d IP(s) × %d candidate host(s)...", len(ips), len(probeHosts)))
 
-	sem := make(chan struct{}, 12)
+	sem := make(chan struct{}, s.vhostProbeConcurrency())
 	discovered := 0
 
 	for _, ip := range ips {
