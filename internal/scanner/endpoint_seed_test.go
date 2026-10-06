@@ -5,6 +5,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/recon-platform/internal/database"
 )
 
 // TestLooksLikeEndpointURL proves endpoint URLs (with a path and/or query) are
@@ -92,5 +95,88 @@ func TestEndpointScope(t *testing.T) {
 	// No confinement (plain ctx) → everything in scope.
 	if !urlInEndpointScope(context.Background(), "https://anything.com/x") {
 		t.Errorf("plain context must place everything in scope")
+	}
+}
+
+// TestInjectablePathSegmentsIncludesImageAndStaticLookingPaths proves a
+// static-asset-LOOKING path segment (photo.jpg, report.pdf) is still returned
+// as an injectable candidate. This used to be silently skipped — exactly the
+// classic image/file-serving LFI vector (/images/<name>, /download/<name>)
+// where the filename-shaped segment is resolved against the filesystem, not
+// served as a genuinely immutable static asset.
+func TestInjectablePathSegmentsIncludesImageAndStaticLookingPaths(t *testing.T) {
+	u, err := url.Parse("https://x.test/images/photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idxs, vals := injectablePathSegments(u)
+	found := false
+	for i, idx := range idxs {
+		if idx == 1 && vals[i] == "photo.jpg" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected photo.jpg to be an injectable path segment, got idxs=%v vals=%v", idxs, vals)
+	}
+
+	u2, _ := url.Parse("https://x.test/static/report.pdf")
+	idxs2, vals2 := injectablePathSegments(u2)
+	found2 := false
+	for i, idx := range idxs2 {
+		if idx == 1 && vals2[i] == "report.pdf" {
+			found2 = true
+		}
+	}
+	if !found2 {
+		t.Fatalf("expected report.pdf to be an injectable path segment, got idxs=%v vals=%v", idxs2, vals2)
+	}
+}
+
+// TestSeedPathSegmentsFromURLsRoutesToLFI proves the general crawl-wide
+// path-segment seeder (not just the single-explicit-endpoint case) produces
+// insertion points that LFI's own loader (loadRoutedInsertionPoints,
+// ClassLFI) actually picks up — closing the gap where the overwhelming bulk
+// of a scan's crawled surface only ever contributed query parameters.
+func TestSeedPathSegmentsFromURLsRoutesToLFI(t *testing.T) {
+	db, err := database.New(t.TempDir() + "/seedpath.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	targetID := uuid.New().String()
+	if _, err := db.Exec(`INSERT INTO targets (id, domain) VALUES (?, 'x.test')`, targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	urls := []string{
+		"https://x.test/images/avatar123.jpg",
+		"https://x.test/download/report.pdf",
+		"https://x.test/", // no real path — must be skipped without error
+	}
+	seeded := seedPathSegmentsFromURLs(ctx, db, targetID, urls, 0)
+	if seeded == 0 {
+		t.Fatal("expected at least one path-segment parameter to be seeded")
+	}
+
+	points := loadRoutedInsertionPoints(ctx, db, targetID, ClassLFI, 1000, 32)
+	var sawImage, sawDownload bool
+	for _, p := range points {
+		if p.URL == "https://x.test/images/avatar123.jpg" && strings.HasPrefix(p.Location, "path:") {
+			sawImage = true
+		}
+		if p.URL == "https://x.test/download/report.pdf" && strings.HasPrefix(p.Location, "path:") {
+			sawDownload = true
+		}
+	}
+	if !sawImage {
+		t.Error("expected the image path segment to reach LFI's own insertion-point loader")
+	}
+	if !sawDownload {
+		t.Error("expected the download/report.pdf path segment to reach LFI's own insertion-point loader")
 	}
 }

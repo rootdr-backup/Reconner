@@ -54,7 +54,14 @@ var classTokens = map[VulnClass]map[string]bool{
 		"include", "inc", "template", "tpl", "style", "view", "content", "layout",
 		"lang", "language", "download", "read", "cat", "dir", "board", "detail",
 		"show", "conf", "config", "load", "filename", "filepath", "src", "item",
-		"module", "mod", "class", "pdf", "attachment", "download_file"),
+		"module", "mod", "class", "pdf", "attachment", "download_file",
+		// Image/media-serving parameters are one of the most common real-world
+		// LFI entry points (a gallery/CMS "load this file" script keyed by
+		// filename) and were missing entirely — none of the names above are
+		// tokens a classic ?image=/?img=/?thumbnail= parameter would ever split
+		// into.
+		"image", "img", "photo", "picture", "pic", "media", "thumb", "thumbnail",
+		"avatar", "banner", "asset", "resource", "export", "report", "logo"),
 	ClassSQLi: set("id", "user", "userid", "order", "sort", "orderby", "filter", "query",
 		"search", "column", "field", "category", "cat", "select", "where", "group",
 		"status", "type", "key", "table", "row", "num", "count", "limit", "offset"),
@@ -91,8 +98,14 @@ func set(items ...string) map[string]bool {
 }
 
 var (
-	tokenSplitRE  = regexp.MustCompile(`[^a-z0-9]+`)
-	fileValueRE   = regexp.MustCompile(`(?i)\.(php|asp|aspx|jsp|json|xml|txt|log|conf|cfg|ini|pdf|html?|bak|env|yml|yaml|properties)$`)
+	tokenSplitRE = regexp.MustCompile(`[^a-z0-9]+`)
+	// Includes common image/media/archive/document extensions alongside the
+	// original server-side-shaped ones — a value like "photo.jpg" or
+	// "report.docx" is exactly as LFI-relevant as "config.ini": the attacker
+	// cares that the parameter controls A FILE PATH, not what kind of file it
+	// nominally serves.
+	fileValueRE = regexp.MustCompile(`(?i)\.(php\d?|asp|aspx|jsp|json|xml|txt|log|conf|cfg|ini|pdf|html?|bak|env|yml|yaml|properties|` +
+		`jpe?g|png|gif|bmp|svg|webp|ico|tiff?|avif|css|js|zip|tar|gz|7z|rar|doc|docx|xls|xlsx|ppt|pptx|csv|mp3|mp4|avi|mov)$`)
 	numericValRE  = regexp.MustCompile(`^\d{1,19}$`)
 	uuidValRE     = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	urlishValueRE = regexp.MustCompile(`(?i)^(https?:)?//`)

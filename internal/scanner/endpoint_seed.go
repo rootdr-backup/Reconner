@@ -82,9 +82,22 @@ func hostOfEndpoint(token string) string {
 }
 
 // injectablePathSegments returns the (index, value) of each non-empty path segment
-// worth registering as a path insertion point. Static-asset-looking last segments
-// (foo.js, style.css) are skipped; everything else is fair game because the
-// operator explicitly named this endpoint.
+// worth registering as a path insertion point.
+//
+// A static-asset-LOOKING last segment (photo.jpg, report.pdf, style.css) is
+// deliberately NOT skipped, even though it was until this comment was written:
+// an image/file-serving endpoint that resolves a path segment against the
+// filesystem (/images/<name>, /download/<name>, /avatars/<name>) is precisely
+// the classic real-world LFI/path-traversal vector — "looks like a static
+// file" is exactly what makes it indistinguishable from a genuinely static
+// asset by inspection alone, which is the whole reason to actually TEST it
+// rather than assume. The old skip (meant to stop XSS/SQLi/SSTI from wasting a
+// candidate on a truly immutable webpack bundle path) accidentally starved
+// LFI of its single most common target class, since this is the ONLY function
+// that ever produces a path-based insertion point. It still costs those other
+// classes nothing: the synthetic parameter name ("path<N>") routes almost
+// exclusively to LFI/CRLF via paramProneTo's name-token classification (see
+// param_router.go), not to XSS/SQLi/SSTI, so nothing downstream gets spammed.
 func injectablePathSegments(u *url.URL) (indexes []int, values []string) {
 	segs := strings.Split(u.EscapedPath(), "/")
 	// segs[0] is "" for an absolute path; real segments start at 1 → index 0.
@@ -97,23 +110,10 @@ func injectablePathSegments(u *url.URL) (indexes []int, values []string) {
 		if err != nil {
 			dec = seg
 		}
-		if strings.Contains(dec, ".") && isStaticAssetSegment(dec) {
-			continue
-		}
 		indexes = append(indexes, i-1)
 		values = append(values, dec)
 	}
 	return indexes, values
-}
-
-// isStaticAssetSegment reports whether a path segment is a static asset filename
-// (so we don't waste a path insertion point fuzzing /app.min.js).
-func isStaticAssetSegment(seg string) bool {
-	dot := strings.LastIndexByte(seg, '.')
-	if dot < 0 {
-		return false
-	}
-	return nucleiStaticExts["."+strings.ToLower(seg[dot+1:])]
 }
 
 // SeedEndpointURL registers a single endpoint URL and its insertion points so the
@@ -177,4 +177,61 @@ func SeedEndpointURL(ctx context.Context, db *database.DB, targetID, rawURL stri
 		}
 	}
 	return host, seeded
+}
+
+// seedPathSegmentsFromURLs registers a path-segment insertion point (see
+// injectablePathSegments) for EVERY url given, not just a single explicitly-
+// seeded endpoint. Before this, path-based candidates (location="path:<N>")
+// only ever existed for the one operator-provided single-endpoint scope
+// (SeedEndpointURL above) or an OpenAPI-documented path parameter — the
+// overwhelming bulk of a normal scan's crawled surface (katana/gau/
+// waybackurls/hakrawler output) only ever contributed QUERY parameters.
+// LFI/SQLi/CRLF's most common real-world target class is often the URL PATH
+// itself (/images/<name>, /download/<id>, /files/<name>), so this closes a
+// structural blind spot affecting every path-shaped vector those detectors
+// look for, not just the rare single-endpoint-scope case.
+//
+// Bounded to the first maxURLs (by iteration order) so a target with an
+// enormous crawled corpus can't turn this into an unbounded insert storm;
+// one prepared statement inside a single transaction keeps the bulk insert
+// itself cheap regardless of how many rows that allows.
+func seedPathSegmentsFromURLs(ctx context.Context, db *database.DB, targetID string, urls []string, maxURLs int) int {
+	if maxURLs > 0 && len(urls) > maxURLs {
+		urls = urls[:maxURLs]
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO parameters (id, target_id, url, parameter, value, source, method, content_type, location, is_reflected)
+		VALUES (?, ?, ?, ?, ?, 'crawl-path', 'GET', '', ?, 0)
+		ON CONFLICT(target_id,url,parameter,method,location,content_type) DO NOTHING`)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0
+	}
+	seeded := 0
+	for _, raw := range urls {
+		if ctx.Err() != nil {
+			break
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Path == "" || u.Path == "/" {
+			continue
+		}
+		idxs, vals := injectablePathSegments(u)
+		for k, idx := range idxs {
+			res, err := stmt.ExecContext(ctx, uuid.New().String(), targetID, raw, "path"+itoa(idx), vals[k], "path:"+itoa(idx))
+			if err != nil {
+				continue
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				seeded++
+			}
+		}
+	}
+	_ = stmt.Close()
+	_ = tx.Commit()
+	return seeded
 }

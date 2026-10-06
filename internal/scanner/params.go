@@ -362,6 +362,15 @@ func (s *ParamScanner) Run(ctx context.Context, targetID, domain string, logFn L
 	for raw := range crawlURLs {
 		crawled = append(crawled, raw)
 	}
+
+	// Path-segment insertion points (location="path:<N>") for EVERY crawled URL,
+	// not just a single explicitly-seeded endpoint — see seedPathSegmentsFromURLs'
+	// doc comment. LFI/SQLi/CRLF's most common real-world target is often the URL
+	// PATH itself (/images/<name>, /download/<id>, /files/<name>), which the
+	// query-only extraction above never produces a candidate for at all.
+	pathSeeded := seedPathSegmentsFromURLs(ctx, s.db, targetID, crawled, 20000)
+	logFn("info", "param_discovery", fmt.Sprintf("Seeded %d path-segment insertion point(s) from crawled URLs.", pathSeeded))
+
 	words := buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, crawled)
 	logFn("info", "param_discovery", fmt.Sprintf("Adaptive target wordlist updated with %d ranked words.", len(words)))
 	return nil
