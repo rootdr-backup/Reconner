@@ -301,6 +301,14 @@ func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// finding via RecordOOBHit. No-op without a configured callback URL.
 	s.plantBlindSQLi(ctx, targetID, logFn)
 
+	// plantBlindSQLi reads selectCandidates() → the `parameters` table, which by
+	// construction never contains a row for headerChecks' hardcoded header
+	// vectors (they are probed directly, never seeded as parameters). A header-
+	// driven blind SQLi with no visible differential at all (a logging table
+	// keyed by Referer/X-Forwarded-For, for example) therefore had NO detection
+	// path whatsoever before this.
+	s.plantBlindSQLiHeaders(ctx, targetID, auth, logFn)
+
 	logFn("info", "sqli", fmt.Sprintf("SQLi check done. Found %d candidates.", found.Load()))
 	return nil
 }
@@ -324,6 +332,79 @@ func (s *SQLiScanner) plantBlindSQLi(ctx context.Context, targetID string, logFn
 		})
 	if n > 0 {
 		logFn("info", "sqli", fmt.Sprintf("Planted %d blind-SQLi OOB probe(s); execution reported via callback.", n))
+	}
+}
+
+// sqliOOBHeaderVectors are the headers most commonly logged/queried server-side
+// without ever appearing in a visible response (hunt-sqli root cause #9: HTTP
+// headers stored in the DB without sanitisation) — the exact set a blind,
+// zero-differential header SQLi needs OOB coverage on. A narrower set than
+// headerChecks' full in-band vector list: each entry here multiplies by every
+// host AND every OOB payload variant, so this stays bounded to the
+// highest-value real-world sinks rather than all 8 header vectors.
+var sqliOOBHeaderVectors = []string{"User-Agent", "X-Forwarded-For", "Referer", "X-Forwarded-Host"}
+
+// plantBlindSQLiHeaders covers the header vectors headerChecks tests in-band
+// with the one technique that can prove injection with ZERO visible response
+// signal: an out-of-band DB-native callback. headerChecks' own deterministic/
+// blind ladder — and plantBlindSQLi above — both only ever read the
+// `parameters` table, which by construction never contains a row for these
+// hardcoded header vectors (they are probed directly against live roots, never
+// seeded as parameters), so neither path reaches them. Mirrors SSRF's
+// plantBlindSSRFHeaders: one token per header per live root so a callback
+// identifies the exact sink.
+func (s *SQLiScanner) plantBlindSQLiHeaders(ctx context.Context, targetID string, auth map[string]string, logFn LogFunc) {
+	o, ok := newOOBCapability(s.cfg)
+	if !ok {
+		return
+	}
+	roots := (&OASTScanner{db: s.db}).aliveRoots(ctx, targetID)
+	if len(roots) == 0 {
+		return
+	}
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+	planted := 0
+	for _, root := range roots {
+		for _, h := range sqliOOBHeaderVectors {
+			if ctx.Err() != nil {
+				break
+			}
+			token := registerOOBProbe(s.db, targetID, root, h, "sqli", "header:"+h)
+			cb := o.callbackURL(token)
+			payloads := sqliOOBPayloads(cb, o.callbackHost, o.dnsHostFor(oobTokenFromCB(cb)))
+			planted++
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(root, header string, payloads []string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				for _, p := range payloads {
+					if ctx.Err() != nil {
+						return
+					}
+					reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, root, nil)
+					if err != nil {
+						cancel()
+						continue
+					}
+					req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+					for k, v := range auth {
+						req.Header.Set(k, v)
+					}
+					req.Header.Set(header, p)
+					if resp, err := oastClient.Do(req); err == nil {
+						resp.Body.Close()
+					}
+					cancel()
+				}
+			}(root, h, payloads)
+		}
+	}
+	wg.Wait()
+	if planted > 0 {
+		logFn("info", "sqli", fmt.Sprintf("Planted %d header-specific blind-SQLi OOB probe set(s) across %d live root(s).", planted, len(roots)))
 	}
 }
 
@@ -1122,14 +1203,19 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth ma
 				}
 				hip := insertionPoint{URL: target, Param: vec.parameter, Value: vec.value, Method: "GET", Location: loc}
 				// Cookies are request/business-state fields, so every distinct route
-				// receives the complete deterministic+timing ladder. User-Agent and
-				// client-IP logging are normally host-wide middleware: run the deep
-				// blind ladder once per host, while every other route/header still gets
-				// a reproduced DB-error probe. This retains route-specific error SQLi
-				// coverage without multiplying the ~full SQLi engine by 8 headers and
-				// every concrete object URL.
-				deep := hdr == "Cookie" || (hostRepresentative[hostOfURL(target)] == target &&
-					(hdr == "User-Agent" || hdr == "X-Forwarded-For"))
+				// receives the complete deterministic+timing ladder. Every OTHER
+				// header (User-Agent, client-IP variants, X-Forwarded-Host,
+				// Accept-Language, Referer) is normally consumed by host-wide
+				// logging/audit middleware, not per-route logic: run the full
+				// boolean/time-based blind ladder once per host for ALL of them (not
+				// just User-Agent/X-Forwarded-For — a boolean-blind SQLi via Referer
+				// or X-Forwarded-Host that never throws a raw DB error was previously
+				// a guaranteed miss on every host, since those two headers got only
+				// the lighter error-based headerProbe). Every other route/header
+				// still gets a reproduced DB-error probe. This retains route-specific
+				// error SQLi coverage without multiplying the ~full SQLi engine by 8
+				// headers and every concrete object URL — only by 8 headers × hosts.
+				deep := hdr == "Cookie" || hostRepresentative[hostOfURL(target)] == target
 				kind, payload, ev := "", "", ""
 				if deep {
 					kind, payload, ev = s.quickProbe(ctx, hip, auth)
@@ -1168,24 +1254,39 @@ func (s *SQLiScanner) headerChecks(ctx context.Context, targetID string, auth ma
 }
 
 func (s *SQLiScanner) headerProbe(ctx context.Context, target, header, parameter string, auth map[string]string) (string, string, string) {
-	// error-based (same FP guards as the parameter path: not a WAF block, and it
-	// must reproduce while staying absent from a fresh baseline).
-	const headerProbePayload = "recon'\"`"
-	base := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
-	errResp := s.fetchWithHeaderAuth(ctx, target, header, parameter, headerProbePayload, auth)
-	for _, sig := range sqlErrorSignatures {
-		if !sig.MatchString(errResp) || sig.MatchString(base) {
+	baseStatus, base := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
+	if looksLikeBlockPage(baseStatus, base) {
+		return "", "", ""
+	}
+	// Each boundary tried independently, same as the main quickProbe suffix
+	// loop: a single payload mixing every quote style ("recon'\"`") is easy for
+	// a WAF to block and can be syntactically invalid in a way that hides the
+	// engine's useful error. The paren-closing forms catch a header value
+	// injected inside one or two parentheses (a logging/audit query built as
+	// WHERE ip=($v)) that a bare quote alone would leave unbalanced and never
+	// surface.
+	for _, suffix := range []string{"'", `"`, "`", ")", "')", "))", "'))", `\")`} {
+		injected := "recon" + suffix
+		errStatus, errResp := s.fetchWithHeaderAuth(ctx, target, header, parameter, injected, auth)
+		// looksLikeBlockPage is STATUS-AWARE (e.g. it always treats 429 as a
+		// block), unlike the old bodyLooksLikeWAFBlock(errResp)-only guard this
+		// replaced, which discarded the status code and could never apply that
+		// rule here.
+		if looksLikeBlockPage(errStatus, errResp) {
 			continue
 		}
-		if bodyLooksLikeWAFBlock(errResp) {
-			break
+		for _, sig := range sqlErrorSignatures {
+			if !sig.MatchString(errResp) || sig.MatchString(base) {
+				continue
+			}
+			base2Status, base2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
+			errResp2Status, errResp2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, injected, auth)
+			if looksLikeBlockPage(base2Status, base2) || looksLikeBlockPage(errResp2Status, errResp2) ||
+				!sig.MatchString(errResp2) || sig.MatchString(base2) {
+				continue
+			}
+			return "error_based", injected, fmt.Sprintf("DB error triggered by %s boundary in header (reproduced; absent from baseline)", suffix)
 		}
-		base2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, "recon-baseline", auth)
-		errResp2 := s.fetchWithHeaderAuth(ctx, target, header, parameter, headerProbePayload, auth)
-		if !sig.MatchString(errResp2) || sig.MatchString(base2) {
-			break
-		}
-		return "error_based", headerProbePayload, "DB error triggered by quote in header (reproduced; absent from baseline)"
 	}
 	// Header SQLi is now reported only on a reproduced DB error. Time-based header
 	// probing was removed alongside the parameter path — it was the same FP-prone
@@ -1199,15 +1300,16 @@ func (s *SQLiScanner) fetchWithHeader(ctx context.Context, target, header, injec
 	if header == "Cookie" {
 		parameter = "id"
 	}
-	return s.fetchWithHeaderAuth(ctx, target, header, parameter, injection, nil)
+	_, body := s.fetchWithHeaderAuth(ctx, target, header, parameter, injection, nil)
+	return body
 }
 
-func (s *SQLiScanner) fetchWithHeaderAuth(ctx context.Context, target, header, parameter, injection string, auth map[string]string) string {
+func (s *SQLiScanner) fetchWithHeaderAuth(ctx context.Context, target, header, parameter, injection string, auth map[string]string) (int, string) {
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", target, nil)
 	if err != nil {
-		return ""
+		return 0, ""
 	}
 	// A default UA so non-UA header tests still send a normal-looking request.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
@@ -1230,11 +1332,11 @@ func (s *SQLiScanner) fetchWithHeaderAuth(ctx context.Context, target, header, p
 	}
 	resp, err := sqliHTTPClient.Do(req)
 	if err != nil {
-		return ""
+		return 0, ""
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
-	return string(body)
+	return resp.StatusCode, string(body)
 }
 
 func cookieParameterNames(cookie string) []string {

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/recon-platform/internal/config"
 )
 
 // The data-flow bug: headerChecks tested X-Forwarded-For and Referer, but
@@ -42,6 +45,103 @@ func TestSQLiFetchWithHeaderSetsAllHeaders(t *testing.T) {
 
 // hasQuote reports whether the injected id value carries a quote (the error probe).
 func hasQuote(v string) bool { return strings.ContainsAny(v, "'\"`") }
+
+// TestHeaderProbeDetectsParenOnlyBoundary proves the fix for a real false
+// negative: headerProbe used to send one combined payload ("recon'\"`") and
+// never tried a parenthesis-closing boundary at all. A header value injected
+// inside a parenthesised predicate (a logging/audit query built as
+// WHERE ip=($v)) throws no error on a bare quote/backtick — only on a value
+// that actually closes the paren — so the old single-payload probe could
+// never detect this class of header SQLi.
+func TestHeaderProbeDetectsParenOnlyBoundary(t *testing.T) {
+	withLoopbackAllowed(t)
+	dbErr := "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Custom") == "recon)" {
+			w.Write([]byte(dbErr))
+			return
+		}
+		w.Write([]byte("stable normal response"))
+	}))
+	defer srv.Close()
+	s := &SQLiScanner{}
+
+	kind, payload, _ := s.headerProbe(context.Background(), srv.URL, "X-Custom", "X-Custom", nil)
+	if kind != "error_based" {
+		t.Fatalf("expected the paren-only boundary to be detected, got kind=%q", kind)
+	}
+	if payload != "recon)" {
+		t.Fatalf("expected the reproduction payload to be the paren-closing boundary, got %q", payload)
+	}
+}
+
+// TestHeaderProbeRejects429AsBlockPageNotFinding proves the fix for a real
+// false positive: fetchWithHeaderAuth used to discard the HTTP status code
+// entirely, so headerProbe's WAF guard (bodyLooksLikeWAFBlock, body-only)
+// could never apply the "429 is always a block" rule that every other call
+// site in this file uses via looksLikeBlockPage(status, body). A server that
+// rate-limits repeated header-fuzzing with a 429 whose body happens to
+// contain SQL-error-shaped text (no vendor block-page signature, so the old
+// body-only check missed it) must not be reported as confirmed SQLi.
+func TestHeaderProbeRejects429AsBlockPageNotFinding(t *testing.T) {
+	withLoopbackAllowed(t)
+	dbErr := "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hasQuote(r.Header.Get("X-Custom")) || strings.Contains(r.Header.Get("X-Custom"), ")") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(dbErr))
+			return
+		}
+		w.Write([]byte("stable normal response"))
+	}))
+	defer srv.Close()
+	s := &SQLiScanner{}
+
+	kind, _, _ := s.headerProbe(context.Background(), srv.URL, "X-Custom", "X-Custom", nil)
+	if kind != "" {
+		t.Fatalf("a 429 rate-limit response must never be reported as confirmed SQLi, got kind=%q", kind)
+	}
+}
+
+// TestHeaderChecksDeepLadderReachesXForwardedHostBooleanBlind proves the fix
+// for a real false negative: headerChecks used to run the full boolean/time-
+// based blind ladder (quickProbe) on the host's representative route for ONLY
+// User-Agent and X-Forwarded-For — every other header, including
+// X-Forwarded-Host, got only the error-based headerProbe. A boolean-blind
+// SQLi that never throws a raw DB error (a classic logging-table vector,
+// e.g. WHERE host = '$v' with no error reporting) was therefore a guaranteed
+// miss via X-Forwarded-Host on every target. This drives the REAL
+// headerChecks end-to-end against a mock app that evaluates the injected
+// boolean condition and returns a same-length differential body — detectable
+// only by the deep ladder, never by headerProbe's error-signature-only check.
+func TestHeaderChecksDeepLadderReachesXForwardedHostBooleanBlind(t *testing.T) {
+	withLoopbackAllowed(t)
+	full := strings.Repeat("PROFILE-alice-admin;", 30)
+	none := strings.Repeat("NOTFOUND-no-record-;", 30)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if sqliOracleTrue(r.Header.Get("X-Forwarded-Host"), "sqli") {
+			_, _ = w.Write([]byte(full))
+		} else {
+			_, _ = w.Write([]byte(none))
+		}
+	}))
+	defer srv.Close()
+
+	db, tid := testDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO http_services (id,target_id,url,status_code) VALUES (?,?,?,200)`,
+		uuid.New().String(), tid, srv.URL+"/account"); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &SQLiScanner{db: db, cfg: &config.Config{}}
+	var found atomic.Int64
+	s.headerChecks(context.Background(), tid, nil, func(_, _, _ string) {}, &found)
+	if found.Load() == 0 {
+		t.Fatal("expected a boolean-blind X-Forwarded-Host SQLi (never throws a DB error) to be detected via the widened deep ladder")
+	}
+}
 
 // Error-based must REPRODUCE: a DB error that flashes only once (transient 500)
 // must NOT be reported. A consistent DB error MUST be reported.

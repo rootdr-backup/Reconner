@@ -439,6 +439,30 @@ func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, au
 		if !ok {
 			continue
 		}
+		if p.asciiMarker {
+			// The 6 ASCII-marker engines (postgres/mssql/oracle/db2/h2/hsqldb) prove
+			// themselves on "marker text present AND a DBMS fingerprint newly
+			// appears vs. baseline" — satisfiable by a ONE-SHOT coincidence: a
+			// verbose debug-mode error/stack-trace page that (a) echoes our raw
+			// request input (including the literal marker) and (b) happens to name
+			// an unrelated DB-driver class in its stack trace for a reason that has
+			// nothing to do with our injection. Every sibling step in this file
+			// (quickProbe's suffix loop, customSQLiErrorProbe) reproduces against a
+			// FRESH baseline before promoting; this one didn't. The hex-marker
+			// (MySQL) path below is exempt from this reproduction: an ASCII marker
+			// appearing from a payload sent only as a hex literal cannot happen via
+			// reflection, so it is already proof by construction.
+			freshBaseline, _ := sendInjected(ctx, sqliHTTPClient, ip, sqliBaseValue(ip), auth)
+			resp2, sentPayload2, tamper2 := sqliSendMaybeTamper(ctx, ip, value, auth)
+			if resp2 == "" {
+				continue
+			}
+			ok2, dbms2 := errorForceConfirmed(false, freshBaseline, resp2)
+			if !ok2 {
+				continue
+			}
+			dbms, sentPayload, tamper = dbms2, sentPayload2, tamper2
+		}
 		if dbms == "" {
 			dbms = p.dbms
 		}
@@ -450,6 +474,8 @@ func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, au
 		}
 		if !p.asciiMarker {
 			ev += " — reflection-proof (marker was sent only as a hex literal, so an ASCII match means the engine decoded and executed it)"
+		} else {
+			ev += " — reproduced against a fresh baseline (not a one-shot coincidence)"
 		}
 		if tamper != "" {
 			ev += " · " + tamper

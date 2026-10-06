@@ -92,3 +92,43 @@ func TestSSRFConfirmsTokenEndpointEndToEnd(t *testing.T) {
 		t.Fatalf("GCP token-route SSRF findings=%d, want 1", got)
 	}
 }
+
+// TestSSRFConfirmsEvenWhenResponseAlsoReflectsPayloadURL proves the fix for a
+// real false negative: Run() used to discard a response wholesale whenever it
+// merely echoed the payload URL back (responseReflectsPayload), BEFORE the
+// signature loop ever ran. A "preview this URL" / webhook-test endpoint —  an
+// extremely common UX pattern — echoes back `{"requestedUrl":"<payload>", ...}`
+// alongside the actual fetched body, so the genuine leaked-credential JSON sat
+// right next to the echoed URL in the very same response and was discarded
+// unseen. The fix drops reflection as a disqualifier entirely, since the
+// signature set is independently proven (TestSSRFMetadataSignatureCoverage's
+// "reflected payload echo" case) to never fire on mere URL/host text.
+func TestSSRFConfirmsEvenWhenResponseAlsoReflectsPayloadURL(t *testing.T) {
+	withLoopbackAllowed(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/preview", func(w http.ResponseWriter, r *http.Request) {
+		dest := r.URL.Query().Get("dest")
+		// Simulate a URL-preview/webhook-test feature: the fetched URL is always
+		// echoed back, and real IAM credentials are also leaked for the one
+		// route that actually exposes them server-side.
+		if strings.Contains(dest, "iam/security-credentials") {
+			fmt.Fprintf(w, `{"requestedUrl":%q,"AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":"example-secret"}`, dest)
+			return
+		}
+		fmt.Fprintf(w, `{"requestedUrl":%q,"error":"fetch failed"}`, dest)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	db, targetID := newV3ScannerDB(t)
+	seedV3Parameter(t, db, targetID, srv.URL+"/preview?dest=https://example.test", "dest", "https://example.test", "GET", "", "query")
+
+	cfg := &config.Config{}
+	if err := NewSSRFScanner(db, tools.NewExecutor(cfg, logger.New("error")), cfg, logger.New("error"), nil).
+		Run(context.Background(), targetID, func(_, _, _ string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := v3FindingCount(t, db, targetID, "ssrf", "/preview"); got != 1 {
+		t.Fatalf("SSRF via a response that ALSO reflects the payload URL should still be confirmed, findings=%d, want 1", got)
+	}
+}

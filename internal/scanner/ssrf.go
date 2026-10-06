@@ -298,20 +298,24 @@ func (s *SSRFScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 				if looksLikeBlockPage(status, body) {
 					continue
 				}
-				// FALSE-POSITIVE GUARD: if the endpoint just echoed our payload URL
-				// back into the response, this is reflection, not SSRF. A real
-				// metadata fetch returns creds JSON / a field listing that never
-				// contains the request URL or the metadata host.
-				if responseReflectsPayload(body, pl.url) {
-					continue
-				}
+				// NOTE: an earlier version discarded the whole response here when it
+				// merely echoed our payload URL back (responseReflectsPayload) — meant
+				// as a false-positive guard, but it fired on the response as a WHOLE,
+				// so a webhook-test/preview endpoint that echoes `{"requestedUrl":
+				// "<payload>","result":"<fetched body>"}` had its genuine credential
+				// JSON discarded unseen, before the signature loop ever ran. The
+				// signature set below is independently proven (ssrf_coverage_test.go's
+				// "reflected payload echo" case) to never fire on mere URL/host text —
+				// only on real credential JSON / IMDS listing / passwd-line shapes — so
+				// reflection is not a risk the signature match needs guarding against;
+				// dropping it here only removes false negatives, not false positives.
 				for _, sig := range ssrfMetadataSignatures {
 					if sig.MatchString(body) && !sig.MatchString(baseline) {
 						// Confirm once more to rule out a transient/dynamic body.
 						body2, status2 := s.fetch(ctx, ip, pl.url, auth)
 						control2, controlStatus := s.fetch(ctx, ip, "https://"+newXSSToken("rcnssrf")+".invalid/", auth)
 						if looksLikeBlockPage(status2, body2) || looksLikeBlockPage(controlStatus, control2) ||
-							responseReflectsPayload(body2, pl.url) || !sig.MatchString(body2) || sig.MatchString(control2) {
+							!sig.MatchString(body2) || sig.MatchString(control2) {
 							continue
 						}
 						ev := fmt.Sprintf("Cloud-metadata response content (%s) returned via %s, absent from two controls and not payload reflection; reproduced twice [HTTP %d/%d, %s %s]",
@@ -388,6 +392,13 @@ func (s *SSRFScanner) plantBlindSSRFHeaders(ctx context.Context, targetID string
 		{name: "X-Original-URL"},
 		{name: "X-Rewrite-URL"},
 		{name: "Forwarded", hostOnly: true, wrap: func(v string) string { return `host="` + v + `"` }},
+		// The raw Host header itself — a known real vector distinct from
+		// X-Forwarded-Host: a password-reset/preview worker that builds an
+		// absolute URL from the REQUEST's own Host (not a proxy header) and
+		// fetches it server-side. Set specially below via req.Host, since Go's
+		// net/http sends req.Host on the wire and ignores req.Header.Set("Host",
+		// ...) entirely for the actual request line.
+		{name: "Host", hostOnly: true},
 	}
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -422,7 +433,13 @@ func (s *SSRFScanner) plantBlindSSRFHeaders(ctx context.Context, targetID string
 				for k, v := range auth {
 					req.Header.Set(k, v)
 				}
-				req.Header.Set(header, value)
+				if header == "Host" {
+					// Go only honors req.Host for the actual wire request line;
+					// req.Header.Set("Host", ...) is silently ignored.
+					req.Host = value
+				} else {
+					req.Header.Set(header, value)
+				}
 				if resp, err := oastClient.Do(req); err == nil {
 					resp.Body.Close()
 				}

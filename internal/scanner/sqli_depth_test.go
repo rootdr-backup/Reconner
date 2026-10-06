@@ -216,3 +216,52 @@ func TestSQLiPlantBlindRegistersProbes(t *testing.T) {
 		t.Errorf("no callback configured → plantBlindSQLi must plant nothing; got %d", n2)
 	}
 }
+
+// TestSQLiPlantBlindHeadersRegistersProbes proves the fix for a real gap:
+// plantBlindSQLi only ever reads selectCandidates()'s `parameters` rows, which
+// never contain headerChecks' hardcoded header vectors (User-Agent,
+// X-Forwarded-For, Referer, X-Forwarded-Host, …) since those are probed
+// directly, never seeded as parameters — so a header-driven blind SQLi with
+// zero visible differential had no OOB detection path at all. This drives the
+// new plantBlindSQLiHeaders directly and asserts it registers one header-sink
+// OOB probe per vector on the live root.
+func TestSQLiPlantBlindHeadersRegistersProbes(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	db, err := database.New(t.TempDir() + "/sqli_hdr.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := database.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	tid := uuid.New().String()
+	_, _ = db.Exec(`INSERT INTO targets (id, domain) VALUES (?,?)`, tid, "lab.local")
+	_, _ = db.Exec(`INSERT INTO http_services (id, target_id, url, status_code) VALUES (?,?,?,200)`, uuid.New().String(), tid, srv.URL)
+
+	s := &SQLiScanner{db: db, cfg: &config.Config{BlindXSSCallbackURL: "http://oob.example"}}
+	s.plantBlindSQLiHeaders(context.Background(), tid, nil, func(_, _, _ string) {})
+
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM oob_probes WHERE target_id=? AND kind='sqli' AND sink LIKE 'header:%'`, tid).Scan(&n)
+	if n != len(sqliOOBHeaderVectors) {
+		t.Errorf("expected one header-sink OOB probe per vector (%d), got %d", len(sqliOOBHeaderVectors), n)
+	}
+
+	// No callback configured → no-op (graceful, like every other OOB planter).
+	s2 := &SQLiScanner{db: db, cfg: &config.Config{}}
+	tid2 := uuid.New().String()
+	_, _ = db.Exec(`INSERT INTO targets (id, domain) VALUES (?,?)`, tid2, "lab2.local")
+	_, _ = db.Exec(`INSERT INTO http_services (id, target_id, url, status_code) VALUES (?,?,?,200)`, uuid.New().String(), tid2, srv.URL)
+	s2.plantBlindSQLiHeaders(context.Background(), tid2, nil, func(_, _, _ string) {})
+	var n2 int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM oob_probes WHERE target_id=?`, tid2).Scan(&n2)
+	if n2 != 0 {
+		t.Errorf("no callback configured → plantBlindSQLiHeaders must plant nothing; got %d", n2)
+	}
+}

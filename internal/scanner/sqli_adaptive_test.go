@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -121,6 +122,68 @@ func TestErrorForceProbeE2E(t *testing.T) {
 	}
 	if !strings.Contains(payload, "extractvalue") {
 		t.Errorf("returned payload should be the actual extractvalue expression sent, got %q", payload)
+	}
+}
+
+// TestErrorForceProbeRejectsOneShotASCIIMarkerCoincidence proves the fix for a
+// real false positive: for the 6 ASCII-marker DBMS families (postgres, mssql,
+// oracle, db2, h2, hsqldb), errorForceProbe used to promote straight to a
+// PROVEN finding from a SINGLE request/response pair, unlike every sibling
+// step in this file (quickProbe, customSQLiErrorProbe) which always
+// reproduces against a fresh baseline first. This mock server returns the
+// marker+DBMS-fingerprint combination exactly ONCE, ever (simulating a stale
+// debug page or unrelated transient defect, not real SQL evaluation) — a
+// one-shot coincidence that must now fail reproduction and NOT be reported.
+func TestErrorForceProbeRejectsOneShotASCIIMarkerCoincidence(t *testing.T) {
+	withLoopbackAllowed(t)
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("id")
+		if strings.Contains(q, sqliMarker) && hits.Add(1) == 1 {
+			w.Write([]byte(`ERROR: invalid input syntax for integer: "` + sqliMarker + `"`))
+			return
+		}
+		w.Write([]byte("<html>ok</html>"))
+	}))
+	defer srv.Close()
+
+	s := &SQLiScanner{}
+	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
+	base, _ := sendInjected(context.Background(), sqliHTTPClient, ip, "1", nil)
+	kind, _, ev := s.errorForceProbe(context.Background(), ip, nil, base)
+	if kind != "" {
+		t.Fatalf("a one-shot, non-reproducing ASCII-marker+DBMS-fingerprint coincidence must NOT be confirmed as SQLi, got kind=%q ev=%q", kind, ev)
+	}
+}
+
+// TestErrorForceProbeConfirmsReproducingASCIIMarkerEngine proves the fix did
+// not just make ASCII-marker engines impossible to confirm: a GENUINELY
+// vulnerable endpoint (every request carrying the marker gets the DB error,
+// not just the first) must still reproduce and be reported.
+func TestErrorForceProbeConfirmsReproducingASCIIMarkerEngine(t *testing.T) {
+	withLoopbackAllowed(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("id")
+		if strings.Contains(q, sqliMarker) {
+			w.Write([]byte(`ERROR: invalid input syntax for integer: "` + sqliMarker + `"`))
+			return
+		}
+		w.Write([]byte("<html>ok</html>"))
+	}))
+	defer srv.Close()
+
+	s := &SQLiScanner{}
+	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
+	base, _ := sendInjected(context.Background(), sqliHTTPClient, ip, "1", nil)
+	kind, payload, ev := s.errorForceProbe(context.Background(), ip, nil, base)
+	if kind != "error_based" {
+		t.Fatalf("a reproducing ASCII-marker SQLi must still be confirmed, got kind=%q", kind)
+	}
+	if !strings.Contains(ev, "postgresql") || !strings.Contains(ev, "reproduced against a fresh baseline") {
+		t.Errorf("evidence should name postgresql and the reproduction gate: %q", ev)
+	}
+	if payload == "" {
+		t.Error("finding must carry the reproduction payload")
 	}
 }
 

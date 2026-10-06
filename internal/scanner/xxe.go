@@ -1,10 +1,13 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +53,12 @@ var xxeFileSignatures = []string{"root:x:0:0:", "root:!:0:0:", "[extensions]", "
 
 type xxeEndpoint struct {
 	URL, Method, ContentType string
+	// Multipart marks an "upload"/".svg"-shaped candidate that must be delivered
+	// as a real multipart/form-data file part (see sendXMLMultipart), not a raw
+	// POST body: these endpoints parse XML out of an uploaded FILE (an SVG
+	// avatar, an imported document), and a bare POST typically 404s/400s before
+	// ever reaching the XML parser.
+	Multipart bool
 }
 
 func (s *XXEScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
@@ -80,7 +89,7 @@ func (s *XXEScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			// A file signature is proof only when it is absent from independent
 			// benign controls. This drops documentation/static error pages that
 			// already contain a sample passwd/win.ini fragment.
-			controlStatus, control := s.sendXML(ctx, ep, `<root>recon-xxe-control-a</root>`, auth)
+			controlStatus, control := s.send(ctx, ep, `<root>recon-xxe-control-a</root>`, auth)
 			if controlStatus == 0 || looksLikeBlockPage(controlStatus, control) || matchAny(control, xxeFileSignatures) != "" {
 				return
 			}
@@ -88,13 +97,13 @@ func (s *XXEScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			// 1. In-band file read — external entity + XInclude, Unix + Windows.
 			for _, target := range []string{"file:///etc/passwd", "file:///c:/windows/win.ini"} {
 				for _, payload := range []string{inbandXXEPayload(target), xincludeXXEPayload(target), soapXXEPayload(target)} {
-					status, body := s.sendXML(ctx, ep, payload, auth)
+					status, body := s.send(ctx, ep, payload, auth)
 					sig := matchAny(body, xxeFileSignatures)
 					if status == 0 || sig == "" || looksLikeBlockPage(status, body) {
 						continue
 					}
-					status2, body2 := s.sendXML(ctx, ep, payload, auth)
-					controlStatus2, control2 := s.sendXML(ctx, ep, `<root>recon-xxe-control-b</root>`, auth)
+					status2, body2 := s.send(ctx, ep, payload, auth)
+					controlStatus2, control2 := s.send(ctx, ep, `<root>recon-xxe-control-b</root>`, auth)
 					if status2 == 0 || controlStatus2 == 0 || !strings.Contains(body2, sig) ||
 						matchAny(control2, xxeFileSignatures) != "" || looksLikeBlockPage(status2, body2) || looksLikeBlockPage(controlStatus2, control2) {
 						continue
@@ -117,7 +126,7 @@ func (s *XXEScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 				token := registerOOBProbe(s.db, targetID, ep.URL, "", "xxe", "xml-body")
 				cb := oob.callbackURL(token)
 				for _, payload := range oobXXEPayloads(cb) {
-					_, _ = s.sendXML(ctx, ep, payload, auth)
+					_, _ = s.send(ctx, ep, payload, auth)
 				}
 				// Confirmation (if any) arrives asynchronously via /oob/<token>.
 			}
@@ -143,10 +152,26 @@ func (s *XXEScanner) candidateEndpoints(ctx context.Context, targetID string) []
 		if ep.ContentType == "" || !strings.Contains(strings.ToLower(ep.ContentType), "xml") {
 			ep.ContentType = "application/xml"
 		}
-		key := ep.Method + " " + ep.URL + " " + strings.ToLower(ep.ContentType)
-		if ep.URL != "" && !seen[key] && len(out) < 300 && urlHostInScope(ctx, ep.URL) {
-			seen[key] = true
-			out = append(out, ep)
+		push := func(e xxeEndpoint) {
+			key := e.Method + " " + e.URL + " " + strings.ToLower(e.ContentType)
+			if e.Multipart {
+				key += " multipart"
+			}
+			if e.URL != "" && !seen[key] && len(out) < 300 && urlHostInScope(ctx, e.URL) {
+				seen[key] = true
+				out = append(out, e)
+			}
+		}
+		push(ep)
+		// "upload"/".svg"-shaped URLs ALSO get a real multipart file-part
+		// candidate (see sendXMLMultipart) — additive, not a replacement for the
+		// raw-POST candidate above, since some endpoints named this way genuinely
+		// are raw-body XML upload routes.
+		lu := strings.ToLower(ep.URL)
+		if strings.Contains(lu, "upload") || strings.Contains(lu, ".svg") {
+			mp := ep
+			mp.Multipart = true
+			push(mp)
 		}
 	}
 
@@ -175,6 +200,34 @@ func (s *XXEScanner) candidateEndpoints(ctx context.Context, targetID string) []
 		rows.Close()
 	}
 
+	// Also a BOUNDED set of plain JSON/REST/GraphQL endpoints the signal-based
+	// query above hard-excludes. Many backend frameworks (JAX-RS/Spring MVC, and
+	// several PHP/Node stacks) choose their body parser from the REQUEST's
+	// Content-Type header, not from what the API documents/returns as its normal
+	// shape — so an endpoint whose declared content-type is application/json
+	// will still hand our posted body to an XML parser when we send
+	// Content-Type: application/xml. A prior version of this file sent XML to
+	// every generic HTML/API endpoint and that was reverted for being too slow
+	// (see the comment above); this reinstates coverage narrowly — only
+	// JSON/REST/GraphQL-shaped endpoints, capped — instead of reopening it to
+	// every page.
+	jrows, err := s.db.QueryContext(ctx, `
+		SELECT url FROM http_services
+		WHERE target_id = ? AND status_code BETWEEN 200 AND 405
+		  AND (content_type LIKE '%json%' OR url LIKE '%/api/%' OR url LIKE '%/rest/%' OR url LIKE '%graphql%')
+		  AND content_type NOT LIKE '%xml%' AND url NOT LIKE '%xml%'
+		ORDER BY url
+		LIMIT 100`, targetID)
+	if err == nil {
+		for jrows.Next() {
+			var u string
+			if jrows.Scan(&u) == nil {
+				add(xxeEndpoint{URL: u, Method: "POST", ContentType: "application/xml"})
+			}
+		}
+		jrows.Close()
+	}
+
 	// Also any parameter endpoint declaring an XML content-type.
 	prows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT url, COALESCE(method,'POST'), COALESCE(content_type,'application/xml') FROM parameters
@@ -189,6 +242,60 @@ func (s *XXEScanner) candidateEndpoints(ctx context.Context, targetID string) []
 		prows.Close()
 	}
 	return out
+}
+
+// send dispatches to sendXML or sendXMLMultipart depending on how the
+// candidate was classified in candidateEndpoints.
+func (s *XXEScanner) send(ctx context.Context, ep xxeEndpoint, body string, auth map[string]string) (int, string) {
+	if ep.Multipart {
+		return s.sendXMLMultipart(ctx, ep, body, auth)
+	}
+	return s.sendXML(ctx, ep, body, auth)
+}
+
+// sendXMLMultipart delivers the XXE payload as a real multipart/form-data file
+// part — the shape an "upload"/".svg"-matched candidate actually needs. The
+// real-world field name is unknown (it's not derivable from the URL alone),
+// so the same payload is sent under several of the most common upload field
+// names in one request, as separate file parts: cheap (one request) and
+// robust to field-name uncertainty.
+func (s *XXEScanner) sendXMLMultipart(ctx context.Context, ep xxeEndpoint, body string, auth map[string]string) (int, string) {
+	filename, partType := "poc.xml", "application/xml"
+	if strings.Contains(strings.ToLower(ep.URL), ".svg") {
+		filename, partType = "poc.svg", "image/svg+xml"
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, field := range []string{"file", "upload", "avatar", "image"} {
+		pw, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": {fmt.Sprintf(`form-data; name="%s"; filename="%s"`, field, filename)},
+			"Content-Type":        {partType},
+		})
+		if err != nil {
+			continue
+		}
+		_, _ = pw.Write([]byte(body))
+	}
+	_ = mw.Close()
+
+	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, ep.Method, ep.URL, bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		return 0, ""
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+	for k, v := range auth {
+		req.Header.Set(k, v)
+	}
+	resp, err := xxeClient.Do(req)
+	if err != nil {
+		return 0, ""
+	}
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	resp.Body.Close()
+	return resp.StatusCode, string(out)
 }
 
 func (s *XXEScanner) sendXML(ctx context.Context, ep xxeEndpoint, body string, auth map[string]string) (int, string) {

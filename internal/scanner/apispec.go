@@ -43,6 +43,8 @@ type apiEndpoint struct {
 	URL         string // absolute; path templates ({id}) substituted with a sample value
 	Query       []string
 	Body        []string
+	Header      []string
+	Cookie      []string
 	Path        []apiPathParameter
 	JSON        bool
 	ContentType string
@@ -138,6 +140,29 @@ func (s *ParamScanner) harvestAPISpecs(ctx context.Context, targetID string, tar
 							method = "GET"
 						}
 						if s.storeParameter(targetID, paramEntry{URL: ep.URL + sep + q + "=", Param: q, Value: "", Source: "openapi", Method: method, Location: "query"}) == nil {
+							stored.Add(1)
+						}
+					}
+					// Documented header/cookie parameters (legal "in" values in both
+					// Swagger 2.0 and OpenAPI 3.x) feed the SAME generic insertion-point
+					// machinery as query/body params (insertion.go recognizes
+					// Location=="header"/"cookie" as first-class) — so these get the
+					// full SQLi/XSS/etc ladder, not a separate weak hand-rolled one.
+					for _, h := range ep.Header {
+						method := ep.Method
+						if method == "" {
+							method = "GET"
+						}
+						if s.storeParameter(targetID, paramEntry{URL: ep.URL, Param: h, Value: "", Source: "openapi", Method: method, Location: "header"}) == nil {
+							stored.Add(1)
+						}
+					}
+					for _, c := range ep.Cookie {
+						method := ep.Method
+						if method == "" {
+							method = "GET"
+						}
+						if s.storeParameter(targetID, paramEntry{URL: ep.URL, Param: c, Value: "", Source: "openapi", Method: method, Location: "cookie"}) == nil {
 							stored.Add(1)
 						}
 					}
@@ -252,7 +277,7 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 				continue
 			}
 			query := append([]string{}, sharedQuery...)
-			var body []string
+			var body, header, cookie []string
 			bodyTypes := map[string]string{}
 			isJSON := false
 			contentType := ""
@@ -281,6 +306,15 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 					mergeStringMap(bodyTypes, schemaPropTypesResolved(doc, pm["schema"], "", 0))
 					isJSON = true
 					contentType = preferredRequestContentType(consumes, "application/json")
+				case "header":
+					// Legal in both Swagger 2.0 and OpenAPI 3.x, and a common real
+					// sink (a per-tenant header consumed straight into a SQL WHERE
+					// clause). Previously matched no case here and was dropped
+					// entirely — invisible to every downstream detector, not just
+					// SQLi, since it never became a `parameters` row at all.
+					header = append(header, name)
+				case "cookie":
+					cookie = append(cookie, name)
 				}
 			}
 			// OpenAPI 3.x request body
@@ -306,6 +340,8 @@ func parseAPISpec(body []byte, origin string) []apiEndpoint {
 					URL:         concreteURL,
 					Query:       dedupeStrings(query),
 					Body:        dedupeStrings(body),
+					Header:      dedupeStrings(header),
+					Cookie:      dedupeStrings(cookie),
 					Path:        pathParams,
 					JSON:        isJSON,
 					ContentType: contentType,

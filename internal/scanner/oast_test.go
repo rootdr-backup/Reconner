@@ -34,4 +34,14 @@ func TestSQLiOOBPayloadsCoverEngines(t *testing.T) {
 	if !strings.Contains(joined, "'||") || !strings.Contains(joined, "';") {
 		t.Error("must include string-context breakouts")
 	}
+	// double-quote string context (ANSI_QUOTES / hand-built "col"="$v" clauses)
+	// and parenthesis-closing numeric context (WHERE id=($v)) must ALSO be
+	// covered — a parameter injectable only in one of these contexts used to
+	// get zero OOB/blind coverage at all.
+	if !strings.Contains(joined, "\"||") {
+		t.Error("must include a double-quote string-context breakout")
+	}
+	if !strings.Contains(joined, ") AND LOAD_FILE") {
+		t.Error("must include a parenthesis-closing numeric-context breakout")
+	}
 }

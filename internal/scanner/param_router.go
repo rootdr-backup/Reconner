@@ -46,7 +46,21 @@ var classTokens = map[VulnClass]map[string]bool{
 	ClassSSRF: set("url", "uri", "link", "redirect", "return", "dest", "destination",
 		"callback", "webhook", "proxy", "image", "imageurl", "img", "fileurl", "feed",
 		"fetch", "resource", "remote", "domain", "host", "site", "target", "source",
-		"forward", "load", "port", "continue", "next", "data", "reference", "ref"),
+		"forward", "load", "port", "continue", "next", "data", "reference", "ref",
+		// "src" is one of the most common real-world SSRF parameter names (image/
+		// avatar/thumbnail proxies: /thumb?src=<url>, /fetch?src=<url>) and was
+		// missing entirely — a bare "src"-named parameter routed to no class at
+		// all unless its sample VALUE already looked like a URL, which the
+		// realistic vulnerable case usually doesn't (a crawled sample is a
+		// relative path like "logo.png"; the bug is that the SAME parameter also
+		// accepts an attacker-supplied absolute URL). The rest mirror the
+		// image/media tokens added to ClassLFI this session: an avatar/banner/
+		// logo-fetch-by-URL feature is exactly as classic an SSRF vector as an
+		// image proxy, and these are additive to the candidate pool (never a
+		// filter), so they only add real-world-prone parameters to a routing
+		// bucket that previously left them to a 32-slot, non-deterministic
+		// fallback.
+		"src", "avatar", "banner", "logo", "thumb", "thumbnail", "picture", "pic", "media"),
 	ClassRedirect: set("url", "redirect", "redir", "next", "return", "returnurl", "goto",
 		"dest", "destination", "target", "link", "location", "back", "forward",
 		"continue", "to", "out", "checkout", "callback", "success", "cancel", "go"),
