@@ -91,10 +91,9 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	}
 
 	// Detect wildcard DNS up front so we can flag fake passive subdomains.
-	wildcardIPs, wildcardCNAMEs := detectWildcard(domain, s.resolver)
-	if len(wildcardIPs) > 0 || len(wildcardCNAMEs) > 0 {
-		logFn("warn", "subdomain_enum", fmt.Sprintf("Wildcard DNS detected (%d IPs) — passive results will be verified by resolution", len(wildcardIPs)))
-	}
+	// Probes retry across the configured public resolvers and distinguish a
+	// definitive NXDOMAIN from SERVFAIL/flake — see wildcard.go.
+	wildcardProfile := detectWildcard(domain, s.resolver, s.wildcardServers(), logFn)
 
 	// Discovery and admission are deliberately separate. Passive tools are allowed
 	// to be noisy, but their strings remain in-memory candidates until the batched
@@ -326,11 +325,11 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// operator disables it in the scan menu, only passive discovery + resolution +
 	// ASN/vhost run, which is dramatically faster.
 	if subdomainBruteEnabled(ctx) {
-		s.activeEnum(ctx, targetID, domain, found, &mu, wildcardIPs, logFn)
+		s.activeEnum(ctx, targetID, domain, found, &mu, wildcardProfile, logFn)
 
 		// Deeper DNS discovery (optional, graceful): alterx permutations +
 		// puredns/massdns brute at scale. No-op when those tools aren't installed.
-		s.deepDNSEnum(ctx, targetID, domain, found, &mu, wildcardIPs, logFn)
+		s.deepDNSEnum(ctx, targetID, domain, found, &mu, wildcardProfile, logFn)
 	} else {
 		logFn("info", "subdomain_enum", "Permutation brute-force disabled for this scan — passive discovery + resolution only.")
 	}
@@ -351,16 +350,29 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	}
 	mu.Unlock()
 
+	// Branch wildcard detection (F3): a junk fleet can hide under a wildcard
+	// deeper than the apex — *.git.example.com was the live example, where
+	// hundreds of "asdf-garbage.git." names were admitted wholesale. Every
+	// discovery source has merged by now, so clustered candidate suffixes are
+	// known: probe the clusters before admission runs.
+	candidateSnapshot := make([]string, 0, len(found))
+	mu.Lock()
+	for name := range found {
+		candidateSnapshot = append(candidateSnapshot, name)
+	}
+	mu.Unlock()
+	wildcardProfile.detectBranches(ctx, domain, candidateSnapshot, s.resolver, s.wildcardServers(), branchMaxProbes, logFn)
+
 	// Parallel admission pass. It returns candidates that had neither a genuine
 	// A/AAAA answer nor an explicit CNAME; wildcard-only answers remain eligible
 	// for vhost proof but are not assets yet.
-	rejected := s.resolveAll(ctx, targetID, found, &mu, wildcardIPs, wildcardCNAMEs, logFn)
+	rejected := s.resolveAll(ctx, targetID, found, &mu, wildcardProfile, logFn)
 
 	// Virtual-host scan: probe candidate hostnames (that do NOT resolve in DNS)
 	// against the IPs we already know, via the Host header, and record any that
 	// the server actually serves — internal/forgotten vhosts DNS enumeration
 	// can't see. Stored with source='vhost' so the UI can flag them.
-	s.vhostScan(ctx, targetID, domain, found, &mu, wildcardIPs, logFn)
+	s.vhostScan(ctx, targetID, domain, found, &mu, wildcardProfile, logFn)
 
 	// Vhost verification had the final chance to promote wildcard/unresolved names.
 	// Remove only old eager-DNS rows which still lack evidence; explicit seeds,
@@ -537,9 +549,14 @@ func (s *SubdomainScanner) vhostProbeConcurrency() int {
 	return c
 }
 
-func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
+func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardZones *wildcardProfile, logFn LogFunc) {
 	if ctx.Err() != nil {
 		return
+	}
+	// A nil profile (test paths, "no wildcard evidence") behaves like an empty
+	// one; field accesses below must not trip on it.
+	if wildcardZones == nil {
+		wildcardZones = &wildcardProfile{}
 	}
 	// Distinct known IPs (cap to keep the pass bounded; raised from 40 — a huge
 	// multi-asset scan can legitimately have far more than 40 distinct hosting
@@ -566,10 +583,19 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	for _, ip := range ips {
 		ipSeen[ip] = true
 	}
-	for ip := range wildcardIPs {
+	for ip := range wildcardZones.apex.ips {
 		if !ipSeen[ip] {
 			ips = append(ips, ip)
 			ipSeen[ip] = true
+		}
+	}
+	// Branch wildcard answer IPs are equally valuable vhost-probe targets.
+	for _, zone := range wildcardZones.branches {
+		for ip := range zone.ips {
+			if !ipSeen[ip] {
+				ips = append(ips, ip)
+				ipSeen[ip] = true
+			}
 		}
 	}
 	if len(ips) == 0 {
@@ -597,7 +623,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	for _, p := range devToolWords {
 		add(p + "." + domain)
 	}
-	if len(wildcardIPs) > 0 {
+	if wildcardZones.hasAnyWildcard() {
 		// DNS brute-force is meaningless on a wildcard zone, but the same adaptive
 		// names are valuable Host-header candidates. Feed a bounded slice into the
 		// differential vhost verifier instead of accepting their wildcard DNS answer.
@@ -634,7 +660,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	// Probe names DNS cannot distinguish: NXDOMAIN/no-address candidates and names
 	// whose only address is the wildcard answer. Ordinary independently-resolving
 	// hosts are already admitted and do not need expensive Host-header probing.
-	probeHosts := classifyVhostCandidates(ctx, candidates, wildcardIPs, s.resolver)
+	probeHosts := classifyVhostCandidates(ctx, candidates, wildcardZones, s.resolver)
 
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan: %d IP(s) × %d candidate host(s)...", len(ips), len(probeHosts)))
 
@@ -760,7 +786,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan done. %d vhost(s) discovered.", discovered))
 }
 
-func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardIPs map[string]bool, r *net.Resolver) []string {
+func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardProfile *wildcardProfile, r *net.Resolver) []string {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -777,7 +803,7 @@ func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardI
 			defer wg.Done()
 			for host := range jobs {
 				ips := resolveHostIPs(ctx, host, r)
-				if len(ips) == 0 || overlapsWildcardIPs(ips, wildcardIPs) {
+				if len(ips) == 0 || wildcardProfile.overlapsWildcardIPs(host, ips) {
 					hits <- host
 				}
 			}
@@ -973,9 +999,12 @@ var bruteWords = []string{
 var permPrefixes = []string{"dev", "staging", "test", "qa", "uat", "old", "new", "internal", "api", "admin"}
 var permSuffixes = []string{"dev", "staging", "test", "v1", "v2", "v3", "old", "new", "internal", "api"}
 
-func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
+func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) {
 	// Skip active brute on wildcard domains (every name would "resolve").
-	if len(wildcardIPs) > 0 {
+	// Only an APEX wildcard justifies the skip: a branch wildcard leaves the
+	// rest of the zone worth enumerating, and branch hits are filtered
+	// per-name by the admission gate.
+	if wildcardProfile.apexWildcard() {
 		logFn("info", "subdomain_enum", "Wildcard domain — skipping active brute-force to avoid fake results")
 		return
 	}
@@ -1043,7 +1072,7 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 				if ctx.Err() != nil {
 					return
 				}
-				ip := firstNonWildcardIP(resolveHostIPs(ctx, name, s.resolver), wildcardIPs)
+				ip := wildcardProfile.firstNonWildcardIP(name, resolveHostIPs(ctx, name, s.resolver))
 				if ip == "" {
 					continue
 				}
@@ -1090,7 +1119,7 @@ func (s *SubdomainScanner) admittedSubdomainNames(ctx context.Context, targetID,
 // resolveAll resolves every discovered subdomain concurrently and updates its
 // IP. Names that resolve to a wildcard IP are kept but logged so HTTP probing
 // can later dedupe them by content.
-func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, found map[string]bool, mu *sync.Mutex, wildcardIPs, wildcardCNAMEs map[string]bool, logFn LogFunc) map[string]bool {
+func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) map[string]bool {
 	mu.Lock()
 	names := make([]string, 0, len(found))
 	for n := range found {
@@ -1153,9 +1182,9 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// the batched dnsx pass or per-name Go lookups — so both admit/reject
 	// name-for-name identically (the gate counts below must match across paths).
 	classify := func(name string, ips []string) {
-		ip := firstNonWildcardIP(ips, wildcardIPs)
+		ip := wildcardProfile.firstNonWildcardIP(name, ips)
 		if ip == "" {
-			if len(ips) > 0 && overlapsWildcardIPs(ips, wildcardIPs) {
+			if len(ips) > 0 && wildcardProfile.overlapsWildcardIPs(name, ips) {
 				cmu.Lock()
 				rejected[name] = true
 				wildcardHits++
@@ -1164,7 +1193,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 			}
 			// A dangling but explicit CNAME is a real DNS asset and must remain
 			// available to takeover checks, but it is not sent to the web pipeline.
-			if cname := cnameFor(name); cname != "" && !wildcardCNAMEs[cname] {
+			if cname := cnameFor(name); cname != "" && !wildcardProfile.isWildcardCNAME(name, cname) {
 				cmu.Lock()
 				cnameOnly++
 				cmu.Unlock()
@@ -1372,9 +1401,12 @@ func (s *SubdomainScanner) recursiveEnum(ctx context.Context, targetID, apex str
 			if len(cands) == 0 {
 				continue
 			}
-			wIPs, wCNAMEs := detectWildcard(sub, s.resolver)
+			wildcardProfile := detectWildcard(sub, s.resolver, s.wildcardServers(), logFn)
+			// Recursion probes at most 3 branch suffixes per sub-apex — a small
+			// budget, since up to 50 sub-apexes can run per level.
+			wildcardProfile.detectBranches(ctx, sub, mapKeys(cands), s.resolver, s.wildcardServers(), 3, logFn)
 			var mu sync.Mutex
-			rejected := s.resolveAll(ctx, targetID, cands, &mu, wIPs, wCNAMEs, logFn)
+			rejected := s.resolveAll(ctx, targetID, cands, &mu, wildcardProfile, logFn)
 			// Names that resolved (A/AAAA or CNAME) are the ones worth descending
 			// into: everything in cands that the admission gate did NOT reject.
 			for n := range cands {
@@ -1497,68 +1529,9 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 	return out, targets, true
 }
 
-// detectWildcard probes a few random hostnames; if they resolve, the shared
-// IPs are wildcard answers we should treat with suspicion.
-func detectWildcard(domain string, r *net.Resolver) (map[string]bool, map[string]bool) {
-	wildcardIPs := make(map[string]bool)
-	wildcardCNAMEs := make(map[string]bool)
-	probes := []string{
-		"zz9z3k7q1wildcard." + domain,
-		"qx84jd02noexist." + domain,
-		"a1b2c3d4e5random." + domain,
-		"rcn7f4a9neverexists." + domain,
-		"nohost2c8e1b6d." + domain,
-	}
-	resolvedProbes := 0
-	allIPs := map[string]bool{}
-	cnameCounts := map[string]int{}
-	type wildcardProbeResult struct {
-		ips   []net.IPAddr
-		cname string
-	}
-	results := make(chan wildcardProbeResult, len(probes))
-	var wg sync.WaitGroup
-	for _, p := range probes {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-			ips, _ := resolverOrDefault(r).LookupIPAddr(ctx, name)
-			cancel()
-			results <- wildcardProbeResult{ips: ips, cname: lookupExplicitCNAME(context.Background(), name, r)}
-		}(p)
-	}
-	wg.Wait()
-	close(results)
-	for result := range results {
-		if result.cname != "" {
-			cnameCounts[result.cname]++
-		}
-		if len(result.ips) > 0 {
-			resolvedProbes++
-		}
-		for _, ip := range result.ips {
-			value := ip.IP.String()
-			if value != "" {
-				allIPs[value] = true
-			}
-		}
-	}
-	// Require at least three independent random labels to resolve, then retain the
-	// union of their addresses. This catches rotating wildcard/CDN pools where no
-	// single IP necessarily appears twice, without trusting one poisoned answer.
-	if resolvedProbes >= 3 {
-		for ip := range allIPs {
-			wildcardIPs[ip] = true
-		}
-	}
-	for cname, n := range cnameCounts {
-		if n >= 3 {
-			wildcardCNAMEs[cname] = true
-		}
-	}
-	return wildcardIPs, wildcardCNAMEs
-}
+// detectWildcard in subdomain.go has been replaced by the zone-aware engine
+// in wildcard.go (wildcardProfile + cross-resolver probe retry + branch
+// detection). See wildcard.go.
 
 func (s *SubdomainScanner) upsertSubdomain(targetID, subdomain, ip string) error {
 	return s.upsertSubdomainSource(targetID, subdomain, ip, "dns")
@@ -1640,6 +1613,16 @@ func resolverOrDefault(r *net.Resolver) *net.Resolver {
 	return r
 }
 
+// wildcardServers returns the upstream resolver list the wildcard probes use.
+// It is intentionally the SAME list the dnsx batched resolution passes supply
+// via -r, so probe verdicts are drawn from the resolver pool whose answers the
+// admission gate actually compares against. The first probe attempt still uses
+// the shared in-process resolver, so a split-horizon zone seen from inside is
+// represented too.
+func (s *SubdomainScanner) wildcardServers() []string {
+	return s.toolResolverList()
+}
+
 func resolveHostIPs(parent context.Context, host string, r *net.Resolver) []string {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
@@ -1657,33 +1640,6 @@ func resolveHostIPs(parent context.Context, host string, r *net.Resolver) []stri
 		}
 	}
 	return out
-}
-
-func firstNonWildcardIP(ips []string, wildcard map[string]bool) string {
-	// If an answer overlaps the random-label wildcard profile, treat the complete
-	// RRset as wildcard. Rotating pools often return one familiar and one new IP;
-	// selecting the new address would incorrectly admit the fake hostname.
-	for _, ip := range ips {
-		if wildcard[ip] {
-			return ""
-		}
-	}
-	for _, ip := range ips {
-		return ip
-	}
-	return ""
-}
-
-func overlapsWildcardIPs(ips []string, wildcard map[string]bool) bool {
-	if len(ips) == 0 || len(wildcard) == 0 {
-		return false
-	}
-	for _, ip := range ips {
-		if wildcard[ip] {
-			return true
-		}
-	}
-	return false
 }
 
 func lookupExplicitCNAME(parent context.Context, host string, r *net.Resolver) string {

@@ -55,8 +55,8 @@ func (s *SubdomainScanner) toolResolverList() []string {
 // deepDNSEnum runs the heavy DNS discovery chain (alterx permutations +
 // puredns/massdns brute) on top of the built-in active enum. It only adds
 // names that actually resolve and aren't wildcard answers.
-func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
-	if len(wildcardIPs) > 0 {
+func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) {
+	if wildcardProfile.apexWildcard() {
 		return // wildcard domains: brute is meaningless, skip
 	}
 
@@ -156,7 +156,7 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 			return
 		}
 		for _, n := range resolved {
-			ip := firstNonWildcardIP(resolveHostIPs(ctx, n, s.resolver), wildcardIPs)
+			ip := wildcardProfile.firstNonWildcardIP(n, resolveHostIPs(ctx, n, s.resolver))
 			if ip == "" {
 				continue // wildcard-only or unresolved on recheck — not an asset
 			}
@@ -169,7 +169,7 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		return
 	}
 
-	s.resolveCandidates(ctx, targetID, names, found, mu, wildcardIPs, logFn)
+	s.resolveCandidates(ctx, targetID, names, found, mu, wildcardProfile, logFn)
 }
 
 // dnsxResolve performs only DNS resolution; every returned name is subsequently
@@ -357,7 +357,7 @@ func (s *SubdomainScanner) purednsResolve(ctx context.Context, targetID string, 
 }
 
 // resolveCandidates is the built-in fallback resolver pool for a name list.
-func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID string, names []string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
+func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID string, names []string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) {
 	workers := s.cfg.Workers.SubdomainEnumeration
 	if workers <= 0 {
 		workers = 20
@@ -374,7 +374,7 @@ func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID strin
 				if ctx.Err() != nil {
 					return
 				}
-				ip := firstNonWildcardIP(resolveHostIPs(ctx, name, s.resolver), wildcardIPs)
+				ip := wildcardProfile.firstNonWildcardIP(name, resolveHostIPs(ctx, name, s.resolver))
 				if ip == "" {
 					continue
 				}
