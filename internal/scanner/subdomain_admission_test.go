@@ -127,3 +127,18 @@ func TestSubdomainRecursionDepthDefault(t *testing.T) {
 		t.Fatalf("nil-cfg recursion depth = %d, want 4", d)
 	}
 }
+
+// TestSubdomainRecursionEnabledDefault proves the toggle keeps recursion on for
+// a nil config (mirroring the depth default helper) and honors explicit values
+// from config.json.
+func TestSubdomainRecursionEnabledDefault(t *testing.T) {
+	if !(&SubdomainScanner{cfg: nil}).subdomainRecursionEnabled() {
+		t.Fatal("nil-cfg recursion toggle = false, want true (built-in default)")
+	}
+	if !(&SubdomainScanner{cfg: &config.Config{SubdomainRecursionEnabled: true}}).subdomainRecursionEnabled() {
+		t.Fatal("enabled recursion toggle = false, want true")
+	}
+	if (&SubdomainScanner{cfg: &config.Config{SubdomainRecursionEnabled: false}}).subdomainRecursionEnabled() {
+		t.Fatal("disabled recursion toggle = true, want false (apex only)")
+	}
+}

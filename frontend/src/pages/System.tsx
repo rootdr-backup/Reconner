@@ -12,6 +12,21 @@ import { useUpdateCenter } from '../components/layout/UpdateCenter'
 
 interface SystemLogLine { level: string; module: string; message: string; time: string }
 
+// The automatic monitor watch pipeline the operator can retune on the
+// System → Scanning page. Order here is display order; server-side the state
+// monitor ("monitor") is always hoisted before HTTP/JS refresh when both are
+// picked, so the scheduled baseline lands before anything overwrites it.
+const DEFAULT_WATCH_MODULES = ['subdomain_enum', 'monitor', 'http_probe', 'takeover', 'cors', 'backup_discovery']
+
+const MONITOR_MODULE_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: 'subdomain_enum', label: 'Subdomain re-enumeration', hint: 'catches newly-appeared names each cycle' },
+  { value: 'monitor', label: 'State monitor / snapshot', hint: 'always runs first — snapshots the baseline' },
+  { value: 'http_probe', label: 'HTTP probe', hint: 'refreshes live host titles/statuses' },
+  { value: 'takeover', label: 'Takeover checks', hint: 'flags dangling DNS records' },
+  { value: 'cors', label: 'CORS re-check', hint: 're-tests permissive CORS on live endpoints' },
+  { value: 'backup_discovery', label: 'Backup file discovery', hint: 'looks for leaked .env/backup files' },
+]
+
 export default function System() {
   const [activeTab, setActiveTab] = useState<'overview' | 'integrations' | 'corpora' | 'toolchain' | 'team'>('overview')
   const [tools, setTools] = useState<Record<string,boolean>>({})
@@ -25,7 +40,7 @@ export default function System() {
   const [drafts, setDrafts] = useState<Record<string,string>>({})
   const [savingKeys, setSavingKeys] = useState(false)
   const [scanCfg, setScanCfg] = useState<ScanConfig | null>(null)
-  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; excludeIDs: string; repos: string } | null>(null)
+  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; enabled: boolean; excludeIDs: string; repos: string; monitor: string[] } | null>(null)
   const [savingScanCfg, setSavingScanCfg] = useState(false)
   const { addToast } = useUIStore()
   const isAdmin = useAuthStore(s => s.user?.role === 'admin')
@@ -46,8 +61,11 @@ export default function System() {
         setScanDraft({
           resolvers: (sc.dns_resolvers || []).join('\n'),
           depth: sc.subdomain_recursion_depth || 4,
+          enabled: sc.subdomain_recursion_enabled !== false,
           excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
           repos: (sc.nuclei_extra_template_repos || []).join('\n'),
+          // Empty on the wire ⇒ the built-in default watch set applies.
+          monitor: (sc.monitor_modules && sc.monitor_modules.length ? sc.monitor_modules : DEFAULT_WATCH_MODULES),
         })
       }
     }
@@ -96,17 +114,21 @@ export default function System() {
       const res = await system.updateScanConfig({
         dns_resolvers: splitLines(scanDraft.resolvers),
         subdomain_recursion_depth: scanDraft.depth,
+        subdomain_recursion_enabled: scanDraft.enabled,
         nuclei_exclude_template_ids: splitLines(scanDraft.excludeIDs),
         nuclei_extra_template_repos: splitLines(scanDraft.repos),
+        monitor_modules: scanDraft.monitor,
       })
       setScanCfg(res)
       setScanDraft({
         resolvers: (res.dns_resolvers || []).join('\n'),
         depth: res.subdomain_recursion_depth || 4,
+        enabled: res.subdomain_recursion_enabled !== false,
         excludeIDs: (res.nuclei_exclude_template_ids || []).join('\n'),
         repos: (res.nuclei_extra_template_repos || []).join('\n'),
+        monitor: (res.monitor_modules && res.monitor_modules.length ? res.monitor_modules : DEFAULT_WATCH_MODULES),
       })
-      addToast('success', 'Scan configuration saved — applies to the next scan')
+      addToast('success', 'Scan configuration saved — watch modules apply from the next monitor cycle, the rest from the next scan')
     } catch {
       addToast('error', 'Failed to save scan configuration')
     } finally { setSavingScanCfg(false) }
@@ -309,10 +331,17 @@ export default function System() {
                 </div>
                 <div>
                   <label className="text-xs font-medium">Recursive subdomain depth</label>
-                  <input type="number" min={1} max={10} value={scanDraft.depth}
-                    onChange={e => setScanDraft(d => d && ({ ...d, depth: parseInt(e.target.value, 10) || 1 }))}
-                    className="input font-mono text-xs mt-1 w-28" />
-                  <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). 1 ⇒ apex only.</p>
+                  <div className="flex items-center gap-3 mt-1">
+                    <input type="number" min={1} max={10} value={scanDraft.depth} disabled={!scanDraft.enabled}
+                      onChange={e => setScanDraft(d => d && ({ ...d, depth: parseInt(e.target.value, 10) || 1 }))}
+                      className="input font-mono text-xs w-28" />
+                    <label className="flex items-center gap-1.5 text-xs font-medium whitespace-nowrap">
+                      <input type="checkbox" className="accent-accent" checked={scanDraft.enabled}
+                        onChange={e => setScanDraft(d => d && ({ ...d, enabled: e.target.checked }))} />
+                      Enable recursive enumeration
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). Off or depth 1 ⇒ apex only.</p>
                 </div>
                 <div>
                   <label className="text-xs font-medium">Nuclei — exclude template IDs <span className="text-text-muted">(one per line)</span></label>
@@ -329,6 +358,20 @@ export default function System() {
                     placeholder={(scanCfg?.default_nuclei_repos || []).join('\n')}
                     className="input font-mono text-xs mt-1" />
                   <p className="text-[10px] text-text-muted mt-1">Cloned on top of the official set. Empty ⇒ the two official ProjectDiscovery repos only. Community repos are a known false-positive source — add deliberately.</p>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-xs font-medium">Default monitor modules</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 mt-2">
+                    {MONITOR_MODULE_OPTIONS.map(m => (
+                      <label key={m.value} className="flex items-start gap-2 text-xs font-medium">
+                        <input type="checkbox" className="accent-accent mt-0.5"
+                          checked={scanDraft.monitor.includes(m.value)}
+                          onChange={e => setScanDraft(d => d && ({ ...d, monitor: e.target.checked ? [...d.monitor, m.value] : d.monitor.filter(v => v !== m.value) }))} />
+                        <span>{m.label} <span className="font-normal text-text-muted">— {m.hint}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-text-muted mt-1">Modules the automatic monitor schedule runs; applies from its next cycle. The state monitor always snapshots first, before HTTP/JS refresh. Uncheck everything ⇒ the built-in set above applies.</p>
                 </div>
               </div>
             </div>

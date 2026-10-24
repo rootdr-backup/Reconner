@@ -182,7 +182,7 @@ export const TopBar = () => {
 
   return (
     <>
-      <header className="app-topbar h-[76px] flex items-center justify-between gap-3 px-3 sm:px-6 xl:px-8 shrink-0">
+      <header className="app-topbar relative z-40 h-[76px] flex items-center justify-between gap-3 px-3 sm:px-6 xl:px-8 shrink-0">
         {/* Breadcrumbs */}
         <div className="flex items-center gap-2 min-w-0">
           <button type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"

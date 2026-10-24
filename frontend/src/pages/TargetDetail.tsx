@@ -5,6 +5,7 @@ import { useUIStore } from '../store/ui'
 import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { EvidenceViewer } from '../components/targets/EvidenceViewer'
+import { ChangeDiffViewer } from '../components/targets/ChangeDiffViewer'
 import { LiveResults } from '../components/targets/LiveResults'
 import { ws } from '../lib/websocket'
 import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
@@ -16,6 +17,44 @@ import type {
 const isScannableProjectAsset = (asset: Asset) =>
 	(asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')) ||
 	(asset.kind === 'network' && ['ip', 'cidr'].includes(asset.asset_type || 'ip'))
+
+// Changes(/monitor) tab: filter buckets for the noise chips. The stylesheet
+// content tracker (css_change + security:stylesheet_*) turned this tab into a
+// steady stream; the chips let an operator pull one signal back out of it.
+type ChangeFilter = 'all' | 'security' | 'scripts' | 'css' | 'http' | 'tech' | 'headers'
+const CHANGE_FILTERS: { id: ChangeFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'security', label: 'Security' },
+  { id: 'scripts', label: 'Scripts' },
+  { id: 'css', label: 'Stylesheets' },
+  { id: 'http', label: 'HTTP' },
+  { id: 'tech', label: 'Tech' },
+  { id: 'headers', label: 'Headers' },
+]
+
+// Bucket order matters: the stylesheet/script markers win before the generic
+// "security:" prefix, so a security:stylesheet_* row lands in Stylesheets (not
+// Security), a security:script_* row in Scripts, and header removals in Headers.
+const monitorRowKind = (c: MonitoringChange): ChangeFilter => {
+  const ct = c.change_type
+  if (ct === 'css_change' || ct.includes('stylesheet')) return 'css'
+  if (ct === 'js_change' || ct.includes('script')) return 'scripts'
+  if (ct.includes('header')) return 'headers'
+  if (ct.startsWith('security')) return 'security'
+  if (ct === 'tech_change') return 'tech'
+  return 'http'
+}
+
+// Badge color follows the stored severity (rows written since the severity
+// column carry one); older rows without it keep the old type-based estimate.
+const changeBadgeVariant = (c: { severity?: string; change_type: string }): 'high' | 'medium' | 'low' | 'info' => {
+  const sev = (c.severity || '').toLowerCase()
+  if (sev === 'high' || sev === 'medium' || sev === 'low' || sev === 'info') return sev
+  return c.change_type === 'js_change' ? 'medium'
+    : c.change_type.startsWith('security') || c.change_type.includes('header') ? 'high'
+    : c.change_type === 'tech_change' ? 'low'
+    : 'info'
+}
 
 // Projects created from the WP Scanner page carry this tag (see WPScanner.tsx) —
 // the same signal used there to decide this is a WordPress project, reused here
@@ -472,6 +511,9 @@ export default function TargetDetail() {
   const [scopeEvents, setScopeEvents] = useState<BountyScopeEvent[]>([])
   const [eventBusy, setEventBusy] = useState<string | null>(null)
   const [evidence, setEvidence] = useState<{ id: string; url: string; type: string } | null>(null)
+  // Changes-tab noise filter + the open content-diff drawer (css/js rows).
+  const [changeFilter, setChangeFilter] = useState<ChangeFilter>('all')
+  const [diffView, setDiffView] = useState<{ url: string; kind: 'css' | 'js' } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
   const [paths, setPaths] = useState<AttackPath[]>([])
@@ -661,6 +703,8 @@ export default function TargetDetail() {
         const code = Number((row as { status_code?: number })?.status_code || 0)
         return Math.floor(code / 100) === Number(statusClass)
       })
+    : (tab === 'monitor' && changeFilter !== 'all')
+    ? (data as MonitoringChange[]).filter(row => monitorRowKind(row) === changeFilter)
     : data
   // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
   const pageData = filteredData.slice(0, visibleCount)
@@ -1105,6 +1149,26 @@ export default function TargetDetail() {
               </div>
             )
             : (
+              <>
+              {tab === 'monitor' && (
+                <div className="flex items-center gap-1.5 flex-wrap mb-3">
+                  {CHANGE_FILTERS.map(f => {
+                    const n = f.id === 'all'
+                      ? data.length
+                      : (data as MonitoringChange[]).filter(row => monitorRowKind(row) === f.id).length
+                    return (
+                      <button key={f.id}
+                        onClick={() => { setChangeFilter(f.id); setVisibleCount(PAGE) }}
+                        className={cn('px-2.5 py-1 rounded-full border text-[11px] transition-colors',
+                          changeFilter === f.id
+                            ? 'bg-accent/15 border-accent text-accent'
+                            : 'border-border text-text-muted hover:text-text-primary hover:border-text-muted')}>
+                        {f.label} <span className="opacity-60">{n.toLocaleString()}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -1520,10 +1584,17 @@ export default function TargetDetail() {
                           <div className="flex items-center gap-1.5">
                             <a href={c.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono truncate">{truncate(c.url, 50)}</a>
                             <CopyButton text={c.url} />
+                            {/* Content-capture diff for monitored stylesheets/scripts.
+                                Legacy rows (recorded before capture) open too, but
+                                show the not-captured note + hashes only. */}
+                            {(c.change_type === 'css_change' || c.change_type === 'js_change') && (
+                              <button onClick={() => setDiffView({ url: c.url, kind: c.change_type === 'css_change' ? 'css' : 'js' })}
+                                className="btn-secondary text-[10px] px-1.5 py-0.5 shrink-0">Diff</button>
+                            )}
                           </div>
                         </td>
                         <td className="table-cell">
-                          <Badge variant={c.change_type === 'js_change' ? 'medium' : c.change_type.startsWith('security') || c.change_type.includes('header') ? 'high' : c.change_type === 'tech_change' ? 'low' : 'info'}>{c.change_type}</Badge>
+                          <Badge variant={changeBadgeVariant(c)}>{c.change_type}</Badge>
                         </td>
                         {/* Old/new values were truncated to 50 chars with no way to read the
                             rest. Now each value wraps, shows the full text on hover, and has a
@@ -1546,6 +1617,7 @@ export default function TargetDetail() {
                   </tbody>
                 </table>
               </div>
+              </>
             )}
         {!tabLoading && footerHasMore && (
           <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
@@ -1591,6 +1663,9 @@ export default function TargetDetail() {
           open={true}
           onClose={() => setEvidence(null)}
         />
+      )}
+      {diffView && (
+        <ChangeDiffViewer targetId={id!} url={diffView.url} kind={diffView.kind} onClose={() => setDiffView(null)} />
       )}
     </div>
     </ErrorBoundary>

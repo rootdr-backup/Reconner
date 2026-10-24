@@ -156,6 +156,10 @@ func RunMigrations(db *DB) error {
 		alterTasksAddAssetsTotal,
 		alterAdminPanelFindingsAddScreenshotID,
 		alterVulnFindingsAddScreenshotID,
+		createCSSFilesTable,
+		alterJSFilesAddBody,
+		alterJSFilesAddOldHash,
+		alterJSFilesAddOldBody,
 		createWPSitesTable,
 	}
 
@@ -1149,6 +1153,31 @@ CREATE TABLE IF NOT EXISTS js_findings (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
 	FOREIGN KEY (js_file_id) REFERENCES js_files(id) ON DELETE CASCADE
 );`
+
+const createCSSFilesTable = `
+CREATE TABLE IF NOT EXISTS css_files (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	size INTEGER DEFAULT 0,
+	hash TEXT DEFAULT '',
+	body TEXT DEFAULT '',
+	old_hash TEXT DEFAULT '',
+	old_body TEXT DEFAULT '',
+	last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	UNIQUE(target_id, url)
+);`
+
+// Body capture for diffing (monitor pass). The monitor keeps the previous
+// content next to the current one so a `css_change`/`js_change` row carries a
+// real line-level diff in the dashboard instead of two opaque SHA-256 hashes.
+// Bodies are capped (monitor body cap) — truncated captures still diff the
+// first N lines, which is where most real changes live.
+const alterJSFilesAddBody = `ALTER TABLE js_files ADD COLUMN body TEXT DEFAULT '';`
+const alterJSFilesAddOldHash = `ALTER TABLE js_files ADD COLUMN old_hash TEXT DEFAULT '';`
+const alterJSFilesAddOldBody = `ALTER TABLE js_files ADD COLUMN old_body TEXT DEFAULT '';`
 
 const createParametersTable = `
 CREATE TABLE IF NOT EXISTS parameters (

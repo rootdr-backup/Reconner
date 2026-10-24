@@ -212,6 +212,20 @@ type Config struct {
 	// (written to config.json) or the RECON_DNS_RESOLVERS env var (comma-separated,
 	// env wins). Set it to a single internal resolver to force the old behavior.
 	DNSResolvers []string `json:"dns_resolvers"`
+	// MonitorModules overrides which pipeline modules the automatic periodic
+	// monitor watch task runs (the scheduled pass creating monitor_watch tasks
+	// in scheduler.runDueMonitors). Names are validated against the scheduler's
+	// AllModules catalog by the scheduler; unknown names are logged and skipped
+	// (never rejected) so neither the API layer nor the UI needs to know the
+	// catalog. If nothing valid remains, the built-in default watch set applies.
+	// The snapshot module ("monitor") is always hoisted ahead of refresh-capable
+	// modules (http_probe/js_analysis) server-side — snapshot-before-refresh is
+	// an invariant, not a form checkbox. Empty
+	// ⇒ the built-in watch set (subdomain_enum, monitor, http_probe, takeover,
+	// cors, backup_discovery). Set via the System → Scanning page (written to
+	// config.json; scheduler picks the list up on its next due check — no
+	// restart needed).
+	MonitorModules []string `json:"monitor_modules"`
 	// SubdomainRecursionDepth controls recursive subdomain enumeration: after the
 	// apex domain is enumerated, each newly-discovered RESOLVING subdomain is itself
 	// enumerated (passive sources + resolution) as a sub-apex, and so on, until this
@@ -220,6 +234,12 @@ type Config struct {
 	// raise it to go deeper on a sprawling target. Bounded per level
 	// (SubdomainRecursionMaxPerLevel) so it can't explode on a huge zone.
 	SubdomainRecursionDepth int `json:"subdomain_recursion_depth"`
+	// SubdomainRecursionEnabled turns recursive enumeration off entirely without
+	// losing the remembered depth. Off ⇒ apex only (the old pre-recursion
+	// behavior); the depth value stays stored for when it is switched back on.
+	// Default true so an upgrade never silently changes scan behavior. Set via
+	// the System → Scanning panel, next to the depth field.
+	SubdomainRecursionEnabled bool `json:"subdomain_recursion_enabled"`
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime
@@ -505,15 +525,16 @@ func defaultConfig() *Config {
 		// (see the field comments) instead of baking a fixed numeric ceiling into
 		// every config.json ever saved — an operator who wants a REAL cap sets one
 		// explicitly; a fresh install gets the generous built-in default.
-		ScanWatchdogHours:       24,                // per-phase watchdog floor; reset on progress and scaled for large targets
-		EnableDAST:              true,              // native context-aware DAST (XSS/SQLi) over all insertion points
-		AIModel:                 "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
-		AIMaxIterations:         40,                // hard cap on the agent loop
-		AuthzMode:               "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
-		AuthzDestructive:        false,             // cross-user DELETE stays opt-in
-		SubdomainRecursionDepth: 4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
-		Workers:                 workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
-		Limits:                  limits,            // auto-scaled to host CPU/RAM
+		ScanWatchdogHours:         24,                // per-phase watchdog floor; reset on progress and scaled for large targets
+		EnableDAST:                true,              // native context-aware DAST (XSS/SQLi) over all insertion points
+		AIModel:                   "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
+		AIMaxIterations:           40,                // hard cap on the agent loop
+		AuthzMode:                 "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
+		AuthzDestructive:          false,             // cross-user DELETE stays opt-in
+		SubdomainRecursionEnabled: true,              // recursion on by default; the System panel disables it per deployment
+		SubdomainRecursionDepth:   4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
+		Workers:                   workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
+		Limits:                    limits,            // auto-scaled to host CPU/RAM
 	}
 }
 

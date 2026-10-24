@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -214,6 +215,92 @@ func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, nam
 			}
 		}, "dnsx", args...)
 	return out
+}
+
+// dnsxResolveIPs batch-resolves the A/AAAA record sets of a large candidate
+// list in a single dnsx run and returns name -> every answer IP as canonical
+// net.ParseIP strings, so comparisons against Go-resolver wildcard-probe IPs
+// stay string-identical. A nil map means dnsx was unavailable or failed while
+// the context was still live — the caller must run the legacy per-name path
+// and must never treat nil as "everything unresolved".
+func (s *SubdomainScanner) dnsxResolveIPs(ctx context.Context, targetID string, names []string) map[string][]string {
+	if s.exec == nil || len(names) == 0 || !s.exec.IsToolAvailable("dnsx") {
+		return nil
+	}
+	// Concurrency floor, mirroring dnsxResolve: a 20k-name admission pass at
+	// the generic low -t crawls; dnsx handles a high thread count comfortably.
+	workers := s.cfg.Workers.SubdomainEnumeration
+	if workers < 150 {
+		workers = 150
+	}
+	if workers > 400 {
+		workers = 400
+	}
+	args := []string{"-silent", "-a", "-aaaa", "-resp", "-retry", "2", "-t", fmt.Sprint(workers)}
+	// Same resolver file contract as every other dnsx pass: the operator list
+	// (or the public default) — the SAME list the in-process s.resolver
+	// round-robins, so answers and wildcard probes share one resolver source.
+	if resolverFile, err := writeTempLines("recon-dnsx-aresp-resolvers-", s.toolResolverList()); err == nil {
+		defer os.Remove(resolverFile)
+		args = append(args, "-r", resolverFile)
+	}
+	out := map[string][]string{}
+	err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
+		func(line string) {
+			name, toks := parseDNSXResponseLine(line)
+			if name == "" {
+				return
+			}
+			ips := make([]string, 0, len(toks))
+			for _, tok := range toks {
+				if ip := net.ParseIP(tok); ip != nil {
+					ips = append(ips, ip.String())
+				}
+			}
+			// dnsx can emit one -resp line per record type for the same name;
+			// merge so an A-only or AAAA-only second line is never lost.
+			if len(ips) > 0 {
+				out[name] = append(out[name], ips...)
+			}
+		}, "dnsx", args...)
+	if err != nil && ctx.Err() == nil {
+		return nil
+	}
+	return out
+}
+
+// parseDNSXResponseLine splits one dnsx `-resp` output line into the hostname
+// and the bracket-group tokens — separators and trailing dots stripped, lower
+// cased:
+//
+//	sub.example.com [93.184.216.34, 2606:2800:220:1:248:1893:25c8:1946]
+//	www.example.com [example.edge.cdn.net]
+//
+// Tokens come back as raw text; IP-vs-CNAME validation is the caller's
+// concern. Lines without a usable bracket group parse as ("", nil).
+func parseDNSXResponseLine(line string) (string, []string) {
+	line = strings.TrimSpace(line)
+	openBr := strings.Index(line, "[")
+	closeBr := strings.LastIndex(line, "]")
+	if openBr <= 0 || closeBr <= openBr {
+		return "", nil
+	}
+	fields := strings.Fields(line[:openBr])
+	if len(fields) == 0 {
+		return "", nil
+	}
+	name := strings.TrimSuffix(strings.ToLower(fields[0]), ".")
+	if name == "" {
+		return "", nil
+	}
+	var toks []string
+	for _, tok := range strings.FieldsFunc(line[openBr+1:closeBr], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		tok = strings.TrimSuffix(strings.ToLower(strings.Trim(tok, "[] \t")), ".")
+		if tok != "" {
+			toks = append(toks, tok)
+		}
+	}
+	return name, toks
 }
 
 // purednsBruteforce runs `puredns bruteforce <wordlist> <domain>` with a

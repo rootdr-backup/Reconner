@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -105,8 +106,20 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 
 	logFn("info", "monitor", fmt.Sprintf("Monitoring %d HTTP services for changes...", len(services)))
 	changed := 0
+	harvested := 0
 	knownHTTP := map[string]bool{}
 	knownJS := map[string]bool{}
+	knownCSS := map[string]bool{}
+	cssKeyRows, err := s.db.QueryContext(ctx, `SELECT url FROM css_files WHERE target_id = ?`, targetID)
+	if err == nil {
+		for cssKeyRows.Next() {
+			var u string
+			if cssKeyRows.Scan(&u) == nil {
+				knownCSS[monitorURLKey(u)] = true
+			}
+		}
+		cssKeyRows.Close()
+	}
 
 	for _, svc := range services {
 		knownHTTP[monitorURLKey(svc.URL)] = true
@@ -120,6 +133,7 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 		// NORMALIZED hash: volatile values (UUIDs/timestamps/CSRF/high-entropy)
 		// are stripped first, so a dynamic page doesn't false-positive.
 		newNormHash := normalizedHash(body)
+		harvested += s.harvestStylesheets(ctx, targetID, svc.URL, body, knownCSS)
 
 		// ── Security-attribute change detection (supply-chain / form-hijack) ──
 		curSnap := extractSecuritySnapshot(body, hostOf(svc.URL))
@@ -217,14 +231,19 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 		`, newStatus, newTitle, len(body), newNormHash, curSnap.toJSON(), storeServer, svc.ID)
 	}
 
-	// Monitor JS file changes
-	jsRows, err := s.db.QueryContext(ctx, `SELECT id, url, hash FROM js_files WHERE target_id = ?`, targetID)
+	if harvested > 0 {
+		logFn("info", "monitor", fmt.Sprintf("Tracking %d new stylesheet URL(s) for content changes", harvested))
+	}
+
+	// Monitor JS file changes — hash AND the capped content body, so a js_change
+	// row can render a real line-diff in the dashboard instead of two hashes.
+	jsRows, err := s.db.QueryContext(ctx, `SELECT id, url, hash, COALESCE(body,'') FROM js_files WHERE target_id = ?`, targetID)
 	if err == nil {
-		type jsRecord struct{ ID, URL, Hash string }
+		type jsRecord struct{ ID, URL, Hash, Body string }
 		var jsFiles []jsRecord
 		for jsRows.Next() {
 			var r jsRecord
-			if err := jsRows.Scan(&r.ID, &r.URL, &r.Hash); err != nil {
+			if err := jsRows.Scan(&r.ID, &r.URL, &r.Hash, &r.Body); err != nil {
 				jsRows.Close()
 				return err
 			}
@@ -243,23 +262,95 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 			if ctx.Err() != nil {
 				break
 			}
-			newHash, newSize, err := s.fetchHashWithHeaders(ctx, jf.URL, headersFor(jf.URL))
+			newHash, newSize, newBody, err := s.fetchFileWithBody(ctx, jf.URL, headersFor(jf.URL))
 			if err != nil || newHash == "" {
 				continue
 			}
 			if jf.Hash != "" && newHash != jf.Hash {
-				confirmHash, _, confirmErr := s.fetchHashWithHeaders(ctx, jf.URL, headersFor(jf.URL))
+				confirmHash, _, _, confirmErr := s.fetchFileWithBody(ctx, jf.URL, headersFor(jf.URL))
 				if confirmErr != nil || confirmHash != newHash {
 					logFn("info", "monitor", fmt.Sprintf("Ignoring unstable one-off JavaScript response from %s", jf.URL))
 					continue
 				}
 				logFn("warn", "monitor", fmt.Sprintf("[JS CHANGE] %s hash changed", jf.URL))
 				s.recordChange(targetID, jf.URL, "js_change", jf.Hash, newHash, classifyChangeSeverity("js_change"))
+				// Roll the previous content into old_* for the diff drawer, then
+				// publish the new baseline in one go.
+				_, _ = s.db.ExecContext(ctx, `UPDATE js_files SET hash=?, size=?, body=?, old_hash=?, old_body=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`,
+					newHash, newSize, newBody, jf.Hash, jf.Body, jf.ID)
 				changed++
+				continue
 			}
 			// Always establish/refresh the baseline. Previously an empty initial hash
 			// was never written, so that JS file could change forever undetected.
-			_, _ = s.db.ExecContext(ctx, `UPDATE js_files SET hash=?, size=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newHash, newSize, jf.ID)
+			// The content capture is written alongside it on the first pass only —
+			// rewriting unchanged 256KB bodies every pass is pure write churn.
+			if jf.Body == "" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE js_files SET hash=?, size=?, body=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newHash, newSize, newBody, jf.ID)
+			} else {
+				_, _ = s.db.ExecContext(ctx, `UPDATE js_files SET hash=?, size=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newHash, newSize, jf.ID)
+			}
+		}
+	}
+
+	// Monitor stylesheet content changes. css_files tracks every
+	// <link rel="stylesheet" href> harvested from page bodies (same-origin AND
+	// cross-origin), so a version bump is judged by CONTENT, not by the link
+	// attribute: changed bytes → one css_change row (with a real line-diff in
+	// the drawer); a cache-buster rename with unchanged bytes → silence.
+	cssRows, err := s.db.QueryContext(ctx, `SELECT id, url, hash, COALESCE(body,''), COALESCE(size,0) FROM css_files WHERE target_id = ?`, targetID)
+	if err == nil {
+		type cssRecord struct {
+			ID, URL, Hash, Body string
+			Size                int
+		}
+		var cssFiles []cssRecord
+		for cssRows.Next() {
+			var r cssRecord
+			if err := cssRows.Scan(&r.ID, &r.URL, &r.Hash, &r.Body, &r.Size); err != nil {
+				cssRows.Close()
+				return err
+			}
+			cssFiles = append(cssFiles, r)
+		}
+		if err := cssRows.Err(); err != nil {
+			cssRows.Close()
+			return err
+		}
+		cssRows.Close()
+
+		for _, cf := range cssFiles {
+			knownCSS[monitorURLKey(cf.URL)] = true
+			if ctx.Err() != nil {
+				break
+			}
+			newHash, newSize, newBody, err := s.fetchFileWithBody(ctx, cf.URL, headersFor(cf.URL))
+			if err != nil || newHash == "" {
+				continue
+			}
+			if cf.Hash != "" && newHash != cf.Hash {
+				confirmHash, _, _, confirmErr := s.fetchFileWithBody(ctx, cf.URL, headersFor(cf.URL))
+				if confirmErr != nil || confirmHash != newHash {
+					logFn("info", "monitor", fmt.Sprintf("Ignoring unstable one-off stylesheet response from %s", cf.URL))
+					continue
+				}
+				logFn("warn", "monitor", fmt.Sprintf("[CSS CHANGE] %s hash changed", cf.URL))
+				s.recordChange(targetID, cf.URL, "css_change", cf.Hash, newHash, classifyChangeSeverity("css_change"))
+				_, _ = s.db.ExecContext(ctx, `UPDATE css_files SET hash=?, size=?, body=?, old_hash=?, old_body=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`,
+					newHash, newSize, newBody, cf.Hash, cf.Body, cf.ID)
+				changed++
+				continue
+			}
+			if cf.Hash == "" {
+				// Establish the baseline without ringing the bell (same as JS).
+				_, _ = s.db.ExecContext(ctx, `UPDATE css_files SET hash=?, size=?, body=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newHash, newSize, newBody, cf.ID)
+			} else if cf.Body == "" {
+				// Legacy row that predates capture: backfill the content snapshot
+				// so the next real change has a "before" side to diff against.
+				_, _ = s.db.ExecContext(ctx, `UPDATE css_files SET body=?, size=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newBody, newSize, cf.ID)
+			} else {
+				_, _ = s.db.ExecContext(ctx, `UPDATE css_files SET size=?, last_seen=CURRENT_TIMESTAMP WHERE id=?`, newSize, cf.ID)
+			}
 		}
 	}
 
@@ -559,6 +650,12 @@ func notificationTitle(changeType string) string {
 	switch changeType {
 	case "js_change":
 		return "JavaScript changed"
+	case "css_change":
+		return "Stylesheet content changed"
+	case "security:stylesheet_added":
+		return "External stylesheet added"
+	case "security:stylesheet_removed":
+		return "External stylesheet removed"
 	case "http_change", "status_change":
 		return "HTTP response changed"
 	case "page_change":
@@ -650,6 +747,115 @@ func (s *MonitorScanner) fetchHashWithHeaders(ctx context.Context, url string, h
 	}
 	h := fmt.Sprintf("%x", sha256.Sum256(body))
 	return h, len(body), nil
+}
+
+// monitorBodyCaptureCap bounds the per-file content stored beside the hash
+// (see the "Body capture for diffing" migration comment). The HASH always
+// covers the full download (up to the 5MB reader cap), so a real change deep
+// inside a large bundle is still detected; only the stored diff material is
+// truncated to the first N bytes.
+const monitorBodyCaptureCap = 256 * 1024
+
+// Stylesheet `<link rel="stylesheet" href>…` harvesting, attribute-order agnostic.
+var (
+	reLinkTag      = regexp.MustCompile(`(?i)<link\b[^>]*>`)
+	reLinkAttrRel  = regexp.MustCompile(`(?i)\brel\s*=\s*["']?([^"'\s>]{2,20})`)
+	reLinkAttrHref = regexp.MustCompile(`(?i)\bhref\s*=\s*["']([^"']+)["']`)
+)
+
+// fetchFileWithBody fetches a static asset (JS/CSS) for content tracking:
+// full-content SHA-256, size, and the capped body the diff drawer renders.
+// The HTML-document rejection mirrors fetchHashWithHeaders — an SPA fallback
+// must never be captured as an asset's content.
+func (s *MonitorScanner) fetchFileWithBody(ctx context.Context, rawURL string, headers map[string]string) (hash string, size int, body string, err error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return "", 0, "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+	for k, v := range headers {
+		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+
+	resp, err := monitorClient.Do(req)
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", 0, "", fmt.Errorf("unexpected asset response status %d", resp.StatusCode)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	if err != nil {
+		return "", 0, "", err
+	}
+	trimmed := strings.ToLower(strings.TrimSpace(string(raw)))
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") &&
+		(strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")) {
+		return "", 0, "", fmt.Errorf("asset URL returned an HTML document")
+	}
+	captured := raw
+	if len(captured) > monitorBodyCaptureCap {
+		captured = captured[:monitorBodyCaptureCap]
+	}
+	h := fmt.Sprintf("%x", sha256.Sum256(raw))
+	return h, len(raw), string(captured), nil
+}
+
+// harvestStylesheets pulls <link rel="stylesheet" href> URLs out of fresh page
+// HTML and tracks them in css_files (same-origin AND cross-origin — that is
+// what the browser actually loads), so the monitor can diff stylesheet
+// CONTENT — the layer behind the Changes tab's css_change rows — rather than
+// only the attribute-level "link appeared" check. Relative hrefs resolve
+// against the page URL. Returns how many NEW URLs were registered.
+func (s *MonitorScanner) harvestStylesheets(ctx context.Context, targetID, pageURL, body string, known map[string]bool) int {
+	base, err := url.Parse(strings.TrimSpace(pageURL))
+	if err != nil || base.Host == "" {
+		return 0
+	}
+	inserted := 0
+	for _, tag := range reLinkTag.FindAllString(body, -1) {
+		relMatch := reLinkAttrRel.FindStringSubmatch(tag)
+		if relMatch == nil || !strings.Contains(strings.ToLower(relMatch[1]), "stylesheet") {
+			continue
+		}
+		hrefMatch := reLinkAttrHref.FindStringSubmatch(tag)
+		if hrefMatch == nil {
+			continue
+		}
+		href := strings.TrimSpace(hrefMatch[1])
+		if href == "" || strings.HasPrefix(href, "#") {
+			continue
+		}
+		ref, err := url.Parse(href)
+		if err != nil {
+			continue
+		}
+		if ref.Scheme != "" && ref.Scheme != "http" && ref.Scheme != "https" {
+			continue // data:/javascript:/mailto:/tel: and friends
+		}
+		resolved := base.ResolveReference(ref)
+		if resolved.Scheme != "http" && resolved.Scheme != "https" {
+			continue
+		}
+		// Register the query-stripped URL: a `?ver=` churn maps to ONE tracked
+		// row (content re-fetched from the stable path each pass) instead of a
+		// new css_files row per cache-buster.
+		trackedURL := stripResourceQuery(resolved.String())
+		key := monitorURLKey(trackedURL)
+		if key == "" || known[key] {
+			continue
+		}
+		known[key] = true
+		inserted++
+		_, _ = s.db.ExecContext(ctx, `INSERT INTO css_files (id, target_id, url) VALUES (?, ?, ?)
+			ON CONFLICT(target_id, url) DO NOTHING`, uuid.New().String(), targetID, trackedURL)
+	}
+	return inserted
 }
 
 func (s *MonitorScanner) describeChange(oldStatus, newStatus int, oldTitle, newTitle, oldHash, newHash string) string {

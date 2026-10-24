@@ -311,7 +311,20 @@ export interface MonitoringChange {
   change_type: string
   old_value: string
   new_value: string
+  severity: string
   detected_at: string
+}
+
+// Body of a monitored file (css_files / js_files) as captured by the monitor
+// pass when the change was detected — see GET /targets/{id}/css-files/body.
+export interface FileBodyResponse {
+  kind: string
+  url: string
+  side: string
+  hash: string
+  size: number
+  content: string
+  captured: boolean
 }
 
 export interface IngramCamera {

@@ -369,9 +369,12 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 
 	// Recursive enumeration: run passive discovery + resolution AGAINST each newly
 	// discovered resolving subdomain as its own sub-apex, descending until the
-	// configured depth or until a level finds nothing new. Gated on the same deep-
-	// work toggle as brute/permutation so the fast passive-only scan stays fast.
-	if subdomainBruteEnabled(ctx) {
+	// configured depth or until a level finds nothing new. Gate 1 is the deep-
+	// work toggle that already covers brute/permutation so the fast passive-only
+	// scan stays fast. Gate 2 is the system-wide recursion switch in the System →
+	// Scanning panel: off means apex only, while the remembered depth is kept
+	// for when it is turned back on.
+	if subdomainBruteEnabled(ctx) && s.subdomainRecursionEnabled() {
 		s.recursiveEnum(ctx, targetID, domain, logFn)
 	}
 
@@ -1088,11 +1091,6 @@ func (s *SubdomainScanner) admittedSubdomainNames(ctx context.Context, targetID,
 // IP. Names that resolve to a wildcard IP are kept but logged so HTTP probing
 // can later dedupe them by content.
 func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, found map[string]bool, mu *sync.Mutex, wildcardIPs, wildcardCNAMEs map[string]bool, logFn LogFunc) map[string]bool {
-	workers := s.cfg.Workers.SubdomainEnumeration
-	if workers <= 0 {
-		workers = 20
-	}
-
 	mu.Lock()
 	names := make([]string, 0, len(found))
 	for n := range found {
@@ -1107,8 +1105,6 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// are announced live.
 	preexisting := s.existingSubdomainSet(ctx, targetID)
 
-	jobs := make(chan string, len(names))
-	var wg sync.WaitGroup
 	var resolved, cnameOnly, wildcardHits, unresolved int
 	var cmu sync.Mutex
 	rejected := make(map[string]bool)
@@ -1119,66 +1115,140 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// streams discoveries; only the DB write is batched.
 	type resolvedRow struct{ name, ip, source string }
 	var rows []resolvedRow
-	cnameCandidates, cnamePrefilter := s.dnsxCNAMECandidates(ctx, targetID, names)
+	cnameCandidates, cnameTargets, cnamePrefilter := s.dnsxCNAMECandidates(ctx, targetID, names)
 
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for name := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				ips := resolveHostIPs(ctx, name, s.resolver)
-				ip := firstNonWildcardIP(ips, wildcardIPs)
-				if ip == "" {
-					if len(ips) > 0 && overlapsWildcardIPs(ips, wildcardIPs) {
-						cmu.Lock()
-						rejected[name] = true
-						wildcardHits++
-						cmu.Unlock()
-						continue
-					}
-					// A dangling but explicit CNAME is a real DNS asset and must remain
-					// available to takeover checks, but it is not sent to the web pipeline.
-					cname := ""
-					if !cnamePrefilter || cnameCandidates[name] {
-						cname = lookupExplicitCNAME(ctx, name, s.resolver)
-					}
-					if cname != "" && !wildcardCNAMEs[cname] {
-						cmu.Lock()
-						cnameOnly++
-						rows = append(rows, resolvedRow{name, "", "dns-cname"})
-						cmu.Unlock()
-						continue
-					}
-					cmu.Lock()
-					rejected[name] = true
-					unresolved++
-					cmu.Unlock()
-					continue
-				}
+	// admit appends one classified name to the batched write set. Only names
+	// absent from `preexisting` stream the live "new_subdomain" event, and only
+	// when they carry an A/AAAA answer (CNAME-only rows stay silent, ip == "").
+	admit := func(name, ip, source string) {
+		cmu.Lock()
+		rows = append(rows, resolvedRow{name, ip, source})
+		isNew := !preexisting[name]
+		cmu.Unlock()
+		if isNew && ip != "" && s.broadcast != nil {
+			s.broadcast("new_subdomain", map[string]any{
+				"target_id": targetID,
+				"subdomain": name,
+				"ip":        ip,
+			})
+		}
+	}
+
+	// cnameFor answers the explicit-CNAME question for an unresolved name. The
+	// dnsx -cname -resp prefilter already captured the target through the same
+	// resolver file the A/AAAA answers use; the in-process 3s lookup is only
+	// the fallback (tool-free build, dnsx unavailable, or a parse hiccup).
+	cnameFor := func(name string) string {
+		if cname, ok := cnameTargets[name]; ok {
+			return cname
+		}
+		if !cnamePrefilter || cnameCandidates[name] {
+			return lookupExplicitCNAME(ctx, name, s.resolver)
+		}
+		return ""
+	}
+
+	// classify applies the identical wildcard-aware admission rules to one
+	// name's A/AAAA record set no matter which resolver path produced them —
+	// the batched dnsx pass or per-name Go lookups — so both admit/reject
+	// name-for-name identically (the gate counts below must match across paths).
+	classify := func(name string, ips []string) {
+		ip := firstNonWildcardIP(ips, wildcardIPs)
+		if ip == "" {
+			if len(ips) > 0 && overlapsWildcardIPs(ips, wildcardIPs) {
 				cmu.Lock()
-				resolved++
-				rows = append(rows, resolvedRow{name, ip, "dns"})
-				isNew := !preexisting[name]
+				rejected[name] = true
+				wildcardHits++
 				cmu.Unlock()
-				if isNew && s.broadcast != nil {
-					s.broadcast("new_subdomain", map[string]any{
-						"target_id": targetID,
-						"subdomain": name,
-						"ip":        ip,
-					})
+				return
+			}
+			// A dangling but explicit CNAME is a real DNS asset and must remain
+			// available to takeover checks, but it is not sent to the web pipeline.
+			if cname := cnameFor(name); cname != "" && !wildcardCNAMEs[cname] {
+				cmu.Lock()
+				cnameOnly++
+				cmu.Unlock()
+				admit(name, "", "dns-cname")
+				return
+			}
+			cmu.Lock()
+			rejected[name] = true
+			unresolved++
+			cmu.Unlock()
+			return
+		}
+		cmu.Lock()
+		resolved++
+		cmu.Unlock()
+		admit(name, ip, "dns")
+	}
+
+	// FAST PATH: one dnsx process resolves the A/AAAA record sets for the whole
+	// candidate list through the fast public/configured resolvers — one standard
+	// query per name, high in-flight concurrency, the same pattern the deep-DNS
+	// brute already uses — instead of paying a per-worker connect/timeout budget
+	// per name.
+	passStart := time.Now()
+	ipmap := s.dnsxResolveIPs(ctx, targetID, names)
+	if ipmap != nil {
+		logFn("info", "subdomain_enum", fmt.Sprintf("Batched DNS resolution finished in %.1fs — screening %d candidate(s)", time.Since(passStart).Seconds(), len(names)))
+		for _, name := range names {
+			if ctx.Err() != nil {
+				break
+			}
+			classify(name, ipmap[name])
+		}
+	} else {
+		logFn("info", "subdomain_enum", "Batched dnsx resolution unavailable — per-name resolver fallback")
+	}
+
+	if ipmap == nil {
+		// FALLBACK PATH (tool-free builds, missing dnsx, or a failed tool run):
+		// the legacy per-name Go-resolver pass, admission logic unchanged.
+		workers := s.cfg.Workers.SubdomainEnumeration
+		if workers <= 0 {
+			workers = 20
+		}
+		jobs := make(chan string, len(names))
+		var wg sync.WaitGroup
+		var checked atomic.Int64
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for name := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					checked.Add(1)
+					classify(name, resolveHostIPs(ctx, name, s.resolver))
+				}
+			}()
+		}
+		// Periodic heartbeat so a long pass over tens of thousands of names no
+		// longer looks frozen between the start and the final gate line.
+		progressDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					cmu.Lock()
+					logFn("info", "subdomain_enum", fmt.Sprintf("Resolution progress: %d/%d checked — %d verified, %d wildcard, %d CNAME-only, %d unresolved", checked.Load(), len(names), resolved, cnameOnly, wildcardHits, unresolved))
+					cmu.Unlock()
 				}
 			}
 		}()
+		for _, n := range names {
+			jobs <- n
+		}
+		close(jobs)
+		wg.Wait()
+		close(progressDone)
 	}
-
-	for _, n := range names {
-		jobs <- n
-	}
-	close(jobs)
-	wg.Wait()
 
 	// Single-transaction flush of all admission writes.
 	if len(rows) > 0 {
@@ -1239,6 +1309,18 @@ func (s *SubdomainScanner) subdomainRecursionDepth() int {
 		return s.cfg.SubdomainRecursionDepth
 	}
 	return 4
+}
+
+// subdomainRecursionEnabled reports whether recursive enumeration runs at all.
+// A nil config (test paths) behaves like the built-in defaults: recursion
+// enabled. Explicit false in config.json wins; the production Config always
+// comes from Load(), which starts from the defaults, so an old config.json
+// without this key never silently disables recursion after an upgrade.
+func (s *SubdomainScanner) subdomainRecursionEnabled() bool {
+	if s.cfg == nil {
+		return true
+	}
+	return s.cfg.SubdomainRecursionEnabled
 }
 
 // recursiveEnum drives recursive subdomain discovery: after the apex is
@@ -1370,12 +1452,19 @@ func (s *SubdomainScanner) gatherPassiveSubdomains(ctx context.Context, domain s
 	return out
 }
 
-func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID string, names []string) (map[string]bool, bool) {
+// dnsxCNAMECandidates runs one dnsx `-cname -resp` pass over the whole
+// candidate list through the configured fast public resolvers. It returns the
+// set of names carrying an explicit CNAME plus, where parseable, the exact
+// CNAME target — so the admission gate usually needs no second in-process
+// lookup. The third return value is false when dnsx was unavailable or the
+// pass failed; the caller then falls back to per-name CNAME lookups.
+func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID string, names []string) (map[string]bool, map[string]string, bool) {
 	if s.exec == nil || len(names) == 0 || !s.exec.IsToolAvailable("dnsx") {
-		return nil, false
+		return nil, nil, false
 	}
 	out := map[string]bool{}
-	args := []string{"-silent", "-cname", "-retry", "1"}
+	targets := map[string]string{}
+	args := []string{"-silent", "-cname", "-resp", "-retry", "1"}
 	// Resolve the CNAME prefilter through the configured fast public resolvers,
 	// not the (often slow/single-flight) system resolver — this was a full extra
 	// serial DNS pass over the whole candidate list with no -r before.
@@ -1385,15 +1474,27 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 	}
 	err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
 		func(line string) {
-			fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
-			if len(fields) > 0 {
-				out[strings.TrimSuffix(fields[0], ".")] = true
+			name, toks := parseDNSXResponseLine(line)
+			if name == "" {
+				// Defensive: a response shape without a usable bracket group
+				// still marks the name as CNAME-bearing (legacy behavior).
+				fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
+				if len(fields) > 0 {
+					name = strings.TrimSuffix(fields[0], ".")
+				}
+			}
+			if name == "" {
+				return
+			}
+			out[name] = true
+			if len(toks) > 0 {
+				targets[name] = toks[0]
 			}
 		}, "dnsx", args...)
 	if err != nil && ctx.Err() == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	return out, true
+	return out, targets, true
 }
 
 // detectWildcard probes a few random hostnames; if they resolve, the shared

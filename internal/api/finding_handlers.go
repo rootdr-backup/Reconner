@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/recon-platform/internal/models"
@@ -560,10 +561,61 @@ func (h *Handler) handleNucleiAffected(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccess(w, out)
 }
 
+// serveFileBody returns the capped content capture the MONITOR pass stored for
+// a diffed asset (css_files / js_files): side=current (live capture) or
+// side=old (previous capture rolled in at detection time). URL-keyed — the
+// monitor records changes under the exact same URL string it tracks content
+// for. Hard-scoped to the routed target: no cross-target reads. This is NOT a
+// fetch proxy: it only ever returns content captured at detection time, so it
+// has no request-driven SSRF surface.
+func (h *Handler) serveFileBody(w http.ResponseWriter, r *http.Request, table, kind string) {
+	id := mux.Vars(r)["id"]
+	rawURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if rawURL == "" {
+		h.writeError(w, http.StatusBadRequest, "url query parameter required")
+		return
+	}
+	side := r.URL.Query().Get("side")
+	if side != "old" && side != "current" {
+		side = "current"
+	}
+	var storedURL, hash, content string
+	var size int64
+	var rowErr error
+	if side == "old" {
+		rowErr = h.db.QueryRowContext(r.Context(), `SELECT url, COALESCE(old_hash,''), COALESCE(old_body,'') FROM `+table+` WHERE target_id = ? AND url = ?`, id, rawURL).
+			Scan(&storedURL, &hash, &content)
+	} else {
+		rowErr = h.db.QueryRowContext(r.Context(), `SELECT url, size, hash, COALESCE(body,'') FROM `+table+` WHERE target_id = ? AND url = ?`, id, rawURL).
+			Scan(&storedURL, &size, &hash, &content)
+	}
+	if rowErr != nil {
+		h.writeError(w, http.StatusNotFound, "no capture for this asset (the change predates content tracking, or the URL is not tracked)")
+		return
+	}
+	h.writeSuccess(w, map[string]any{
+		"kind":     kind,
+		"url":      storedURL,
+		"side":     side,
+		"hash":     hash,
+		"size":     size,
+		"content":  content,
+		"captured": strings.TrimSpace(content) != "",
+	})
+}
+
+func (h *Handler) handleGetCSSFileBody(w http.ResponseWriter, r *http.Request) {
+	h.serveFileBody(w, r, "css_files", "css")
+}
+
+func (h *Handler) handleGetJSFileBody(w http.ResponseWriter, r *http.Request) {
+	h.serveFileBody(w, r, "js_files", "js")
+}
+
 func (h *Handler) handleListMonitoringChanges(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT id, target_id, url, change_type, old_value, new_value, detected_at
+		SELECT id, target_id, url, change_type, old_value, new_value, COALESCE(severity,'info'), detected_at
 		FROM monitoring_changes WHERE target_id = ?
 		ORDER BY detected_at DESC LIMIT 500
 	`, id)
@@ -580,12 +632,13 @@ func (h *Handler) handleListMonitoringChanges(w http.ResponseWriter, r *http.Req
 		ChangeType string `json:"change_type"`
 		OldValue   string `json:"old_value"`
 		NewValue   string `json:"new_value"`
+		Severity   string `json:"severity"`
 		DetectedAt string `json:"detected_at"`
 	}
 	changes := make([]Change, 0)
 	for rows.Next() {
 		var c Change
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.URL, &c.ChangeType, &c.OldValue, &c.NewValue, &c.DetectedAt); err == nil {
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.URL, &c.ChangeType, &c.OldValue, &c.NewValue, &c.Severity, &c.DetectedAt); err == nil {
 			changes = append(changes, c)
 		}
 	}
