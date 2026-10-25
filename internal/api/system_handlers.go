@@ -759,7 +759,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	subRows, err := h.db.QueryContext(r.Context(), `
 		SELECT s.id, s.subdomain, s.ip, t.domain as target_domain
 		FROM subdomains s JOIN targets t ON t.id = s.target_id
-		WHERE s.subdomain LIKE ? LIMIT 20
+		WHERE s.subdomain LIKE ? AND COALESCE(s.catchall,0)=0 LIMIT 20
 	`, like)
 	if err == nil {
 		defer subRows.Close()

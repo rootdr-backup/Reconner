@@ -11,7 +11,7 @@ import (
 
 // The HTTP catch-all pass closes the hole the DNS wildcard gate cannot see:
 // a zone with NO DNS wildcard can still serve one shared homepage or one
-// redirect for EVERY hostname under it (portslike hosting, parking, SaaS
+// redirect for EVERY hostname under it (parking-style hosting, SaaS
 // platforms). Those names arrive as fully "verified" subdomains — the DNS gate
 // happily passes them — and flood the Hosts tab, reports and every web module
 // downstream.
@@ -221,7 +221,7 @@ func (s *HTTPScanner) runCatchallPass(ctx context.Context, targetID string, logF
 	apexTargets := catchallApexTargets(apex)
 	groups := groupCatchallFingerprints(candidateRows)
 
-	var markedHosts []string
+	markedSet := map[string]string{} // host -> pattern kind (deduped across schemes/groups)
 	redirectGroups, homepageGroups := 0, 0
 	for _, members := range groups {
 		marked, kind := qualifiesCatchallGroup(members, apexTargets)
@@ -234,17 +234,32 @@ func (s *HTTPScanner) runCatchallPass(ctx context.Context, targetID string, logF
 			homepageGroups++
 		}
 		for _, row := range marked {
-			markedHosts = append(markedHosts, row.host)
-			logFn("info", "http_probe", fmt.Sprintf("HTTP catch-all: %s serves the wildcard group (%s pattern, group of %d)", row.host, kind, len(members)))
+			// Defense in depth: only hosts strictly under the target apex are
+			// ever marked (qualifies already excludes apex/www; this also
+			// rejects any foreign host a stray service row might carry).
+			if row.host == apex || !strings.HasSuffix(row.host, "."+apex) {
+				continue
+			}
+			if _, seen := markedSet[row.host]; !seen {
+				markedSet[row.host] = kind
+			}
 		}
 	}
 
-	if len(markedHosts) == 0 {
+	if len(markedSet) == 0 {
 		logFn("info", "http_probe", fmt.Sprintf("HTTP catch-all pass: %d live 2xx host(s) analysed — no catch-all groups", total2xx))
 		return nil
 	}
 
+	markedHosts := make([]string, 0, len(markedSet))
+	for host := range markedSet {
+		markedHosts = append(markedHosts, host)
+	}
 	sort.Strings(markedHosts)
+	for _, host := range markedHosts {
+		logFn("info", "http_probe", fmt.Sprintf("HTTP catch-all: %s serves the wildcard group (%s pattern)", host, markedSet[host]))
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

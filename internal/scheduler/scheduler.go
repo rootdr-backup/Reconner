@@ -2723,9 +2723,9 @@ func (s *Scheduler) unresolvedTaskPhaseCount(taskID string) int {
 func (s *Scheduler) updateTargetStats(targetID string) {
 	var subdomainCount, aliveCount, findingCount int
 
-	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ?", targetID).Scan(&subdomainCount)
+	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0)=0", targetID).Scan(&subdomainCount)
 	s.db.QueryRow(`SELECT
-		(SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1) +
+		(SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1 AND COALESCE(catchall,0)=0) +
 		(SELECT COUNT(*) FROM network_hosts WHERE target_id=? AND is_alive=1)`, targetID, targetID).Scan(&aliveCount)
 	// The orange headline is an actionable vulnerability count, not an inventory
 	// counter. Keep only medium+ findings; exposed-file discovery is promoted into
@@ -2961,8 +2961,8 @@ func (s *Scheduler) monitorMemory() {
 func (s *Scheduler) notifyScanDone(taskID, targetID, domain, status string, startedAt time.Time) {
 	duration := time.Since(startedAt)
 	var subdomains, alive, vulns, nuclei, backups, redirects, jsFindings int
-	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=?", targetID).Scan(&subdomains)
-	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1", targetID).Scan(&alive)
+	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0", targetID).Scan(&subdomains)
+	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1 AND COALESCE(catchall,0)=0", targetID).Scan(&alive)
 	s.db.QueryRow("SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND COALESCE(status,'finding')='finding' AND COALESCE(triage,'')<>'false_positive'", targetID).Scan(&vulns)
 	s.db.QueryRow("SELECT COUNT(*) FROM nuclei_findings WHERE target_id=? AND verification='verified'", targetID).Scan(&nuclei)
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_findings WHERE target_id=?", targetID).Scan(&backups)

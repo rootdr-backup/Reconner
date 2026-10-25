@@ -203,19 +203,38 @@ func (p *wildcardProfile) hasAnyWildcard() bool {
 	return false
 }
 
+// resolverServerAddress normalizes one resolver entry to a dialable host:port
+// address. The configured/derived lists carry BARE hosts ("1.1.1.1") for the
+// dnsx resolver file, and a bare host is NOT a valid dial target ("missing
+// port in address"). Port 53 is assumed when absent; entries that already have
+// a port keep it, and IPv6 literals get bracket-wrapped by JoinHostPort.
+func resolverServerAddress(server string) string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(server); err == nil {
+		return server
+	}
+	// A bracketed literal without a port ("[2606:4700::1111]") is not a valid
+	// SplitHostPort input; strip the brackets before re-joining.
+	host := strings.TrimPrefix(strings.TrimSuffix(server, "]"), "[")
+	return net.JoinHostPort(host, "53")
+}
+
 // singleServerResolver builds a resolver pinned to ONE upstream server so a
 // retry genuinely asks a DIFFERENT resolver — buildDNSResolver rotates per
 // connection, which is usually enough, but an explicit pin gives the retry
 // loop a guarantee.
 func singleServerResolver(server string) *net.Resolver {
-	res := &net.Resolver{
+	address := resolverServerAddress(server)
+	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			d := net.Dialer{Timeout: 4 * time.Second}
-			return d.DialContext(ctx, network, server)
+			return d.DialContext(ctx, network, address)
 		},
 	}
-	return res
 }
 
 // resolveProbeWithRetry resolves one probe name, retrying ambiguous answers
@@ -224,6 +243,9 @@ func singleServerResolver(server string) *net.Resolver {
 // that succeeds still wins — a resolver badly configured for the zone must not
 // mask an existing name.
 func resolveProbeWithRetry(r *net.Resolver, name string, servers []string, startOffset int) ([]net.IPAddr, probeVerdict) {
+	if r == nil {
+		r = net.DefaultResolver
+	}
 	attempts := len(servers)
 	if attempts == 0 {
 		attempts = 1 // system resolver only; r carries it
@@ -246,6 +268,10 @@ func resolveProbeWithRetry(r *net.Resolver, name string, servers []string, start
 			res = r
 		} else {
 			idx := (startOffset + attempt) % len(servers)
+			if strings.TrimSpace(servers[idx]) == "" {
+				sawAmbiguous = true
+				continue
+			}
 			res = singleServerResolver(servers[idx])
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)

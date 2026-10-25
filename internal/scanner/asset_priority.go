@@ -171,7 +171,7 @@ func loadAssetRows(ctx context.Context, db *database.DB, targetID string) (map[s
 	srows, err := db.QueryContext(ctx, `
 		SELECT subdomain, is_alive, status_code, COALESCE(page_title,''), COALESCE(server,''),
 		       COALESCE(technologies,'[]'), COALESCE(waf,''), COALESCE(source,'dns')
-		FROM subdomains WHERE target_id=?`, targetID)
+		FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0`, targetID)
 	if err != nil {
 		return nil, err
 	}

@@ -164,4 +164,24 @@ func TestRunCatchallPassEndToEnd(t *testing.T) {
 	if left != 3 { // apex + operator seed stay; the 401 auth wall is never marked, so it stays too
 		t.Fatalf("apex + seed + 401 services must survive, got %d", left)
 	}
+
+	// Idempotency: a second pass (next scan) must not change anything — the
+	// junk services are already gone and the marks already exist.
+	if err := scanner.runCatchallPass(ctx, tid, logFn); err != nil {
+		t.Fatalf("second runCatchallPass: %v", err)
+	}
+	var junkAgain int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE catchall=1 AND target_id=?`, tid).Scan(&junkAgain); err != nil {
+		t.Fatalf("count marked after rerun: %v", err)
+	}
+	if junkAgain != 5 {
+		t.Fatalf("second pass must be idempotent, marked=%d", junkAgain)
+	}
+	var leftAgain int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM http_services WHERE target_id=?`, tid).Scan(&leftAgain); err != nil {
+		t.Fatalf("count left services after rerun: %v", err)
+	}
+	if leftAgain != 3 {
+		t.Fatalf("second pass must not delete surviving services, got %d", leftAgain)
+	}
 }

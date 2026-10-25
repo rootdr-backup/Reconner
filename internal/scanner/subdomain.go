@@ -1100,7 +1100,8 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 
 func (s *SubdomainScanner) admittedSubdomainNames(ctx context.Context, targetID, domain string) []string {
 	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
-		WHERE target_id=? AND (COALESCE(ip,'')!='' OR COALESCE(source,'dns') IN ('seed','vhost'))
+		WHERE target_id=? AND COALESCE(catchall,0)=0
+		  AND (COALESCE(ip,'')!='' OR COALESCE(source,'dns') IN ('seed','vhost'))
 		ORDER BY subdomain`, targetID)
 	if err != nil {
 		return nil
@@ -1425,7 +1426,8 @@ func (s *SubdomainScanner) recursiveEnum(ctx context.Context, targetID, apex str
 // for recursive enumeration.
 func (s *SubdomainScanner) resolvingSubdomainsUnder(ctx context.Context, targetID, apex string, visited map[string]bool) []string {
 	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
-		WHERE target_id=? AND COALESCE(ip,'')!='' AND subdomain LIKE ?`, targetID, "%."+strings.ToLower(apex))
+		WHERE target_id=? AND COALESCE(catchall,0)=0 AND COALESCE(ip,'')!=''
+		  AND subdomain LIKE ?`, targetID, "%."+strings.ToLower(apex))
 	if err != nil {
 		return nil
 	}
