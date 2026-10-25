@@ -204,11 +204,12 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// false positives on it.
 	s.fingerprintHosts(ctx, targetID, logFn)
 
-	// Opt-in HTTP catch-all pass (config http_catchall_detection, default OFF):
-	// groups the 2xx fingerprints gathered above and marks wildcard catch-all
-	// fleets (redirect-to-apex / homepage clones) so they stop polluting the
-	// Hosts tab, reports and web modules. Reads stored data only — no requests.
-	if s.cfg != nil && s.cfg.HTTPCatchallDetection {
+	// Opt-in HTTP catch-all pass (global config http_catchall_detection, default
+	// OFF, overridable per target): groups the 2xx fingerprints gathered above and
+	// marks wildcard catch-all fleets (redirect-to-apex / homepage clones) so they
+	// stop polluting the Hosts tab, reports and web modules. Reads stored data
+	// only — no requests.
+	if s.catchallEnabledForTarget(ctx, targetID) {
 		if err := s.runCatchallPass(ctx, targetID, logFn); err != nil && ctx.Err() == nil {
 			logFn("warn", "http_probe", fmt.Sprintf("HTTP catch-all pass failed: %v", err))
 		}

@@ -371,20 +371,20 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 	var t models.Target
 	var lastScan, monitorLastRun *string
 	var tagsJSON, modulesJSON, scanHeadersJSON string
-	var monitorEnabled int
+	var monitorEnabled, catchallOverride int
 
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT id, domain, COALESCE(kind,'web'), COALESCE(description,''), COALESCE(tags,'[]'),
 			COALESCE(priority,'medium'), COALESCE(notes,''), COALESCE(status,'idle'), COALESCE(scan_status,'idle'), COALESCE(enabled_modules,'[]'),
 			last_scan_at, created_at, updated_at, COALESCE(subdomain_count,0), COALESCE(alive_host_count,0), COALESCE(finding_count,0),
 			COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,''), monitor_last_run,
-			COALESCE(scan_user_agent,''), COALESCE(scan_headers,'{}')
+			COALESCE(scan_user_agent,''), COALESCE(scan_headers,'{}'), COALESCE(catchall_detection,-1)
 		FROM targets WHERE id = ?
 	`, id).Scan(&t.ID, &t.Domain, &t.Kind, &t.Description, &tagsJSON, &t.Priority,
 		&t.Notes, &t.Status, &t.ScanStatus, &modulesJSON,
 		&lastScan, &t.CreatedAt, &t.UpdatedAt,
 		&t.SubdomainCount, &t.AliveHostCount, &t.FindingCount,
-		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun, &t.ScanUserAgent, &scanHeadersJSON)
+		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun, &t.ScanUserAgent, &scanHeadersJSON, &catchallOverride)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "target not found")
 		return
@@ -393,6 +393,17 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 	t.Tags = models.JSONToStringSlice(tagsJSON)
 	t.EnabledModules = models.JSONToStringSlice(modulesJSON)
 	t.MonitorEnabled = monitorEnabled == 1
+	switch catchallOverride {
+	case 1:
+		t.CatchallDetection = "on"
+		t.CatchallEffective = true
+	case 0:
+		t.CatchallDetection = "off"
+		t.CatchallEffective = false
+	default:
+		t.CatchallDetection = "inherit"
+		t.CatchallEffective = h.cfg != nil && h.cfg.HTTPCatchallDetection
+	}
 	t.ScanHeaders = map[string]string{}
 	_ = json.Unmarshal([]byte(scanHeadersJSON), &t.ScanHeaders)
 	if lastScan != nil {
@@ -421,6 +432,9 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		EnabledModules *[]string          `json:"enabled_modules"`
 		ScanUserAgent  *string            `json:"scan_user_agent"`
 		ScanHeaders    *map[string]string `json:"scan_headers"`
+		// Tri-state per-target override for the HTTP catch-all pass:
+		// "inherit" (NULL column, follow the global config), "on" (1), "off" (0).
+		CatchallDetection *string `json:"catchall_detection"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -432,10 +446,11 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	// omitted fields stay untouched; the old zero-value decoding silently erased
 	// enabled_modules (and, for API clients, metadata/identity) on unrelated edits.
 	var name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON string
+	var catchallOverride int
 	err := h.db.QueryRowContext(r.Context(), `SELECT COALESCE(name,''),COALESCE(description,''),COALESCE(tags,'[]'),
 		COALESCE(priority,'medium'),COALESCE(notes,''),COALESCE(exclude_scope,''),COALESCE(enabled_modules,'[]'),
-		COALESCE(scan_user_agent,''),COALESCE(scan_headers,'{}') FROM targets WHERE id=?`, id).
-		Scan(&name, &description, &tagsJSON, &priority, &notes, &excludeScope, &modulesJSON, &scanUserAgent, &scanHeadersJSON)
+		COALESCE(scan_user_agent,''),COALESCE(scan_headers,'{}'),COALESCE(catchall_detection,-1) FROM targets WHERE id=?`, id).
+		Scan(&name, &description, &tagsJSON, &priority, &notes, &excludeScope, &modulesJSON, &scanUserAgent, &scanHeadersJSON, &catchallOverride)
 	if err == sql.ErrNoRows {
 		h.writeError(w, http.StatusNotFound, "target not found")
 		return
@@ -480,6 +495,25 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.CatchallDetection != nil {
+		// Tri-state override; "inherit" clears the column back to NULL.
+		switch strings.ToLower(strings.TrimSpace(*req.CatchallDetection)) {
+		case "inherit":
+			catchallOverride = -1
+		case "on":
+			catchallOverride = 1
+		case "off":
+			catchallOverride = 0
+		default:
+			h.writeError(w, http.StatusBadRequest, "catchall_detection must be inherit, on, or off")
+			return
+		}
+	}
+	// nil ⇒ SQL NULL (inherit), otherwise the 0/1 override.
+	var catchallDB any
+	if catchallOverride >= 0 {
+		catchallDB = catchallOverride
+	}
 
 	rawScope := ""
 	if req.Domain != nil {
@@ -512,9 +546,10 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE targets SET
 			name = ?, description = ?, tags = ?, priority = ?, notes = ?,
-			exclude_scope = ?, enabled_modules = ?, scan_user_agent = ?, scan_headers = ?, updated_at = CURRENT_TIMESTAMP
+			exclude_scope = ?, enabled_modules = ?, scan_user_agent = ?, scan_headers = ?,
+			catchall_detection = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON, id)
+	`, name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON, catchallDB, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to update target")
 		return

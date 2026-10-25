@@ -162,6 +162,7 @@ func RunMigrations(db *DB) error {
 		alterJSFilesAddOldBody,
 		createWPSitesTable,
 		alterSubdomainsAddCatchall,
+		alterTargetsAddCatchallDetection,
 	}
 
 	for i, m := range migrations {
@@ -1083,6 +1084,11 @@ const alterSubdomainsAddSource = `ALTER TABLE subdomains ADD COLUMN source TEXT 
 // Human-facing surfaces (Hosts tab, reports, graph, adaptive wordlist) filter
 // COALESCE(catchall,0)=0. Written only when the opt-in config flag is set.
 const alterSubdomainsAddCatchall = `ALTER TABLE subdomains ADD COLUMN catchall INTEGER NOT NULL DEFAULT 0;`
+
+// alterTargetsAddCatchallDetection adds the per-target tri-state override of the
+// HTTP catch-all pass: NULL = inherit the global http_catchall_detection config,
+// 0 = force off for this target, 1 = force on.
+const alterTargetsAddCatchallDetection = `ALTER TABLE targets ADD COLUMN catchall_detection INTEGER DEFAULT NULL;`
 
 // ── P1 canonical lifecycle bridge ────────────────────────────────────────────
 // candidates is the AUTHORITATIVE lifecycle state source. state_version is a

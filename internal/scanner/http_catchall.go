@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -175,6 +176,19 @@ func qualifiesCatchallGroup(rows []catchallRow, apexTargets map[string]bool) (ma
 // apex from the targets row, fingerprints all stored 2xx services, marks the
 // wildcard fleet members (DNS-source rows only) and drops their
 // http_services rows so web modules never fetch them again.
+// catchallEnabledForTarget resolves the per-target tri-state override over the
+// global config default: NULL/absent column inherits http_catchall_detection,
+// 0 forces the pass off for this target, 1 forces it on. An unknown target or
+// query error falls back to the global default (the pass is best-effort).
+func (s *HTTPScanner) catchallEnabledForTarget(ctx context.Context, targetID string) bool {
+	global := s.cfg != nil && s.cfg.HTTPCatchallDetection
+	var override sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT catchall_detection FROM targets WHERE id=?`, targetID).Scan(&override); err != nil || !override.Valid {
+		return global
+	}
+	return override.Int64 != 0
+}
+
 func (s *HTTPScanner) runCatchallPass(ctx context.Context, targetID string, logFn LogFunc) error {
 	var apex string
 	if err := s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id=?`, targetID).Scan(&apex); err != nil || strings.TrimSpace(apex) == "" {

@@ -29,6 +29,11 @@ type Target struct {
 	MonitorLastRun       *time.Time        `json:"monitor_last_run" db:"monitor_last_run"`
 	ScanUserAgent        string            `json:"scan_user_agent" db:"scan_user_agent"`
 	ScanHeaders          map[string]string `json:"scan_headers" db:"scan_headers"`
+	// CatchallDetection is the per-target override of the HTTP catch-all pass:
+	// "inherit" (follow the global http_catchall_detection setting), "on" or
+	// "off". CatchallEffective is the resolved state the next scan will use.
+	CatchallDetection string `json:"catchall_detection"`
+	CatchallEffective bool   `json:"catchall_effective"`
 }
 
 // Asset is one individually-scannable entry of a target (a domain, IP, CIDR, or

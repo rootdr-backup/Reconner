@@ -516,6 +516,7 @@ export default function TargetDetail() {
   const [diffView, setDiffView] = useState<{ url: string; kind: 'css' | 'js' } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
+  const [catchallSaving, setCatchallSaving] = useState(false)
   const [paths, setPaths] = useState<AttackPath[]>([])
   const [lastFailedTask, setLastFailedTask] = useState<Task | null>(null)
   const [resuming, setResuming] = useState(false)
@@ -823,6 +824,16 @@ export default function TargetDetail() {
     } catch { /* ignore */ } finally { setMonitorSaving(false) }
   }
 
+  const saveCatchall = async (value: 'inherit' | 'on' | 'off') => {
+    if (!id) return
+    setCatchallSaving(true)
+    try {
+      await targetsApi.update(id, { catchall_detection: value })
+      // Refresh so catchall_effective reflects the global config on "inherit".
+      targetsApi.get(id).then(setTarget).catch(() => {})
+    } catch { /* ignore */ } finally { setCatchallSaving(false) }
+  }
+
   // Network targets' actual results (Nuclei/Vulns/Candidates) used to sit
   // BELOW monitoring settings, attack paths, the auth-header form and the
   // identities/authorization panels — none of which are commonly used for a
@@ -1016,6 +1027,31 @@ export default function TargetDetail() {
             If a new subdomain/asset or change is found, you're notified and <b>nuclei + backup discovery</b> auto-run over the new surface.
           </p>
         )}
+      </div>
+
+      {/* HTTP catch-all detection override */}
+      <div className="card p-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium">HTTP catch-all detection</span>
+          <select
+            value={target.catchall_detection ?? 'inherit'}
+            onChange={e => saveCatchall(e.target.value as 'inherit' | 'on' | 'off')}
+            className="bg-surface-alt border border-border rounded px-2 py-1 text-sm"
+          >
+            <option value="inherit">Inherit global</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+          {catchallSaving && <span className="text-xs text-text-muted">Saving…</span>}
+          <span className={cn('text-xs', target.catchall_effective ? 'text-accent' : 'text-text-muted')}>
+            Effective: {target.catchall_effective ? 'On' : 'Off'}
+          </span>
+        </div>
+        <p className="w-full text-[11px] text-text-muted mt-1">
+          Marks fleets that redirect to the apex or clone the apex homepage as catch-all junk (hidden from Hosts,
+          reports and later modules). The global default is off; the per-target override applies from the next scan.
+          Seeds and vhost rows are never touched.
+        </p>
       </div>
 
       {/* Attack paths (correlation / intelligence layer) */}

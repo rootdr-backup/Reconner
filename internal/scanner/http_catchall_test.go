@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/recon-platform/internal/config"
 )
 
 func TestHostFromServiceURL(t *testing.T) {
@@ -183,5 +185,48 @@ func TestRunCatchallPassEndToEnd(t *testing.T) {
 	}
 	if leftAgain != 3 {
 		t.Fatalf("second pass must not delete surviving services, got %d", leftAgain)
+	}
+}
+
+// TestCatchallEnabledForTargetMatrix proves the tri-state resolution order:
+// a per-target override always wins; NULL (inherit) follows the global config;
+// a missing target falls back to the global config too.
+func TestCatchallEnabledForTargetMatrix(t *testing.T) {
+	db, tid := testDB(t)
+	ctx := context.Background()
+
+	globalOn := &HTTPScanner{db: db, cfg: &config.Config{HTTPCatchallDetection: true}}
+	globalOff := &HTTPScanner{db: db, cfg: &config.Config{HTTPCatchallDetection: false}}
+
+	setOverride := func(value any) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE targets SET catchall_detection=? WHERE id=?`, value, tid); err != nil {
+			t.Fatalf("set catchall_detection=%v: %v", value, err)
+		}
+	}
+
+	setOverride(nil) // inherit
+	if !globalOn.catchallEnabledForTarget(ctx, tid) {
+		t.Fatal("inherit must follow global=on")
+	}
+	if globalOff.catchallEnabledForTarget(ctx, tid) {
+		t.Fatal("inherit must follow global=off")
+	}
+
+	setOverride(1) // force on, even though the global is off
+	if !globalOff.catchallEnabledForTarget(ctx, tid) {
+		t.Fatal("override=on must beat global=off")
+	}
+
+	setOverride(0) // force off, even though the global is on
+	if globalOn.catchallEnabledForTarget(ctx, tid) {
+		t.Fatal("override=off must beat global=on")
+	}
+
+	if !globalOn.catchallEnabledForTarget(ctx, "missing-target") {
+		t.Fatal("missing target must fall back to the global config")
+	}
+	if globalOff.catchallEnabledForTarget(ctx, "missing-target") {
+		t.Fatal("missing target must fall back to the global config (off)")
 	}
 }

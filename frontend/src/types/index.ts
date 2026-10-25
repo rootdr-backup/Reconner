@@ -132,6 +132,8 @@ export interface Target {
   monitor_last_run: string | null
   scan_user_agent?: string
   scan_headers?: Record<string, string>
+  catchall_detection?: 'inherit' | 'on' | 'off'
+  catchall_effective?: boolean
 }
 
 export interface Subdomain {
