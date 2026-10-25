@@ -101,6 +101,7 @@ type scanConfigPayload struct {
 	DNSResolvers              []string `json:"dns_resolvers"`
 	SubdomainRecursionDepth   int      `json:"subdomain_recursion_depth"`
 	SubdomainRecursionEnabled bool     `json:"subdomain_recursion_enabled"`
+	HTTPCatchallDetection     bool     `json:"http_catchall_detection"`
 	NucleiExcludeTemplateIDs  []string `json:"nuclei_exclude_template_ids"`
 	NucleiExtraTemplateRepos  []string `json:"nuclei_extra_template_repos"`
 	MonitorModules            []string `json:"monitor_modules"`
@@ -120,6 +121,7 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		DNSResolvers:              h.cfg.DNSResolvers,
 		SubdomainRecursionDepth:   h.cfg.SubdomainRecursionDepth,
 		SubdomainRecursionEnabled: h.cfg.SubdomainRecursionEnabled,
+		HTTPCatchallDetection:     h.cfg.HTTPCatchallDetection,
 		NucleiExcludeTemplateIDs:  h.cfg.NucleiExcludeTemplateIDs,
 		NucleiExtraTemplateRepos:  h.cfg.NucleiExtraTemplateRepos,
 		MonitorModules:            h.cfg.MonitorModules,
@@ -137,6 +139,7 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		DNSResolvers              *[]string `json:"dns_resolvers"`
 		SubdomainRecursionDepth   *int      `json:"subdomain_recursion_depth"`
 		SubdomainRecursionEnabled *bool     `json:"subdomain_recursion_enabled"`
+		HTTPCatchallDetection     *bool     `json:"http_catchall_detection"`
 		NucleiExcludeTemplateIDs  *[]string `json:"nuclei_exclude_template_ids"`
 		NucleiExtraTemplateRepos  *[]string `json:"nuclei_extra_template_repos"`
 		MonitorModules            *[]string `json:"monitor_modules"`
@@ -173,6 +176,10 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 	if body.SubdomainRecursionEnabled != nil {
 		// No clamping — a bool is a bool. Omitted ⇒ unchanged, like the other knobs.
 		h.cfg.SubdomainRecursionEnabled = *body.SubdomainRecursionEnabled
+	}
+	if body.HTTPCatchallDetection != nil {
+		// Opt-in-by-default HTTP catch-all grouping; omitted ⇒ unchanged.
+		h.cfg.HTTPCatchallDetection = *body.HTTPCatchallDetection
 	}
 	if body.NucleiExcludeTemplateIDs != nil {
 		h.cfg.NucleiExcludeTemplateIDs = clean(*body.NucleiExcludeTemplateIDs)

@@ -40,7 +40,7 @@ export default function System() {
   const [drafts, setDrafts] = useState<Record<string,string>>({})
   const [savingKeys, setSavingKeys] = useState(false)
   const [scanCfg, setScanCfg] = useState<ScanConfig | null>(null)
-  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; enabled: boolean; excludeIDs: string; repos: string; monitor: string[] } | null>(null)
+  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; enabled: boolean; catchall: boolean; excludeIDs: string; repos: string; monitor: string[] } | null>(null)
   const [savingScanCfg, setSavingScanCfg] = useState(false)
   const { addToast } = useUIStore()
   const isAdmin = useAuthStore(s => s.user?.role === 'admin')
@@ -62,6 +62,7 @@ export default function System() {
           resolvers: (sc.dns_resolvers || []).join('\n'),
           depth: sc.subdomain_recursion_depth || 4,
           enabled: sc.subdomain_recursion_enabled !== false,
+          catchall: sc.http_catchall_detection === true,
           excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
           repos: (sc.nuclei_extra_template_repos || []).join('\n'),
           // Empty on the wire ⇒ the built-in default watch set applies.
@@ -115,6 +116,7 @@ export default function System() {
         dns_resolvers: splitLines(scanDraft.resolvers),
         subdomain_recursion_depth: scanDraft.depth,
         subdomain_recursion_enabled: scanDraft.enabled,
+        http_catchall_detection: scanDraft.catchall,
         nuclei_exclude_template_ids: splitLines(scanDraft.excludeIDs),
         nuclei_extra_template_repos: splitLines(scanDraft.repos),
         monitor_modules: scanDraft.monitor,
@@ -124,6 +126,7 @@ export default function System() {
         resolvers: (res.dns_resolvers || []).join('\n'),
         depth: res.subdomain_recursion_depth || 4,
         enabled: res.subdomain_recursion_enabled !== false,
+        catchall: res.http_catchall_detection === true,
         excludeIDs: (res.nuclei_exclude_template_ids || []).join('\n'),
         repos: (res.nuclei_extra_template_repos || []).join('\n'),
         monitor: (res.monitor_modules && res.monitor_modules.length ? res.monitor_modules : DEFAULT_WATCH_MODULES),
@@ -342,6 +345,12 @@ export default function System() {
                     </label>
                   </div>
                   <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). Off or depth 1 ⇒ apex only.</p>
+                  <label className="flex items-center gap-1.5 text-xs font-medium mt-2">
+                    <input type="checkbox" className="accent-accent" checked={scanDraft.catchall}
+                      onChange={e => setScanDraft(d => d && ({ ...d, catchall: e.target.checked }))} />
+                    Mark HTTP catch-all subdomains
+                  </label>
+                  <p className="text-[10px] text-text-muted mt-1">Optional, off by default. After HTTP probing, groups 2xx hosts that all serve one wildcard page — redirect-to-apex fleets or homepage clones (the "junk.git.target" catch-all case) — and hides them from the Hosts tab, reports, graph and web modules. Reads stored responses only, no extra requests. Seeds and vhosts are never touched.</p>
                 </div>
                 <div>
                   <label className="text-xs font-medium">Nuclei — exclude template IDs <span className="text-text-muted">(one per line)</span></label>

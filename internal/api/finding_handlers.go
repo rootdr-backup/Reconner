@@ -64,7 +64,7 @@ func (h *Handler) handleListSubdomains(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, target_id, subdomain, ip, is_alive, status_code, page_title,
 		has_https, has_http, response_time_ms, technologies, server, framework, cdn, waf,
 		COALESCE(source,'dns'), last_seen, created_at
-		FROM subdomains WHERE target_id = ?`
+		FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0`
 	args := []any{id}
 
 	if alive == "true" {
@@ -79,7 +79,7 @@ func (h *Handler) handleListSubdomains(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total int
-	countQuery := "SELECT COUNT(*) FROM subdomains WHERE target_id = ?"
+	countQuery := "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0"
 	countArgs := []any{id}
 	if alive == "true" {
 		countQuery += " AND is_alive = 1"

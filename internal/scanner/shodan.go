@@ -104,7 +104,7 @@ func (s *ShodanScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 // gatherIPs returns a map of IP → representative hostname for resolved subdomains.
 func (s *ShodanScanner) gatherIPs(ctx context.Context, targetID string) map[string]string {
 	out := map[string]string{}
-	rows, err := s.db.QueryContext(ctx, `SELECT subdomain, ip FROM subdomains WHERE target_id=? AND ip != ''`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT subdomain, ip FROM subdomains WHERE target_id=? AND ip != '' AND COALESCE(catchall,0)=0`, targetID)
 	if err != nil {
 		return out
 	}

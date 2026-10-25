@@ -53,9 +53,10 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	logFn("info", "http_probe", "Loading subdomains for HTTP probing...")
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT subdomain FROM subdomains 
+		SELECT subdomain FROM subdomains
 		WHERE target_id = ?
 		  AND (COALESCE(ip,'') != '' OR COALESCE(source,'dns') IN ('seed','vhost'))
+		  AND COALESCE(catchall,0) = 0
 		ORDER BY subdomain
 	`, targetID)
 	if err != nil {
@@ -202,6 +203,16 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// skip a stock-CMS host (see loadCMSSkipHosts) instead of wasting time / raising
 	// false positives on it.
 	s.fingerprintHosts(ctx, targetID, logFn)
+
+	// Opt-in HTTP catch-all pass (config http_catchall_detection, default OFF):
+	// groups the 2xx fingerprints gathered above and marks wildcard catch-all
+	// fleets (redirect-to-apex / homepage clones) so they stop polluting the
+	// Hosts tab, reports and web modules. Reads stored data only — no requests.
+	if s.cfg != nil && s.cfg.HTTPCatchallDetection {
+		if err := s.runCatchallPass(ctx, targetID, logFn); err != nil && ctx.Err() == nil {
+			logFn("warn", "http_probe", fmt.Sprintf("HTTP catch-all pass failed: %v", err))
+		}
+	}
 
 	// Authenticated-session preflight: validate configured identities NOW, at the
 	// front of the scan, so an expired login is surfaced before every downstream

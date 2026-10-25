@@ -240,6 +240,16 @@ type Config struct {
 	// Default true so an upgrade never silently changes scan behavior. Set via
 	// the System → Scanning panel, next to the depth field.
 	SubdomainRecursionEnabled bool `json:"subdomain_recursion_enabled"`
+	// HTTPCatchallDetection is OPT-IN (default false). When enabled, the end of
+	// the HTTP-probe module groups stored 2xx http_services fingerprints and
+	// marks subdomains that serve a wildcard catch-all page — either a redirect
+	// fleet aimed at the apex, or >=5 live hosts byte-identical to the apex
+	// homepage. Marked hosts are excluded from the Hosts tab, reports, graph and
+	// wordlist learning; their rows stay stored (marked, not deleted: seeds,
+	// vhosts and anything the operator vouched for are never touched). The pass
+	// reads already-stored responses and sends NO extra network requests; it
+	// costs under a second. Toggle via the System → Scanning panel.
+	HTTPCatchallDetection bool `json:"http_catchall_detection"`
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime

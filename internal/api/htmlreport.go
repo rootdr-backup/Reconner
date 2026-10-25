@@ -46,8 +46,8 @@ func (h *Handler) handleGenerateReportHTML(w http.ResponseWriter, r *http.Reques
 		h.db.QueryRowContext(ctx, q, id).Scan(&n)
 		counts[key] = n
 	}
-	countInto("subs", "SELECT COUNT(*) FROM subdomains WHERE target_id=?")
-	countInto("alive", "SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1")
+	countInto("subs", "SELECT COUNT(*) FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0")
+	countInto("alive", "SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1 AND COALESCE(catchall,0)=0")
 	countInto("hosts", "SELECT COUNT(*) FROM http_services WHERE target_id=? AND COALESCE(source,'probe')='probe'")
 	countInto("js", "SELECT COUNT(*) FROM js_findings WHERE target_id=?")
 	countInto("params", "SELECT COUNT(*) FROM parameters WHERE target_id=? AND is_reflected=1")
@@ -126,7 +126,7 @@ func (h *Handler) handleGenerateReportHTML(w http.ResponseWriter, r *http.Reques
 
 	h.section(ctx, &b, id, "subs", "All Subdomains", `
 		SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,''), COALESCE(server,'')
-		FROM subdomains WHERE target_id=? ORDER BY is_alive DESC, subdomain LIMIT 5000`,
+		FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0 ORDER BY is_alive DESC, subdomain LIMIT 5000`,
 		[]string{"Subdomain", "Alive", "IP", "Server"}, -1)
 
 	b.WriteString(reportFoot())

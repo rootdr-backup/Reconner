@@ -398,7 +398,7 @@ func (h *Handler) pdfReconSections(r *http.Request, p *pdfBuilder, id string) {
 		p.rule()
 	}
 
-	section("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? ORDER BY subdomain LIMIT 1500`, 3)
+	section("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0 ORDER BY subdomain LIMIT 1500`, 3)
 	section("Live HTTP Hosts", `SELECT url, status_code, COALESCE(title,'') FROM http_services WHERE target_id=? AND COALESCE(source,'probe')='probe' ORDER BY url LIMIT 1000`, 3)
 	section("Reflected Parameters", `SELECT url, parameter FROM parameters WHERE target_id=? AND is_reflected=1 ORDER BY url LIMIT 800`, 2)
 	section("Open Redirects", `SELECT url, redirect_to FROM open_redirect_findings WHERE target_id=? AND COALESCE(status,'finding')='finding' ORDER BY url LIMIT 500`, 2)

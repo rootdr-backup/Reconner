@@ -161,6 +161,7 @@ func RunMigrations(db *DB) error {
 		alterJSFilesAddOldHash,
 		alterJSFilesAddOldBody,
 		createWPSitesTable,
+		alterSubdomainsAddCatchall,
 	}
 
 	for i, m := range migrations {
@@ -1074,6 +1075,14 @@ CREATE TABLE IF NOT EXISTS subdomains (
 // NOT resolve in DNS — found by the virtual-host scan). Lets the UI flag vhost
 // hosts, which are often internal/forgotten and high-value.
 const alterSubdomainsAddSource = `ALTER TABLE subdomains ADD COLUMN source TEXT DEFAULT 'dns';`
+
+// catchall marks subdomains whose HTTP responses match the target's wildcard
+// catch-all fleet (redirect-to-apex groups or homepage-content clones). Rows are
+// marked, never deleted: operator seeds, vhost findings and previously-alive
+// evidence stay untouched, and resurfaces of the same page are idempotent.
+// Human-facing surfaces (Hosts tab, reports, graph, adaptive wordlist) filter
+// COALESCE(catchall,0)=0. Written only when the opt-in config flag is set.
+const alterSubdomainsAddCatchall = `ALTER TABLE subdomains ADD COLUMN catchall INTEGER NOT NULL DEFAULT 0;`
 
 // ── P1 canonical lifecycle bridge ────────────────────────────────────────────
 // candidates is the AUTHORITATIVE lifecycle state source. state_version is a

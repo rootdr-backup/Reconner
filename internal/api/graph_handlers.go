@@ -67,7 +67,7 @@ func (h *Handler) buildGraph(r *http.Request, targetID string) ([]graphNode, []g
 	// Subdomains ↔ IPs (co-location reveals pivot opportunities).
 	ipHosts := map[string][]string{}
 	subTech := map[string]string{}
-	rows, err := h.db.QueryContext(ctx, `SELECT subdomain, ip, technologies FROM subdomains WHERE target_id = ? AND is_alive = 1`, targetID)
+	rows, err := h.db.QueryContext(ctx, `SELECT subdomain, ip, technologies FROM subdomains WHERE target_id = ? AND is_alive = 1 AND COALESCE(catchall,0) = 0`, targetID)
 	if err == nil {
 		for rows.Next() {
 			var sub, ip, techs string

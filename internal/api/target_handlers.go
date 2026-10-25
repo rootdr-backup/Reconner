@@ -1561,8 +1561,8 @@ func (h *Handler) handleTargetStats(w http.ResponseWriter, r *http.Request) {
 		query string
 		args  []any
 	}{
-		{&stats.Subdomains, "SELECT COUNT(*) FROM subdomains WHERE target_id = ?", []any{id}},
-		{&stats.AliveHosts, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1", []any{id}},
+		{&stats.Subdomains, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", []any{id}},
+		{&stats.AliveHosts, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1 AND COALESCE(catchall,0) = 0", []any{id}},
 		{&stats.HTTPServices, "SELECT COUNT(*) FROM http_services WHERE target_id = ?", []any{id}},
 		{&stats.JSFiles, "SELECT COUNT(*) FROM js_files WHERE target_id = ?", []any{id}},
 		{&stats.JSFindings, "SELECT COUNT(*) FROM js_findings WHERE target_id = ?", []any{id}},
@@ -1974,7 +1974,7 @@ func (h *Handler) mdReconSections(r *http.Request, b *strings.Builder, id string
 		}
 	}
 
-	rowsList("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? ORDER BY subdomain LIMIT 5000`, 3)
+	rowsList("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0 ORDER BY subdomain LIMIT 5000`, 3)
 	rowsList("Live HTTP Hosts", `SELECT url, status_code, COALESCE(title,'') FROM http_services WHERE target_id=? AND COALESCE(source,'probe')='probe' ORDER BY url LIMIT 3000`, 3)
 	rowsList("Reflected Parameters", `SELECT url, parameter FROM parameters WHERE target_id=? AND is_reflected=1 ORDER BY url LIMIT 2000`, 2)
 	rowsList("Open Redirects", `SELECT url, redirect_to FROM open_redirect_findings WHERE target_id=? ORDER BY url`, 2)
@@ -2014,7 +2014,7 @@ func (h *Handler) handleExportTarget(w http.ResponseWriter, r *http.Request) {
 		writer := csv.NewWriter(w)
 		writer.Write([]string{"type", "url", "details"})
 
-		rows, _ := h.db.QueryContext(r.Context(), "SELECT url, status_code FROM subdomains WHERE target_id = ?", id)
+		rows, _ := h.db.QueryContext(r.Context(), "SELECT url, status_code FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", id)
 		if rows != nil {
 			for rows.Next() {
 				var url string
@@ -2029,7 +2029,7 @@ func (h *Handler) handleExportTarget(w http.ResponseWriter, r *http.Request) {
 	default:
 		export := map[string]any{"target": domain}
 
-		rows, _ := h.db.QueryContext(r.Context(), "SELECT subdomain, ip FROM subdomains WHERE target_id = ?", id)
+		rows, _ := h.db.QueryContext(r.Context(), "SELECT subdomain, ip FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", id)
 		if rows != nil {
 			var subs []map[string]string
 			for rows.Next() {
