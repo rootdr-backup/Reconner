@@ -62,6 +62,30 @@ func subdomainBruteEnabled(ctx context.Context) bool {
 	return true
 }
 
+type subRecursionKey string
+
+const ctxSubRecursion subRecursionKey = "subdomain_recursion"
+
+// WithSubdomainRecursion toggles RECURSIVE subdomain enumeration — after the
+// apex is enumerated, each resolving subdomain is itself enumerated as a new
+// sub-apex, down to the configured depth. It multiplies DNS query volume by
+// roughly the branching factor per level, which under public resolvers invites
+// rate-limiting (and the admission gate then dropping real hosts). It is a
+// deliberate depth tool, exposed as its own scan toggle, not a default.
+func WithSubdomainRecursion(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxSubRecursion, enabled)
+}
+
+// subdomainRecursionEnabled is fail-closed: recursion is OFF unless the scan
+// explicitly opts in. This restores the pre-recursion default (apex-only) so an
+// ordinary scan stays fast and is never starved by a throttled recursive pass.
+func subdomainRecursionEnabled(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxSubRecursion).(bool); ok {
+		return v
+	}
+	return false
+}
+
 type asnDiscoveryKey string
 
 const ctxASNDiscovery asnDiscoveryKey = "asn_discovery"

@@ -395,6 +395,11 @@ func nucleiExcludeIDFlag(cfg *config.Config) []string {
 			}
 		}
 	}
+	if len(ids) == 0 {
+		// Never emit a bare `-eid ""`: an empty exclude value is not a no-op to
+		// every nuclei version's flag parser, and there is nothing to exclude.
+		return nil
+	}
 	sort.Strings(ids)
 	return []string{"-eid", strings.Join(ids, ",")}
 }

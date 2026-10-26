@@ -639,7 +639,7 @@ var ErrInvalidModuleSelection = errors.New("invalid module selection")
 func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "recursive_subdomain", "single_endpoint", "prioritized", "classic_order",
 		"network_fast", "network_normal", "network_deep", "full_ports",
 		// Per-scan WordPress credential-audit authorization token (sent by the WP
 		// Scanner brute-force tick). It is a passthrough flag consumed by the run
@@ -720,7 +720,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 	}
 	for _, token := range []string{
 		"speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
-		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
+		"asn_discovery", "no_asn_discovery", "recursive_subdomain", "single_endpoint", "prioritized", "classic_order",
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
@@ -1615,6 +1615,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	speed := scanner.SpeedNormal
 	subBrute := true           // slow permutation/brute phase of subdomain enum (default on)
 	asnDiscovery := false      // explicit opt-in only after program-scope/WHOIS verification
+	subRecursion := false      // recursive subdomain enum (opt-in: multiplies DNS volume)
 	singleEndpoint := false    // confine the whole scan to the seed URL(s) and paths under them
 	wpCredAuthorized := false  // operator-confirmed authorization for the active WordPress credential audit
 	netCredAuthorized := false // operator-confirmed authorization for the active network credential audit
@@ -1653,6 +1654,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			asnDiscovery = true
 		case "no_asn_discovery": // accepted for compatibility with the short-lived preview toggle
 			asnDiscovery = false
+		case "recursive_subdomain":
+			subRecursion = true
 		case "single_endpoint":
 			singleEndpoint = true
 		case "wp_cred_authorized":
@@ -1672,6 +1675,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithWebSpeed(ctx, speed)
 	ctx = scanner.WithSubdomainBrute(ctx, subBrute)
 	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
+	ctx = scanner.WithSubdomainRecursion(ctx, subRecursion)
 	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
 	ctx = scanner.WithWPCredAuthorized(ctx, wpCredAuthorized)
 	ctx = scanner.WithNetCredAuthorized(ctx, netCredAuthorized)
