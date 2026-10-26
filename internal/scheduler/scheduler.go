@@ -3009,9 +3009,18 @@ func (s *Scheduler) runDueMonitors() {
 			OR datetime(monitor_last_run, '+' || MAX(1,COALESCE(monitor_interval_hours,12)) || ' hours') <= datetime('now')
 		)
 		AND NOT EXISTS (
-			SELECT 1 FROM tasks mt WHERE mt.target_id=targets.id AND mt.type=? AND (
+			-- Do not auto-start a monitor/re-probe on a target that has ANY active
+			-- task (of any type) or that saw task activity in the last 30 minutes.
+			-- Previously this only looked at recent monitor_watch tasks, so a manual
+			-- scan that the operator CANCELLED (or that just finished) would be
+			-- immediately followed by a monitor re-probe within a minute — the
+			-- reported "cancelling a scan just makes it re-probe". A manual cancel
+			-- now genuinely stops the target's activity; the monitor resumes on its
+			-- normal interval, not instantly.
+			SELECT 1 FROM tasks mt WHERE mt.target_id=targets.id AND (
 				mt.status IN ('pending','running','paused','interrupted')
-				OR mt.created_at >= datetime('now','-30 minutes')
+				OR (mt.type=? AND mt.created_at >= datetime('now','-30 minutes'))
+				OR (mt.finished_at IS NOT NULL AND mt.finished_at >= datetime('now','-30 minutes'))
 			)
 		)
 	`, monitorWatchType)

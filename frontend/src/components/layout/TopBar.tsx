@@ -219,7 +219,7 @@ export const TopBar = () => {
             </button>
 
             {open && (
-              <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-80 max-h-[70dvh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-50">
+              <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-80 max-h-[70dvh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-[110]">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
                   <span className="text-sm font-semibold">Notifications</span>
                   {unread > 0 && (
@@ -267,7 +267,7 @@ export const TopBar = () => {
         </div>
       </header>
 
-      <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed bottom-5 right-5 z-[110] flex flex-col gap-2 pointer-events-none">
         {toasts.map(t => (
           <div key={t.id} className={cn('flex items-start gap-3 px-4 py-3 rounded-lg border shadow-lg text-sm pointer-events-auto min-w-64 max-w-sm',
             t.type === 'success' && 'bg-surface-3 border-severity-low/30 text-severity-low',
