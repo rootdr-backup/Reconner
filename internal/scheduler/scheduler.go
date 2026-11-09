@@ -1455,18 +1455,47 @@ func baseScanWatchdog(cfg *config.Config) time.Duration {
 // maxScanWatchdog so a wedged module still can't hold its slot indefinitely.
 const maxScanWatchdog = 96 * time.Hour
 
-func effectiveWatchdog(cfg *config.Config, knownSubdomains int) time.Duration {
+// scanSurface is every live-size signal effectiveWatchdog scales against.
+// Subdomain count alone starved the headroom for the single most common
+// bug-bounty shape: ONE host (subdomains stays 1) with a huge web surface —
+// tens of thousands of URLs/parameters from crawling, JS analysis, and param
+// mining. That target got ZERO bonus and sat at the flat 24h floor, which
+// nuclei/XSS/SQLi/paramfuzz on a real large app can legitimately exceed —
+// the reported "it just stops working after about a day".
+type scanSurface struct {
+	subdomains   int
+	httpServices int // live, probed URLs — the web-module workload driver
+	parameters   int // discovered insertion points — the fuzzing workload driver
+}
+
+func effectiveWatchdog(cfg *config.Config, surface scanSurface) time.Duration {
 	d := baseScanWatchdog(cfg)
-	if knownSubdomains > 0 {
-		// +3h per 1000 known subdomains — a coarse, deliberately conservative
-		// proxy for "this target's surface is large", not a precise estimate.
-		bonus := time.Duration(knownSubdomains/1000) * 3 * time.Hour
-		d += bonus
+	// Each signal is a coarse, deliberately conservative proxy for "this
+	// target's surface is large" on its own module family; take the LARGEST
+	// bonus rather than summing them, since they are strongly correlated (more
+	// hosts tend to mean more URLs tend to mean more parameters) and summing
+	// would double-count the same underlying size.
+	bonus := watchdogBonus(surface.subdomains, 1000)
+	if b := watchdogBonus(surface.httpServices, 2000); b > bonus {
+		bonus = b
 	}
+	if b := watchdogBonus(surface.parameters, 5000); b > bonus {
+		bonus = b
+	}
+	d += bonus
 	if d > maxScanWatchdog {
 		d = maxScanWatchdog
 	}
 	return d
+}
+
+// watchdogBonus is +3h for every `per` units of count — e.g. 3h per 1000
+// subdomains, or per 2000 live URLs, or per 5000 parameters.
+func watchdogBonus(count, per int) time.Duration {
+	if count <= 0 || per <= 0 {
+		return 0
+	}
+	return time.Duration(count/per) * 3 * time.Hour
 }
 
 // currentSubdomainCount reads the live discovery table instead of relying only
@@ -1484,10 +1513,32 @@ func (s *Scheduler) currentSubdomainCount(targetID string, previous int) int {
 	return current
 }
 
+// currentCount is currentSubdomainCount's sibling for any other discovery
+// table (http_services, parameters, …): re-read the live count before each
+// phase, never letting it shrink below the previous observation (a transient
+// read or an intra-scan prune should never shrink the adaptive watchdog
+// headroom this feeds).
+func (s *Scheduler) currentCount(table, targetID string, previous int) int {
+	var current int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE target_id = ?`, targetID).Scan(&current); err != nil {
+		return previous
+	}
+	if current < previous {
+		return previous
+	}
+	return current
+}
+
 func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var targetID, modulesJSON, taskStatus, kind, taskType, scopeOverride string
 	var target struct{ Domain string }
 	var knownSubdomains int
+	// surface carries the per-phase adaptive-watchdog signals (subdomains, live
+	// URLs, discovered parameters); refreshed from the live tables before each
+	// phase (see currentScanSurface). Starts from the same cached subdomain
+	// count as knownSubdomains; the other two start at zero and are read live
+	// on the first phase.
+	var surface scanSurface
 
 	err := s.db.QueryRow(`
 		SELECT t.target_id, t.modules, t.status, COALESCE(t.type,''), COALESCE(t.scope_override,''), tgt.domain, COALESCE(tgt.kind,'web'), COALESCE(tgt.subdomain_count,0)
@@ -1499,6 +1550,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		s.logger.Info("Skipping task: target/task no longer exists", "task_id", taskID)
 		return
 	}
+	surface.subdomains = knownSubdomains
 
 	// The task context carries operator/shutdown cancellation. A separate
 	// watchdog is attached to each phase below, so forward progress resets the
@@ -1812,6 +1864,18 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var taskErr error
 	lastProgress := 0
 	handled := make(map[int]bool)
+	// timedOutPhases counts how many phases in THIS task have exhausted their
+	// watchdog. A single slow-but-healthy phase on a large target (see
+	// scanSurface) no longer aborts every module scheduled after it — it is
+	// recorded and the scan moves on, so nuclei/XSS/SQLi still get to run even
+	// when an earlier phase (crawling, paramfuzz, dirsearch, …) legitimately
+	// took longer than the floor. maxPhaseTimeouts is the backstop: if the
+	// target itself is unresponsive, every phase will time out in turn, and
+	// without a cap the scan would keep retrying (each with its own fresh,
+	// adaptively-large watchdog) for as long as modules remain, holding its
+	// scheduler concurrency slot the whole time.
+	timedOutPhases := 0
+	const maxPhaseTimeouts = 3
 	for i, module := range modules {
 		if ctx.Err() != nil {
 			break
@@ -1851,11 +1915,17 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		s.checkMemoryPressure(taskID, logFn)
 
 		// Re-read live discovery growth before each phase. This fixes first-pass
-		// scans where the target started with zero known subdomains but enumeration
-		// discovered thousands: later phases now receive the same adaptive headroom
-		// as a repeat scan.
+		// scans where the target started with zero known subdomains/URLs/
+		// parameters but enumeration/crawling discovered thousands: later phases
+		// (nuclei, XSS, SQLi, paramfuzz — the heaviest ones) now receive the same
+		// adaptive headroom as a repeat scan, including on a single-host target
+		// where the subdomain count never grows past 1 but the URL/parameter
+		// surface does.
 		knownSubdomains = s.currentSubdomainCount(targetID, knownSubdomains)
-		watchdog := effectiveWatchdog(s.cfg, knownSubdomains)
+		surface.subdomains = knownSubdomains
+		surface.httpServices = s.currentCount("http_services", targetID, surface.httpServices)
+		surface.parameters = s.currentCount("parameters", targetID, surface.parameters)
+		watchdog := effectiveWatchdog(s.cfg, surface)
 
 		// Register a per-phase context so the operator can SKIP just this phase and
 		// only a phase that stops making forward progress can exhaust the watchdog.
@@ -1898,7 +1968,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			if timedOut {
 				taskErr = fmt.Errorf("prioritized phase %v exceeded its %s watchdog and was stopped; completed results were saved", group, watchdog)
 				logFn("error", "scheduler", taskErr.Error())
-				break
+				timedOutPhases++
+				if timedOutPhases >= maxPhaseTimeouts {
+					logFn("error", "scheduler", fmt.Sprintf("%d phase(s) have now exceeded their watchdog in this scan — stopping instead of spending more wall-clock time on an apparently unresponsive target.", timedOutPhases))
+					break
+				}
+				continue
 			}
 			for _, result := range results {
 				if result.err != nil && !scanner.IsPhaseBlocked(result.err) && !skipped && ctx.Err() == nil {
@@ -1971,7 +2046,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				if timedOut {
 					taskErr = fmt.Errorf("phase group %v exceeded its %s watchdog and was stopped; completed results were saved", group, watchdog)
 					logFn("error", "scheduler", taskErr.Error())
-					break
+					timedOutPhases++
+					if timedOutPhases >= maxPhaseTimeouts {
+						logFn("error", "scheduler", fmt.Sprintf("%d phase(s) have now exceeded their watchdog in this scan — stopping instead of spending more wall-clock time on an apparently unresponsive target.", timedOutPhases))
+						break
+					}
 				}
 				continue
 			}
@@ -1998,7 +2077,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			taskErr = fmt.Errorf("phase %q exceeded its %s watchdog and was stopped; completed results were saved", module, watchdog)
 			logFn("error", "scheduler", taskErr.Error())
 			s.updateTargetStats(targetID)
-			break
+			timedOutPhases++
+			if timedOutPhases >= maxPhaseTimeouts {
+				logFn("error", "scheduler", fmt.Sprintf("%d phase(s) have now exceeded their watchdog in this scan — stopping instead of spending more wall-clock time on an apparently unresponsive target.", timedOutPhases))
+				break
+			}
+			continue
 		}
 		if skipped {
 			// Operator skipped this phase: mark it handled (so a resume doesn't

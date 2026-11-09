@@ -48,9 +48,36 @@ func TestWatchdogUsesSubdomainsDiscoveredDuringCurrentScan(t *testing.T) {
 	if known != 2000 {
 		t.Fatalf("live subdomain count=%d, want 2000", known)
 	}
-	got := effectiveWatchdog(&config.Config{ScanWatchdogHours: 24}, known)
+	got := effectiveWatchdog(&config.Config{ScanWatchdogHours: 24}, scanSurface{subdomains: known})
 	if want := 30 * time.Hour; got != want {
 		t.Fatalf("adaptive phase watchdog=%v, want %v", got, want)
+	}
+}
+
+// TestWatchdogScalesWithHTTPSurfaceNotJustSubdomains is the regression case for
+// "it just stops working after about a day": a single-host target (subdomains
+// stays 1) with a huge URL/parameter surface used to get ZERO adaptive bonus
+// and sit at the flat 24h floor, which a real app's nuclei/XSS/SQLi/paramfuzz
+// pass can legitimately exceed.
+func TestWatchdogScalesWithHTTPSurfaceNotJustSubdomains(t *testing.T) {
+	cfg := &config.Config{ScanWatchdogHours: 24}
+	oneHostHugeApp := scanSurface{subdomains: 1, httpServices: 20000, parameters: 60000}
+	got := effectiveWatchdog(cfg, oneHostHugeApp)
+	if got <= 24*time.Hour {
+		t.Fatalf("single-host, large-surface target got no adaptive headroom: watchdog=%v", got)
+	}
+	// 20000 httpServices -> 20000/2000*3h = 30h bonus; 60000 parameters ->
+	// 60000/5000*3h = 36h bonus (the larger of the two) -> 24h + 36h = 60h.
+	if want := 60 * time.Hour; got != want {
+		t.Fatalf("adaptive phase watchdog=%v, want %v", got, want)
+	}
+}
+
+func TestWatchdogCapsAtMaximumRegardlessOfSurfaceSignal(t *testing.T) {
+	cfg := &config.Config{ScanWatchdogHours: 24}
+	got := effectiveWatchdog(cfg, scanSurface{subdomains: 100000, httpServices: 1000000, parameters: 5000000})
+	if got != maxScanWatchdog {
+		t.Fatalf("watchdog=%v, want capped at maxScanWatchdog=%v", got, maxScanWatchdog)
 	}
 }
 
