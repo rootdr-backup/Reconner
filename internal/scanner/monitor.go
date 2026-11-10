@@ -439,8 +439,12 @@ func monitorAssetCandidates(value, assetType, lastURL string) []string {
 }
 
 func (s *MonitorScanner) monitorProjectAssets(ctx context.Context, targetID, targetScope string, authHeaders map[string]string, knownHTTP, knownJS map[string]bool, logFn LogFunc) (int, error) {
+	// Only web assets are monitorable. A network asset (ip/cidr) has no page to
+	// fetch: building https://10.0.0.0/24 from it would just burn a request and
+	// record a meaningless "change" on the range string itself.
 	rows, err := s.db.QueryContext(ctx, `SELECT id,value,COALESCE(asset_type,'domain'),COALESCE(metadata,'{}')
-		FROM assets WHERE target_id=? AND COALESCE(approval_status,'approved')='approved' AND COALESCE(monitor_enabled,1)=1`, targetID)
+		FROM assets WHERE target_id=? AND COALESCE(approval_status,'approved')='approved' AND COALESCE(monitor_enabled,1)=1
+		  AND COALESCE(kind,'web')='web'`, targetID)
 	if err != nil {
 		return 0, err
 	}

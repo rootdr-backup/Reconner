@@ -514,6 +514,10 @@ export default function TargetDetail() {
   // Changes-tab noise filter + the open content-diff drawer (css/js rows).
   const [changeFilter, setChangeFilter] = useState<ChangeFilter>('all')
   const [diffView, setDiffView] = useState<{ url: string; kind: 'css' | 'js' } | null>(null)
+  // Changes tab: the endpoint pages 500 rows at a time. Track whether older
+  // history remains server-side and a load flag for the footer button.
+  const [monitorHasMore, setMonitorHasMore] = useState(false)
+  const [monitorLoadingMore, setMonitorLoadingMore] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
   const [catchallSaving, setCatchallSaving] = useState(false)
@@ -766,11 +770,27 @@ export default function TargetDetail() {
         r = all.filter(f => want.has(f.type))
       }
       else if (t === 'cameras') r = await findingsApi.ingram(id)
-      else if (t === 'monitor') r = await findingsApi.monitoringChanges(id)
+      else if (t === 'monitor') {
+        const batch = await findingsApi.monitoringChanges(id)
+        r = batch
+        setMonitorHasMore((batch || []).length >= 500)
+      }
       setData(r || [])
       setVisibleCount(PAGE)
     } catch { setData([]) }
     setTabLoading(false)
+  }
+
+  // Changes tab: pull the next 500-row page of older history.
+  const loadOlderChanges = async () => {
+    if (!id || monitorLoadingMore) return
+    setMonitorLoadingMore(true)
+    try {
+      const batch = await findingsApi.monitoringChanges(id, data.length)
+      setData(prev => [...prev, ...batch])
+      setMonitorHasMore(batch.length >= 500)
+    } catch (e) { console.error(e) }
+    finally { setMonitorLoadingMore(false) }
   }
 
   if (loading) return <div className="flex items-center justify-center h-64"><Spinner /></div>
@@ -1666,6 +1686,14 @@ export default function TargetDetail() {
             </button>
             <button onClick={() => setVisibleCount(data.length)} className="text-accent hover:underline">
               Show all
+            </button>
+          </div>
+        )}
+        {tab === 'monitor' && !tabLoading && monitorHasMore && !footerHasMore && (
+          <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
+            <span className="text-text-muted">Showing newest {data.length.toLocaleString()} changes</span>
+            <button onClick={loadOlderChanges} disabled={monitorLoadingMore} className="btn-secondary text-xs">
+              {monitorLoadingMore ? 'Loading…' : 'Load older changes'}
             </button>
           </div>
         )}

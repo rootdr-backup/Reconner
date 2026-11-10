@@ -100,6 +100,7 @@ func RunMigrations(db *DB) error {
 		alterNucleiFindingsAddVerification,
 		alterNucleiFindingsAddConfidence,
 		alterSubdomainsAddSource,
+		alterSubdomainsAddMissCount,
 		alterCandidatesAddStateVersion,
 		alterVulnFindingsAddCandidateID,
 		alterVulnFindingsAddLifecycle,
@@ -1076,6 +1077,13 @@ CREATE TABLE IF NOT EXISTS subdomains (
 // NOT resolve in DNS — found by the virtual-host scan). Lets the UI flag vhost
 // hosts, which are often internal/forgotten and high-value.
 const alterSubdomainsAddSource = `ALTER TABLE subdomains ADD COLUMN source TEXT DEFAULT 'dns';`
+
+// A name is not dead after ONE missed resolve pass: a single resolver timeout
+// or dnsx hiccup must not delete a previously verified row (and, with it, the
+// recursion frontier seed). pruneRejectedSubdomains increments this counter on
+// every rejected pass and only deletes at 2 consecutive misses; a pass that
+// resolves the name resets it to 0 via the admission upsert.
+const alterSubdomainsAddMissCount = `ALTER TABLE subdomains ADD COLUMN miss_count INTEGER DEFAULT 0;`
 
 // catchall marks subdomains whose HTTP responses match the target's wildcard
 // catch-all fleet (redirect-to-apex groups or homepage-content clones). Rows are

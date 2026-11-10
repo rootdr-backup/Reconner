@@ -66,18 +66,27 @@ func TestRejectedAdmissionPrunesOnlyUnverifiedDNSRows(t *testing.T) {
 	insert("vhost.m.local", "vhost", 0)
 
 	s := &SubdomainScanner{db: db}
-	s.pruneRejectedSubdomains(context.Background(), tid, map[string]bool{
+	rejected := map[string]bool{
 		"junk.m.local": true, "historically-live.m.local": true, "seed.m.local": true,
 		"cname.m.local": true, "vhost.m.local": true,
-	})
+	}
+	// One missed resolve pass must never delete: transient resolver failures are
+	// common. The never-live eager DNS row survives the first pass at miss_count=1.
+	s.pruneRejectedSubdomains(context.Background(), tid, rejected)
 	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=?`, tid).Scan(&n)
+	if n != 5 {
+		t.Fatalf("a single missed pass pruned rows early: rows=%d", n)
+	}
+	// The second CONSECUTIVE miss prunes only that never-live eager DNS row.
+	s.pruneRejectedSubdomains(context.Background(), tid, rejected)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=?`, tid).Scan(&n)
 	if n != 4 {
 		t.Fatalf("expected only the never-live eager DNS row to be pruned, rows=%d", n)
 	}
 	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=? AND subdomain='junk.m.local'`, tid).Scan(&n)
 	if n != 0 {
-		t.Fatal("unverified junk DNS row survived admission cleanup")
+		t.Fatal("unverified junk DNS row survived two consecutive missed passes")
 	}
 }
 

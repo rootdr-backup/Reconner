@@ -614,11 +614,19 @@ func (h *Handler) handleGetJSFileBody(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleListMonitoringChanges(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	// Newest first, 500 per page. `offset` lets the Changes tab walk further
+	// back than the newest page (the tab used to silently stop at 500 rows);
+	// id is the tiebreaker so rows sharing detected_at never shuffle between
+	// pages.
+	offset := 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, target_id, url, change_type, old_value, new_value, COALESCE(severity,'info'), detected_at
 		FROM monitoring_changes WHERE target_id = ?
-		ORDER BY detected_at DESC LIMIT 500
-	`, id)
+		ORDER BY detected_at DESC, id DESC LIMIT 500 OFFSET ?
+	`, id, offset)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return

@@ -564,8 +564,8 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	// Host-header probed at all).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT ip FROM subdomains
-		 WHERE target_id=? AND ip!='' AND (subdomain=? OR subdomain LIKE ?)
-		 LIMIT 100`, targetID, domain, "%."+domain)
+		 WHERE target_id=? AND ip!='' AND (subdomain=? OR subdomain LIKE ? ESCAPE '\')
+		 LIMIT 100`, targetID, domain, "%."+escapeLike(domain))
 	if err != nil {
 		return
 	}
@@ -1290,7 +1290,8 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 					ip = excluded.ip,
 					source = CASE WHEN COALESCE(subdomains.source,'dns') IN ('seed','vhost')
 						THEN subdomains.source ELSE excluded.source END,
-					last_seen = CURRENT_TIMESTAMP`)
+					last_seen = CURRENT_TIMESTAMP,
+					miss_count = 0`)
 			if perr == nil {
 				for _, r := range rows {
 					_, _ = stmt.ExecContext(ctx, uuid.New().String(), targetID, r.name, r.ip, r.source)
@@ -1424,10 +1425,21 @@ func (s *SubdomainScanner) recursiveEnum(ctx context.Context, targetID, apex str
 // resolvingSubdomainsUnder returns the stored, resolving (has an IP) subdomains
 // strictly under apex, excluding anything already visited — the seed frontier
 // for recursive enumeration.
+// escapeLike neutralises SQLite LIKE metacharacters ('%', '_' and the escape
+// character itself) in a value folded into a LIKE pattern. Apex names are
+// validated at intake, but escaping keeps a malformed stored domain from
+// widening the pattern beyond its own zone.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 func (s *SubdomainScanner) resolvingSubdomainsUnder(ctx context.Context, targetID, apex string, visited map[string]bool) []string {
 	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
 		WHERE target_id=? AND COALESCE(catchall,0)=0 AND COALESCE(ip,'')!=''
-		  AND subdomain LIKE ?`, targetID, "%."+strings.ToLower(apex))
+		  AND subdomain LIKE ? ESCAPE '\'`, targetID, "%."+escapeLike(strings.ToLower(apex)))
 	if err != nil {
 		return nil
 	}
@@ -1556,6 +1568,11 @@ func (s *SubdomainScanner) upsertSubdomainSource(targetID, subdomain, ip, source
 // pruneRejectedSubdomains repairs rows created by older eager-admission builds.
 // The delete is intentionally narrow: never touch explicit seeds, CNAME records,
 // verified vhosts or anything that was previously observed alive.
+// pruneRejectedSubdomains removes DNS-sourced rows for names that stopped
+// resolving. ONE missed pass is not proof of death — a resolver timeout or a
+// dnsx flake must not wipe a previously verified row (and, with it, its
+// recursion-frontier seed) — so deletion requires two CONSECUTIVE misses. A
+// pass that resolves the name resets the counter in resolveAll's upsert.
 func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID string, rejected map[string]bool) {
 	if len(rejected) == 0 {
 		return
@@ -1564,10 +1581,19 @@ func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID
 	if err != nil {
 		return
 	}
-	stmt, err := tx.PrepareContext(ctx, `DELETE FROM subdomains
+	upd, err := tx.PrepareContext(ctx, `UPDATE subdomains
+		SET miss_count = COALESCE(miss_count,0) + 1
 		WHERE target_id=? AND subdomain=? AND COALESCE(source,'dns')='dns'
 		  AND COALESCE(is_alive,0)=0`)
 	if err != nil {
+		_ = tx.Rollback()
+		return
+	}
+	del, err := tx.PrepareContext(ctx, `DELETE FROM subdomains
+		WHERE target_id=? AND subdomain=? AND COALESCE(source,'dns')='dns'
+		  AND COALESCE(is_alive,0)=0 AND COALESCE(miss_count,0)>=2`)
+	if err != nil {
+		_ = upd.Close()
 		_ = tx.Rollback()
 		return
 	}
@@ -1575,9 +1601,11 @@ func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID
 		if ctx.Err() != nil {
 			break
 		}
-		_, _ = stmt.ExecContext(ctx, targetID, name)
+		_, _ = upd.ExecContext(ctx, targetID, name)
+		_, _ = del.ExecContext(ctx, targetID, name)
 	}
-	_ = stmt.Close()
+	_ = upd.Close()
+	_ = del.Close()
 	_ = tx.Commit()
 }
 

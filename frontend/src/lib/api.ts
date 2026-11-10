@@ -301,7 +301,10 @@ export const findings = {
     req<{ triage: string }>(`/targets/${id}/findings/${fid}/triage`, {
       method: 'POST', body: JSON.stringify({ triage, note }),
     }),
-  monitoringChanges: (id: string) => req<MonitoringChange[]>(`/targets/${id}/monitoring-changes`),
+  // Changes are paged server-side, newest first (500 per page) — pass the
+  // number of rows already loaded to pull the next (older) slice.
+  monitoringChanges: (id: string, offset = 0) =>
+    req<MonitoringChange[]>(`/targets/${id}/monitoring-changes${offset > 0 ? `?offset=${offset}` : ''}`),
   // Stored capture of a monitored file's body at detection time — NOT a live
   // fetch. Backs the Changes-tab diff drawer (css_change / js_change rows).
   fileBody: (id: string, kind: 'css' | 'js', url: string, side: 'current' | 'old' = 'current') =>
