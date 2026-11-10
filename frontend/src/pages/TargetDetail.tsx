@@ -851,7 +851,10 @@ export default function TargetDetail() {
       await targetsApi.update(id, { catchall_detection: value })
       // Refresh so catchall_effective reflects the global config on "inherit".
       targetsApi.get(id).then(setTarget).catch(() => {})
-    } catch { /* ignore */ } finally { setCatchallSaving(false) }
+      addToast('success', 'Catch-all detection updated')
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Failed to update catch-all detection')
+    } finally { setCatchallSaving(false) }
   }
 
   // Network targets' actual results (Nuclei/Vulns/Candidates) used to sit

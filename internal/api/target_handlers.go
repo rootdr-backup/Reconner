@@ -396,13 +396,16 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 	switch catchallOverride {
 	case 1:
 		t.CatchallDetection = "on"
-		t.CatchallEffective = true
+		on := true
+		t.CatchallEffective = &on
 	case 0:
 		t.CatchallDetection = "off"
-		t.CatchallEffective = false
+		off := false
+		t.CatchallEffective = &off
 	default:
 		t.CatchallDetection = "inherit"
-		t.CatchallEffective = h.cfg != nil && h.cfg.HTTPCatchallDetection
+		effective := h.cfg != nil && h.cfg.HTTPCatchallDetection
+		t.CatchallEffective = &effective
 	}
 	t.ScanHeaders = map[string]string{}
 	_ = json.Unmarshal([]byte(scanHeadersJSON), &t.ScanHeaders)

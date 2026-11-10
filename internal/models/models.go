@@ -32,8 +32,11 @@ type Target struct {
 	// CatchallDetection is the per-target override of the HTTP catch-all pass:
 	// "inherit" (follow the global http_catchall_detection setting), "on" or
 	// "off". CatchallEffective is the resolved state the next scan will use.
-	CatchallDetection string `json:"catchall_detection"`
-	CatchallEffective bool   `json:"catchall_effective"`
+	CatchallDetection string `json:"catchall_detection,omitempty"`
+	// CatchallEffective is a pointer so list/create responses (which do not
+	// resolve the override) omit the field entirely, while the detail endpoint
+	// always sends an explicit true/false.
+	CatchallEffective *bool `json:"catchall_effective,omitempty"`
 }
 
 // Asset is one individually-scannable entry of a target (a domain, IP, CIDR, or

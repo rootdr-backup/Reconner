@@ -172,10 +172,6 @@ func qualifiesCatchallGroup(rows []catchallRow, apexTargets map[string]bool) (ma
 	return nil, ""
 }
 
-// runCatchallPass implements the opt-in step-2 pass. It resolves the target's
-// apex from the targets row, fingerprints all stored 2xx services, marks the
-// wildcard fleet members (DNS-source rows only) and drops their
-// http_services rows so web modules never fetch them again.
 // catchallEnabledForTarget resolves the per-target tri-state override over the
 // global config default: NULL/absent column inherits http_catchall_detection,
 // 0 forces the pass off for this target, 1 forces it on. An unknown target or
@@ -189,6 +185,10 @@ func (s *HTTPScanner) catchallEnabledForTarget(ctx context.Context, targetID str
 	return override.Int64 != 0
 }
 
+// runCatchallPass implements the opt-in step-2 pass. It resolves the target's
+// apex from the targets row, fingerprints all stored 2xx services, marks the
+// wildcard fleet members (DNS-source rows only) and drops their
+// http_services rows so web modules never fetch them again.
 func (s *HTTPScanner) runCatchallPass(ctx context.Context, targetID string, logFn LogFunc) error {
 	var apex string
 	if err := s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id=?`, targetID).Scan(&apex); err != nil || strings.TrimSpace(apex) == "" {
