@@ -82,6 +82,10 @@ See the [operator guide](docs/OPERATOR_GUIDE.md) for safe upgrades, backups,
 resource sizing, volume ownership recovery, and troubleshooting. The shorter
 [Docker reference](README.Docker.md) documents the image and Compose layout.
 
+## One-Click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Reconner/)
+
 ## Product tour
 
 <p align="center">
