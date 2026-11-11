@@ -234,11 +234,12 @@ type Config struct {
 	// raise it to go deeper on a sprawling target. Bounded per level
 	// (SubdomainRecursionMaxPerLevel) so it can't explode on a huge zone.
 	SubdomainRecursionDepth int `json:"subdomain_recursion_depth"`
-	// SubdomainRecursionEnabled turns recursive enumeration off entirely without
-	// losing the remembered depth. Off ⇒ apex only (the old pre-recursion
-	// behavior); the depth value stays stored for when it is switched back on.
-	// Default true so an upgrade never silently changes scan behavior. Set via
-	// the System → Scanning panel, next to the depth field.
+	// SubdomainRecursionEnabled is the deployment default for recursive
+	// enumeration. Off ⇒ apex only (the pre-recursion behavior); the depth value
+	// stays stored for when it is switched back on. Default false: recursion
+	// multiplies DNS query volume and invites public-resolver throttling. A scan
+	// can still opt in through the scan dialog's recursion toggle.
+	// Set via the System → Scanning panel, next to the depth field.
 	SubdomainRecursionEnabled bool `json:"subdomain_recursion_enabled"`
 	// HTTPCatchallDetection is OPT-IN (default false). When enabled, the end of
 	// the HTTP-probe module groups stored 2xx http_services fingerprints and
@@ -541,7 +542,7 @@ func defaultConfig() *Config {
 		AIMaxIterations:           40,                // hard cap on the agent loop
 		AuthzMode:                 "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
 		AuthzDestructive:          false,             // cross-user DELETE stays opt-in
-		SubdomainRecursionEnabled: true,              // recursion on by default; the System panel disables it per deployment
+		SubdomainRecursionEnabled: false,             // apex-only by default; System panel sets the deployment default, per-scan toggle overrides
 		SubdomainRecursionDepth:   4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
 		Workers:                   workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
 		Limits:                    limits,            // auto-scaled to host CPU/RAM

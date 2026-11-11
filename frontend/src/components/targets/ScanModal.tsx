@@ -102,6 +102,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   // ASN ownership and bug-bounty scope are not equivalent. Keep the potentially
   // broad CIDR sweep off until the operator has verified those ranges manually.
   const [asnDiscovery, setASNDiscovery] = useState(false)
+  const [recursiveSub, setRecursiveSub] = useState(false)
   // Single-endpoint mode: when the scope is a full URL (has a path and/or query),
   // offer to confine the WHOLE scan to that exact endpoint and the paths under it —
   // param discovery, crawl, JS, and every vuln module (XSS/SQLi/…) run against the
@@ -152,6 +153,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     setWebSpeed('normal')
     setSubBrute(true)
     setASNDiscovery(false)
+    setRecursiveSub(false)
     setSingleEndpoint(true)
     setPrioritizedScan(false)
     setAuthCookie('')
@@ -303,6 +305,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
       if (webSpeed === 'fast') orderedModules.push('speed_fast')
       if (!subBrute) orderedModules.push('no_subdomain_brute')
       if (asnDiscovery) orderedModules.push('asn_discovery')
+      if (recursiveSub) orderedModules.push('recursive_subdomain')
       if (scopeIsURL && singleEndpoint) orderedModules.push('single_endpoint')
       if (!asset && prioritizedScan) orderedModules.push('prioritized')
       // WordPress scan: add the chosen WP module set. The wp_detect gate self-
@@ -492,6 +495,16 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
                 <span className="text-xs font-medium text-text-primary">Deep DNS discovery</span>
                 <span className="block text-[10px] text-text-muted mt-0.5">
                   Adaptive dev/tool wordlist + target-derived permutations + dnsx/puredns verification. Turn OFF for a fast passive map.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 rounded-lg border border-white/[.08] bg-white/[.02] p-3 cursor-pointer">
+              <input type="checkbox" checked={recursiveSub} onChange={e => setRecursiveSub(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
+              <span>
+                <span className="text-xs font-medium text-text-primary">Recursive enumeration <span className="text-text-muted font-normal">(slower)</span></span>
+                <span className="block text-[10px] text-text-muted mt-0.5">
+                  Re-enumerates each resolving subdomain as its own apex, down to the configured depth. Finds deeper names but multiplies DNS load — leave off for a normal scan.
                 </span>
               </span>
             </label>

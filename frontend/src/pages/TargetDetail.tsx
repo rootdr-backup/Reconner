@@ -1656,7 +1656,19 @@ export default function TargetDetail() {
                       </tr>
                       )
                     })}
-                    {tab === 'monitor' && (pageData as MonitoringChange[]).map(c => (
+                    {tab === 'monitor' && (() => {
+                      // Collapse changes that are identical except for the URL (e.g. the
+                      // same header added across 40 hosts) into ONE row with an affected-URL
+                      // count, instead of 40 near-duplicate rows — the Changes view used to
+                      // be an unreadable wall of the same drift repeated per URL.
+                      const groups = new Map<string, { rep: MonitoringChange; urls: string[] }>()
+                      for (const c of (pageData as MonitoringChange[])) {
+                        const key = `${c.change_type}|${c.old_value}|${c.new_value}`
+                        const g = groups.get(key)
+                        if (g) { if (!g.urls.includes(c.url)) g.urls.push(c.url) }
+                        else groups.set(key, { rep: c, urls: [c.url] })
+                      }
+                      return [...groups.values()].map(({ rep: c, urls }) => (
                       <tr key={c.id} className="table-row align-top">
                         <td className="table-cell max-w-xs">
                           <div className="flex items-center gap-1.5">
@@ -1670,6 +1682,9 @@ export default function TargetDetail() {
                                 className="btn-secondary text-[10px] px-1.5 py-0.5 shrink-0">Diff</button>
                             )}
                           </div>
+                          {urls.length > 1 && (
+                            <span title={urls.join('\n')} className="mt-0.5 inline-block text-[10px] text-text-muted cursor-help">+{urls.length - 1} more URL{urls.length - 1 === 1 ? '' : 's'}</span>
+                          )}
                         </td>
                         <td className="table-cell">
                           <Badge variant={changeBadgeVariant(c)}>{c.change_type}</Badge>
@@ -1691,7 +1706,8 @@ export default function TargetDetail() {
                         </td>
                         <td className="table-cell text-xs whitespace-nowrap">{timeAgo(c.detected_at)}</td>
                       </tr>
-                    ))}
+                      ))
+                    })()}
                   </tbody>
                 </table>
               </div>

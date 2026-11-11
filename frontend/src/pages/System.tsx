@@ -61,7 +61,7 @@ export default function System() {
         setScanDraft({
           resolvers: (sc.dns_resolvers || []).join('\n'),
           depth: sc.subdomain_recursion_depth || 4,
-          enabled: sc.subdomain_recursion_enabled !== false,
+          enabled: sc.subdomain_recursion_enabled === true,
           catchall: sc.http_catchall_detection === true,
           excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
           repos: (sc.nuclei_extra_template_repos || []).join('\n'),
@@ -125,7 +125,7 @@ export default function System() {
       setScanDraft({
         resolvers: (res.dns_resolvers || []).join('\n'),
         depth: res.subdomain_recursion_depth || 4,
-        enabled: res.subdomain_recursion_enabled !== false,
+        enabled: res.subdomain_recursion_enabled === true,
         catchall: res.http_catchall_detection === true,
         excludeIDs: (res.nuclei_exclude_template_ids || []).join('\n'),
         repos: (res.nuclei_extra_template_repos || []).join('\n'),
@@ -344,7 +344,7 @@ export default function System() {
                       Enable recursive enumeration
                     </label>
                   </div>
-                  <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). Off or depth 1 ⇒ apex only.</p>
+                  <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). Off or depth 1 ⇒ apex only. This is the deployment default; the scan dialog can opt in per scan.</p>
                   <label className="flex items-center gap-1.5 text-xs font-medium mt-2">
                     <input type="checkbox" className="accent-accent" checked={scanDraft.catchall}
                       onChange={e => setScanDraft(d => d && ({ ...d, catchall: e.target.checked }))} />

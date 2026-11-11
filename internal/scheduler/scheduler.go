@@ -656,7 +656,7 @@ var ErrInvalidModuleSelection = errors.New("invalid module selection")
 func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "recursive_subdomain", "single_endpoint", "prioritized", "classic_order",
 		"network_fast", "network_normal", "network_deep", "full_ports",
 		// Per-scan WordPress credential-audit authorization token (sent by the WP
 		// Scanner brute-force tick). It is a passthrough flag consumed by the run
@@ -737,7 +737,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 	}
 	for _, token := range []string{
 		"speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
-		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
+		"asn_discovery", "no_asn_discovery", "recursive_subdomain", "single_endpoint", "prioritized", "classic_order",
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
@@ -1630,8 +1630,14 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var modules []string
 	// Honor per-scan behavior options and build the executable phase list.
 	speed := scanner.SpeedNormal
-	subBrute := true           // slow permutation/brute phase of subdomain enum (default on)
-	asnDiscovery := false      // explicit opt-in only after program-scope/WHOIS verification
+	subBrute := true      // slow permutation/brute phase of subdomain enum (default on)
+	asnDiscovery := false // explicit opt-in only after program-scope/WHOIS verification
+	subRecursion := false // recursive subdomain enum (opt-in: multiplies DNS volume)
+	if s.cfg != nil {
+		// The System → Scanning toggle is the deployment default; the per-scan
+		// "recursive_subdomain" token can still opt in when it is off.
+		subRecursion = s.cfg.SubdomainRecursionEnabled
+	}
 	singleEndpoint := false    // confine the whole scan to the seed URL(s) and paths under them
 	wpCredAuthorized := false  // operator-confirmed authorization for the active WordPress credential audit
 	netCredAuthorized := false // operator-confirmed authorization for the active network credential audit
@@ -1670,6 +1676,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			asnDiscovery = true
 		case "no_asn_discovery": // accepted for compatibility with the short-lived preview toggle
 			asnDiscovery = false
+		case "recursive_subdomain":
+			subRecursion = true
 		case "single_endpoint":
 			singleEndpoint = true
 		case "wp_cred_authorized":
@@ -1689,6 +1697,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithWebSpeed(ctx, speed)
 	ctx = scanner.WithSubdomainBrute(ctx, subBrute)
 	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
+	ctx = scanner.WithSubdomainRecursion(ctx, subRecursion)
 	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
 	ctx = scanner.WithWPCredAuthorized(ctx, wpCredAuthorized)
 	ctx = scanner.WithNetCredAuthorized(ctx, netCredAuthorized)
@@ -3112,9 +3121,18 @@ func (s *Scheduler) runDueMonitors() {
 			OR datetime(monitor_last_run, '+' || MAX(1,COALESCE(monitor_interval_hours,12)) || ' hours') <= datetime('now')
 		)
 		AND NOT EXISTS (
-			SELECT 1 FROM tasks mt WHERE mt.target_id=targets.id AND mt.type=? AND (
+			-- Do not auto-start a monitor/re-probe on a target that has ANY active
+			-- task (of any type) or that saw task activity in the last 30 minutes.
+			-- Previously this only looked at recent monitor_watch tasks, so a manual
+			-- scan that the operator CANCELLED (or that just finished) would be
+			-- immediately followed by a monitor re-probe within a minute — the
+			-- reported "cancelling a scan just makes it re-probe". A manual cancel
+			-- now genuinely stops the target's activity; the monitor resumes on its
+			-- normal interval, not instantly.
+			SELECT 1 FROM tasks mt WHERE mt.target_id=targets.id AND (
 				mt.status IN ('pending','running','paused','interrupted')
-				OR mt.created_at >= datetime('now','-30 minutes')
+				OR (mt.type=? AND mt.created_at >= datetime('now','-30 minutes'))
+				OR (mt.finished_at IS NOT NULL AND mt.finished_at >= datetime('now','-30 minutes'))
 			)
 		)
 	`, monitorWatchType)

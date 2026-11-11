@@ -381,12 +381,13 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 
 	// Recursive enumeration: run passive discovery + resolution AGAINST each newly
 	// discovered resolving subdomain as its own sub-apex, descending until the
-	// configured depth or until a level finds nothing new. Gate 1 is the deep-
-	// work toggle that already covers brute/permutation so the fast passive-only
-	// scan stays fast. Gate 2 is the system-wide recursion switch in the System →
-	// Scanning panel: off means apex only, while the remembered depth is kept
-	// for when it is turned back on.
-	if subdomainBruteEnabled(ctx) && s.subdomainRecursionEnabled() {
+	// configured depth or until a level finds nothing new. Per-scan opt-in via
+	// the scan dialog's recursion toggle, with the System → Scanning switch as
+	// the deployment default. Recursion multiplies DNS volume and is the main
+	// driver of public-resolver throttling, so the built-in default stays off.
+	// Cancelling the scan stops it (recursiveEnum checks ctx between every
+	// sub-apex and level).
+	if subdomainRecursionEnabled(ctx) {
 		s.recursiveEnum(ctx, targetID, domain, logFn)
 	}
 
@@ -1135,7 +1136,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// are announced live.
 	preexisting := s.existingSubdomainSet(ctx, targetID)
 
-	var resolved, cnameOnly, wildcardHits, unresolved int
+	var resolved, cnameOnly, wildcardHits, unresolved, transient int
 	var cmu sync.Mutex
 	rejected := make(map[string]bool)
 	// Admission writes are COLLECTED and flushed in a single transaction after the
@@ -1182,7 +1183,10 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// name's A/AAAA record set no matter which resolver path produced them —
 	// the batched dnsx pass or per-name Go lookups — so both admit/reject
 	// name-for-name identically (the gate counts below must match across paths).
-	classify := func(name string, ips []string) {
+	// definitive distinguishes an authoritative NXDOMAIN (safe to reject and
+	// prune) from a timeout/SERVFAIL/rate-limited miss (must NOT reject: doing
+	// so deletes real hosts and starves every downstream detector).
+	classify := func(name string, ips []string, definitive bool) {
 		ip := wildcardProfile.firstNonWildcardIP(name, ips)
 		if ip == "" {
 			if len(ips) > 0 && wildcardProfile.overlapsWildcardIPs(name, ips) {
@@ -1202,8 +1206,12 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 				return
 			}
 			cmu.Lock()
-			rejected[name] = true
-			unresolved++
+			if definitive {
+				rejected[name] = true
+				unresolved++
+			} else {
+				transient++
+			}
 			cmu.Unlock()
 			return
 		}
@@ -1226,7 +1234,11 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 			if ctx.Err() != nil {
 				break
 			}
-			classify(name, ipmap[name])
+			// dnsx -resp reports only answered names, so an absent name is
+			// ambiguous (NXDOMAIN or a throttled/timed-out query). Treat it as
+			// transient: never reject or prune on this path. Only the per-name
+			// fallback below can prove an authoritative NXDOMAIN.
+			classify(name, ipmap[name], false)
 		}
 	} else {
 		logFn("info", "subdomain_enum", "Batched dnsx resolution unavailable — per-name resolver fallback")
@@ -1251,7 +1263,8 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 						return
 					}
 					checked.Add(1)
-					classify(name, resolveHostIPs(ctx, name, s.resolver))
+					ips, definitive := lookupIPs(ctx, name, s.resolver)
+					classify(name, ips, definitive)
 				}
 			}()
 		}
@@ -1312,7 +1325,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 		}
 	}
 
-	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d explicit CNAME, %d wildcard-only, %d unresolved (from %d candidates)", resolved, cnameOnly, wildcardHits, unresolved, len(names)))
+	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d explicit CNAME, %d wildcard-only, %d unresolved (NXDOMAIN), %d transient-miss kept (from %d candidates)", resolved, cnameOnly, wildcardHits, unresolved, transient, len(names)))
 	return rejected
 }
 
@@ -1340,18 +1353,6 @@ func (s *SubdomainScanner) subdomainRecursionDepth() int {
 		return s.cfg.SubdomainRecursionDepth
 	}
 	return 4
-}
-
-// subdomainRecursionEnabled reports whether recursive enumeration runs at all.
-// A nil config (test paths) behaves like the built-in defaults: recursion
-// enabled. Explicit false in config.json wins; the production Config always
-// comes from Load(), which starts from the defaults, so an old config.json
-// without this key never silently disables recursion after an upgrade.
-func (s *SubdomainScanner) subdomainRecursionEnabled() bool {
-	if s.cfg == nil {
-		return true
-	}
-	return s.cfg.SubdomainRecursionEnabled
 }
 
 // recursiveEnum drives recursive subdomain discovery: after the apex is
@@ -1654,12 +1655,66 @@ func (s *SubdomainScanner) wildcardServers() []string {
 }
 
 func resolveHostIPs(parent context.Context, host string, r *net.Resolver) []string {
+	ips, _ := lookupIPs(parent, host, r)
+	return ips
+}
+
+// lookupIPs resolves host's A/AAAA records and reports whether the outcome is
+// AUTHORITATIVE. definitive is true when the resolver gave a real answer OR a
+// confirmed "no such host" (NXDOMAIN); it is false when the lookup failed
+// transiently — a timeout, SERVFAIL, network error, or (critically) a public
+// resolver rate-limiting a bulk enumeration pass.
+//
+// Why this matters: the admission gate used to treat ANY empty result as "does
+// not resolve → reject → prune". Once enumeration moved to public resolvers
+// (1.1.1.1/8.8.8.8/…), a few hundred concurrent lookups — multiplied by
+// recursion — got throttled, so real, resolvable hosts intermittently returned
+// nothing and were DELETED from the asset set, starving nuclei and every other
+// downstream detector. Distinguishing a transient miss from a true negative,
+// and falling back to the system resolver on a transient miss, stops that.
+func lookupIPs(parent context.Context, host string, r *net.Resolver) (ips []string, definitive bool) {
+	res := resolverOrDefault(r)
+	rows, err := lookupIPAddrOnce(parent, res, host)
+	if err == nil {
+		return dedupeIPs(rows), true
+	}
+	if isNoSuchHost(err) {
+		return nil, true // authoritative negative — host genuinely has no A/AAAA
+	}
+	// Transient failure. Fall back to the system resolver once (Docker stub →
+	// host upstream): slower, but far less likely to be rate-limited, so it
+	// recovers hosts a hammered public resolver dropped.
+	if res != net.DefaultResolver {
+		rows2, err2 := lookupIPAddrOnce(parent, net.DefaultResolver, host)
+		if err2 == nil {
+			return dedupeIPs(rows2), true
+		}
+		if isNoSuchHost(err2) {
+			return nil, true
+		}
+	}
+	return nil, false // couldn't determine — caller must NOT reject on this
+}
+
+func lookupIPAddrOnce(parent context.Context, res *net.Resolver, host string) ([]net.IPAddr, error) {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
-	rows, err := resolverOrDefault(r).LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil
+	return res.LookupIPAddr(ctx, host)
+}
+
+// isNoSuchHost reports whether err is an authoritative "host does not exist"
+// (NXDOMAIN), as opposed to a transient/temporary DNS failure.
+func isNoSuchHost(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// IsNotFound is the authoritative NXDOMAIN signal. A timeout/temporary
+		// error (IsTimeout/IsTemporary) is explicitly NOT a negative answer.
+		return dnsErr.IsNotFound
 	}
+	return false
+}
+
+func dedupeIPs(rows []net.IPAddr) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
