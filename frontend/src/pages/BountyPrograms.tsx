@@ -193,7 +193,7 @@ export default function BountyPrograms() {
 
       {statuses.some(s => s.status === 'error') && (
         <div className="rounded-xl border border-severity-medium/30 bg-severity-medium/10 px-4 py-3 text-xs text-severity-medium">
-          A provider refresh is retrying with backoff. Cached programs remain available. {statuses.filter(s => s.status === 'error').map(s => `${providerLabel(s.provider)}: ${s.last_error}`).join(' · ')}
+          A provider refresh is retrying with backoff — cached programs remain available. Unreachable right now: {statuses.filter(s => s.status === 'error').map(s => providerLabel(s.provider)).join(', ')}.
         </div>
       )}
 

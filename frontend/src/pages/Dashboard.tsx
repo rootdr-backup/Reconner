@@ -2,8 +2,24 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { dashboard, tasks as tasksApi, type DashboardCharts } from '../lib/api'
 import { Spinner } from '../components/ui'
+import { Icons } from '../components/layout/Sidebar'
 import { cn, timeAgo } from '../lib/utils'
 import type { DashboardStats, Task } from '../types'
+
+// Small stroke-icons for the hero KPIs that need a distinct glyph from
+// Sidebar's Icons (findings there is a warning triangle — reused for
+// "Urgent", so "Verified findings" gets its own shield-check instead,
+// rather than the same triangle twice).
+const AlertIcon = (p: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={p.className}>
+    <path d="M12 3 2 20h20L12 3zM12 10v4M12 17h.01" />
+  </svg>
+)
+const VerifiedIcon = (p: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={p.className}>
+    <path d="M12 3 4 6v6c0 4.6 3.2 7.8 8 9 4.8-1.2 8-4.4 8-9V6l-8-3zM9 12l2 2 4-4" />
+  </svg>
+)
 
 // Severity swatches — aligned to the committed design tokens (see tailwind.config).
 const SEV_COLOR: Record<string, string> = {
@@ -80,7 +96,9 @@ function Sparkline({ data }: { data: { date: string; scans: number }[] }) {
   )
 }
 
-function Stat({ label, value, tone, hint }: { label: string; value: number | string; tone?: string; hint?: string }) {
+function Stat({ label, value, tone, hint, icon: Icon }: {
+  label: string; value: number | string; tone?: string; hint?: string; icon?: (p: { className?: string }) => JSX.Element
+}) {
   return (
     <div className="metric-card">
       <div className="flex items-start justify-between gap-3">
@@ -88,7 +106,11 @@ function Stat({ label, value, tone, hint }: { label: string; value: number | str
           <p className="text-[10px] font-semibold uppercase tracking-[.14em] text-text-muted">{label}</p>
           <p className={cn('mt-2 text-[30px] leading-none font-semibold tracking-[-.04em] tabular-nums', tone)}>{value}</p>
         </div>
-        <span className="mt-1 h-8 w-8 rounded-xl border border-white/[.06] bg-white/[.025]" />
+        {Icon && (
+          <span className={cn('mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-white/[.06] bg-white/[.025]', tone || 'text-text-muted')}>
+            <Icon className="h-4 w-4" />
+          </span>
+        )}
       </div>
       {hint && <p className="mt-3 text-[10px] text-text-muted">{hint}</p>}
     </div>
@@ -197,10 +219,10 @@ export default function Dashboard() {
 
       {/* Hero KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat label="Projects" value={stats.targets} hint="Defined scopes" />
-        <Stat label="Live services" value={stats.alive_hosts.toLocaleString()} tone="text-severity-low" hint="Reachable now" />
-        <Stat label="Verified findings" value={totalVulns} tone={totalVulns > 0 ? 'text-severity-high' : undefined} hint="Evidence attached" />
-        <Stat label="Urgent" value={critHigh} tone={critHigh > 0 ? 'text-severity-critical' : undefined} hint="Critical + high" />
+        <Stat label="Projects" value={stats.targets} hint="Defined scopes" icon={Icons.targets} />
+        <Stat label="Live services" value={stats.alive_hosts.toLocaleString()} tone="text-severity-low" hint="Reachable now" icon={Icons.network} />
+        <Stat label="Verified findings" value={totalVulns} tone={totalVulns > 0 ? 'text-severity-high' : undefined} hint="Evidence attached" icon={VerifiedIcon} />
+        <Stat label="Urgent" value={critHigh} tone={critHigh > 0 ? 'text-severity-critical' : undefined} hint="Critical + high" icon={AlertIcon} />
       </div>
 
       {/* Charts row */}
