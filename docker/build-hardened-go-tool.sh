@@ -61,6 +61,9 @@ case "$binary" in
 		# v0.149.0. Direct dependency of nuclei; its tagged source still compiles
 		# against this version (verified by build).
 		upgrade_if_present github.com/getkin/kin-openapi v0.149.0
+		# CVE-2026-116587: DoS via crafted RSA parameters in a JWK, fixed in
+		# v4.1.6. Direct dependency of nuclei.
+		upgrade_if_present github.com/go-jose/go-jose/v4 v4.1.6
 		;;
 esac
 # CVE-2026-63209: DoS via integer overflow in klauspost/compress dictionary
@@ -73,7 +76,7 @@ upgrade_if_present github.com/klauspost/compress v1.18.7
 upgrade_if_present golang.org/x/crypto v0.55.0
 upgrade_if_present golang.org/x/text v0.41.0
 upgrade_if_present golang.org/x/mod v0.40.0
-upgrade_if_present golang.org/x/net v0.60.0
+upgrade_if_present golang.org/x/net v0.62.0
 
 mkdir -p "$output_dir"
 go build -trimpath -ldflags='-s -w' -o "${output_dir}/${binary}" "$package"

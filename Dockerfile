@@ -233,12 +233,17 @@ ENV PATH="/opt/venv/bin:${PATH}"
 # compatible 26.x patch that officially supports cryptography 50.x. Install the
 # upstream graph first, apply that narrow metadata correction, then make
 # `pip check` prove the final environment is internally consistent.
+# msgpack 1.2.3 fixes CVE-2026-114613 (DoS via memory leak during map
+# deserialization); soupsieve 4.0.0 fixes CVE-2026-126190/126191 (both are
+# transitive deps — waymore pulls msgpack, waymore's beautifulsoup4 pulls
+# soupsieve — at pre-fix versions with no upper bound, so the upgrade-only
+# `--no-deps` pin here is enough; `pip check` below still proves it).
 RUN pip install --no-cache-dir --upgrade \
       pip==26.2.1 setuptools==80.9.0 \
  && pip install --no-cache-dir \
       dirsearch==0.5.0 uro==1.0.2 waymore==8.9 \
  && pip install --no-cache-dir --upgrade --no-deps \
-      cryptography==50.0.0 pyOpenSSL==26.4.0 msgpack==1.2.1 \
+      cryptography==50.0.0 pyOpenSSL==26.4.0 msgpack==1.2.3 soupsieve==4.0.0 \
  && sed -i 's/Requires-Dist: pyopenssl==26.1.0/Requires-Dist: pyopenssl>=26.4.0,<27/' \
       /opt/venv/lib/python*/site-packages/dirsearch-0.5.0.dist-info/METADATA \
  && pip check \
