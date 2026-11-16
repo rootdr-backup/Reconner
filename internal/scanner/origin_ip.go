@@ -26,8 +26,12 @@ import (
 // and hit the backend. This is one of the highest-value recon findings and most
 // scanners miss it.
 //
-// It is gated on a SecurityTrails API key (optional, per-deployment config). No
-// key → the module is explicitly blocked rather than reported as covered.
+// Historical DNS comes from whichever source is available: SecurityTrails'
+// purpose-built history endpoint when a key is configured (richer, higher
+// rate limit), merged with AlienVault OTX's free, keyless passive DNS, which
+// runs unconditionally. A missing or rate-limited SecurityTrails key no
+// longer blocks the module outright — only a total failure of every source
+// does.
 type OriginIPScanner struct {
 	db        *database.DB
 	exec      *tools.Executor
@@ -42,10 +46,6 @@ func NewOriginIPScanner(db *database.DB, exec *tools.Executor, cfg *config.Confi
 
 func (s *OriginIPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	key := strings.TrimSpace(s.cfg.SecurityTrailsAPIKey)
-	if key == "" {
-		logFn("info", "origin_ip", "Origin-IP discovery blocked — no SecurityTrails API key configured.")
-		return BlockedPhase("SecurityTrails API key is not configured")
-	}
 
 	var domain string
 	if err := s.db.QueryRowContext(ctx, `SELECT domain FROM targets WHERE id = ?`, targetID).Scan(&domain); err != nil {
@@ -56,10 +56,9 @@ func (s *OriginIPScanner) Run(ctx context.Context, targetID string, logFn LogFun
 	}
 	logFn("info", "origin_ip", "Pulling historical DNS to find origin IP behind CDN/WAF...")
 
-	historicIPs, err := s.fetchHistoricalIPs(ctx, domain, key)
+	historicIPs, err := s.fetchHistoricalIPsWithFallback(ctx, domain, key, logFn)
 	if err != nil {
-		logFn("warn", "origin_ip", "SecurityTrails query failed: "+err.Error())
-		return BlockedPhase("SecurityTrails query failed: " + err.Error())
+		return BlockedPhase(err.Error())
 	}
 	if len(historicIPs) == 0 {
 		logFn("info", "origin_ip", "No historical IPs returned")
@@ -141,6 +140,140 @@ func originResponseMatches(baseTitle string, baseLen int, baseHash string, candi
 		return false
 	}
 	return baseLen > 0 && candidateLen > 0 && float64(candidateLen) >= float64(baseLen)*0.6 && float64(candidateLen) <= float64(baseLen)*1.6
+}
+
+// fetchHistoricalIPsWithFallback tries every available historical-DNS source
+// and merges their results, so one provider's rate limit or missing API key
+// never fully blocks origin-IP discovery. SecurityTrails (when a key is
+// configured) is the richer, purpose-built source; AlienVault OTX's passive
+// DNS is free and keyless and always runs, so there is at least one source
+// out of the box. Returns an error only when EVERY available source failed
+// outright — a source that ran cleanly and simply found nothing is not a
+// failure, matching the pre-fallback "no historical IPs returned" outcome.
+func (s *OriginIPScanner) fetchHistoricalIPsWithFallback(ctx context.Context, domain, key string, logFn LogFunc) ([]string, error) {
+	anySourceSucceeded := false
+	var lastErr error
+	var stIPs, otxIPs []string
+
+	if key != "" {
+		var err error
+		stIPs, err = s.fetchHistoricalIPs(ctx, domain, key)
+		if err != nil {
+			lastErr = fmt.Errorf("SecurityTrails: %w", err)
+			logFn("warn", "origin_ip", "SecurityTrails query failed: "+err.Error()+" — falling back to AlienVault OTX passive DNS.")
+		} else {
+			anySourceSucceeded = true
+			logFn("info", "origin_ip", fmt.Sprintf("SecurityTrails: %d historical IP(s)", len(stIPs)))
+		}
+	} else {
+		logFn("info", "origin_ip", "No SecurityTrails API key configured — using AlienVault OTX passive DNS (free, no key required) instead.")
+	}
+
+	var err error
+	otxIPs, err = fetchHistoricalIPsFromOTX(ctx, domain)
+	if err != nil {
+		lastErr = fmt.Errorf("OTX: %w", err)
+		logFn("info", "origin_ip", "AlienVault OTX passive DNS unavailable: "+err.Error())
+	} else {
+		anySourceSucceeded = true
+		logFn("info", "origin_ip", fmt.Sprintf("AlienVault OTX: %d historical IP(s)", len(otxIPs)))
+	}
+
+	if !anySourceSucceeded {
+		return nil, fmt.Errorf("every historical-DNS source failed: %w", lastErr)
+	}
+	return mergeHistoricalIPs(stIPs, otxIPs), nil
+}
+
+// mergeHistoricalIPs deduplicates and combines historical-IP lists from
+// every source that returned data, preserving first-seen order, and caps
+// the result so the origin probe step downstream has a bounded, predictable
+// cost no matter how many sources contributed.
+func mergeHistoricalIPs(sources ...[]string) []string {
+	seen := map[string]bool{}
+	var merged []string
+	for _, ips := range sources {
+		for _, ip := range ips {
+			if !seen[ip] {
+				seen[ip] = true
+				merged = append(merged, ip)
+			}
+		}
+	}
+	const maxMerged = 80
+	if len(merged) > maxMerged {
+		merged = merged[:maxMerged]
+	}
+	return merged
+}
+
+// fetchHistoricalIPsFromOTX pulls historical A-record addresses for domain
+// from AlienVault OTX's passive DNS — free, no API key, and the same
+// endpoint this codebase's passive subdomain sources already query
+// successfully (see queryOTX). Less deep than SecurityTrails' purpose-built
+// history endpoint, but it is always available, which is exactly what
+// origin-IP discovery needs when SecurityTrails is unconfigured or
+// rate-limited.
+func fetchHistoricalIPsFromOTX(ctx context.Context, domain string) ([]string, error) {
+	url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
+	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if resp.StatusCode == 429 {
+		return nil, fmt.Errorf("rate limited (HTTP 429)")
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return parseOTXPassiveDNSAddresses(body)
+}
+
+// parseOTXPassiveDNSAddresses extracts up to 60 deduplicated, valid A-record
+// addresses from an OTX passive_dns JSON response body. Split out of
+// fetchHistoricalIPsFromOTX so the parsing/filtering logic is directly
+// unit-testable from a fixed response fixture, with no network involved.
+func parseOTXPassiveDNSAddresses(body []byte) ([]string, error) {
+	if !looksJSON(body) {
+		return nil, errSourceUnavailable
+	}
+	var data struct {
+		PassiveDNS []struct {
+			Address    string `json:"address"`
+			RecordType string `json:"record_type"`
+		} `json:"passive_dns"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	for _, rec := range data.PassiveDNS {
+		if !strings.EqualFold(rec.RecordType, "A") {
+			continue
+		}
+		ip := strings.TrimSpace(rec.Address)
+		if ip != "" && !seen[ip] && net.ParseIP(ip) != nil {
+			seen[ip] = true
+			out = append(out, ip)
+			if len(out) >= 60 {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // fetchHistoricalIPs pulls historical A records from SecurityTrails.

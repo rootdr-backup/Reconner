@@ -519,7 +519,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
               <span>
                 <span className="text-xs font-medium text-text-primary">ASN / CIDR discovery <span className="text-severity-high font-normal">(scope-verified only)</span></span>
                 <span className="block text-[10px] text-text-muted mt-0.5">
-                  Reverse-resolves organisation netblocks. Enable only after WHOIS/program-scope verification; ASN ownership alone does not make every IP in scope.
+                  Reverse-resolves organisation netblocks, automatically excluding shared CDN/WAF ranges (Cloudflare, Akamai, …) before probing. Still enable only after your own WHOIS/program-scope verification — ASN ownership alone does not make every IP in scope.
                 </span>
               </span>
             </label>

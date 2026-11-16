@@ -203,6 +203,14 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// false positives on it.
 	s.fingerprintHosts(ctx, targetID, logFn)
 
+	// A host whose probe landed on a CDN/bot-challenge page instead of the
+	// real site poisons every downstream module that reads http_services
+	// (JS analysis, params, directory discovery, nuclei, injection
+	// scanners…) with a challenge page's title/content instead of the
+	// target's own. Retry those specific hosts through a headless browser
+	// before anything else consumes this data.
+	s.rescueChallengedHosts(ctx, targetID, logFn)
+
 	// Authenticated-session preflight: validate configured identities NOW, at the
 	// front of the scan, so an expired login is surfaced before every downstream
 	// injection/authz module wastes itself against the logged-out app.
