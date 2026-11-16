@@ -187,6 +187,19 @@ func (s *JSEndpointScanner) buildCandidates(raw, hostRoots []string, domain stri
 		switch {
 		case strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://"):
 			add(v)
+		case strings.HasPrefix(v, "//"):
+			// Protocol-relative (scheme-relative) URL — fetch("//api.example.com/v1/x")
+			// is a common real-world pattern for an API/CDN host that doesn't care
+			// which scheme the page itself loaded under. This MUST be checked before
+			// the root-relative "/" case below: "//host/path" also satisfies
+			// strings.HasPrefix(v, "/"), so without this branch it fell through there
+			// and got silently mangled into root+"//host/path" (e.g.
+			// "https://mysite.com"+"//api.example.com/v1/x" =
+			// "https://mysite.com//api.example.com/v1/x") — a URL that resolves to
+			// mysite.com's own nonexistent path, never to the host the JS actually
+			// referenced, silently losing every protocol-relative endpoint (including
+			// ones on an in-scope subdomain, e.g. "//api.mysite.com/...").
+			add("https:" + v)
 		case strings.HasPrefix(v, "/"):
 			// relative path — resolve against every alive host root
 			for _, root := range hostRoots {

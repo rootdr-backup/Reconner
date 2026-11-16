@@ -112,6 +112,61 @@ func checkParamReflection(rawURL, param string) (reflected, htmlSink bool) {
 	return strings.Contains(string(body), canary), true
 }
 
+// checkInsertionReflection is the location-aware counterpart to
+// checkParamReflection: it injects the canary via buildInjectedRequest — the
+// same request builder sqli/nosqli/open-redirect already use — so a
+// body/JSON/header/cookie/path-located parameter is probed in its OWN real
+// request shape (correct method, content-type, sibling fields preserved)
+// instead of being silently rewritten into an irrelevant query-string GET.
+//
+// This closes a real false-negative gap: CheckReflection (params.go) used to
+// call checkParamReflection (query-only) for EVERY stored parameter
+// regardless of its actual location. A body/JSON/header/cookie parameter
+// would have the canary added as an extra, unrelated QUERY key on a GET
+// request with no body at all — nowhere near where the application actually
+// reads that field — so it could never be observed reflecting. is_reflected
+// would then stay permanently 0 for that parameter, which matters beyond
+// just this probe: verify.go's final catch-all reflected-XSS pass filters
+// strictly on is_reflected=1, so a genuinely reflected non-query parameter
+// that the main native XSS/DOM pass left unresolved had no path to ever be
+// caught by the catch-all either.
+func checkInsertionReflection(ctx context.Context, ip insertionPoint, auth map[string]string) (reflected, htmlSink bool) {
+	canary := randomCanary()
+	var body []byte
+	var ctype string
+	var nosniff bool
+	ok := false
+	for attempt := 0; attempt < 2; attempt++ { // one retry: WAF/edge can drop the first probe
+		rctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		req, err := buildInjectedRequest(rctx, ip, canary, auth)
+		if err != nil {
+			cancel()
+			return false, false
+		}
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		resp, err := reflectClient.Do(req)
+		if err != nil {
+			cancel()
+			continue
+		}
+		body, _ = io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		ctype = resp.Header.Get("Content-Type")
+		nosniff = strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Content-Type-Options")), "nosniff")
+		resp.Body.Close()
+		cancel()
+		ok = true
+		break
+	}
+	if !ok {
+		return false, false
+	}
+	htmlSink = browserRendersAsHTML(ctype, string(body), nosniff)
+	if !htmlSink {
+		return false, false
+	}
+	return strings.Contains(string(body), canary), true
+}
+
 // redirectClass is the verdict of an open-redirect probe.
 type redirectClass int
 
