@@ -148,3 +148,25 @@ func TestGenerateDirectoryBackupCandidates(t *testing.T) {
 		t.Fatalf("budget exceeded: %d", len(out))
 	}
 }
+
+// TestGenerateBrandedBackupCandidatesHonorsAWideWordPool is the regression
+// test for the v4.9 fix: the real call site used to slice buildAdaptiveWordlist's
+// ranked output down to its top 10 words before handing it here, throwing
+// away the majority of the target's own real, ranked recon vocabulary
+// (product/feature/parameter names ranked #11-60 are still clearly
+// relevant, just not literally the single top hit). Every word in a 60-word
+// input must now actually reach the brand-pattern cross-product, not only
+// the first handful.
+func TestGenerateBrandedBackupCandidatesHonorsAWideWordPool(t *testing.T) {
+	words := make([]string, 60)
+	for i := range words {
+		words[i] = "productword" + strconv.Itoa(i)
+	}
+	got := generateBrandedBackupCandidates(words, 60)
+	joined := "\n" + strings.Join(got, "\n") + "\n"
+	for _, w := range []string{words[0], words[29], words[59]} {
+		if !strings.Contains(joined, "\n/"+w+"_backup.zip\n") {
+			t.Errorf("word %q (one of 60 supplied) never reached the brand-pattern cross-product — got truncated to fewer than 60 words", w)
+		}
+	}
+}
