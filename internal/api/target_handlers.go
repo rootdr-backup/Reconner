@@ -1693,7 +1693,7 @@ func (h *Handler) markdownNetworkSections(ctx context.Context, b *strings.Builde
 		}
 		crows.Close()
 		if len(cams) > 0 {
-			fmt.Fprintf(b, "## 📷 Cameras / DVRs (%d)\n\n", len(cams))
+			fmt.Fprintf(b, "## Cameras / DVRs (%d)\n\n", len(cams))
 			for _, c := range cams {
 				product := strings.TrimSpace(strings.ReplaceAll(strings.TrimPrefix(c.typ, "ingram_"), "_", " "))
 				fmt.Fprintf(b, "### %s — %s\n\n", c.addr, product)
@@ -1733,7 +1733,7 @@ func (h *Handler) markdownNetworkSections(ctx context.Context, b *strings.Builde
 		}
 		srows.Close()
 		if len(svcs) > 0 {
-			fmt.Fprintf(b, "## 🔌 Discovered Services (%d)\n\n", len(svcs))
+			fmt.Fprintf(b, "## Discovered Services (%d)\n\n", len(svcs))
 			b.WriteString("| Host:Port | Service | Product |\n|---|---|---|\n")
 			for _, s := range svcs {
 				fmt.Fprintf(b, "| %s:%d | %s | %s |\n", s.ip, s.port, s.service, mdCell(strings.TrimSpace(s.prod)))
@@ -1762,7 +1762,7 @@ func (h *Handler) markdownNetworkSections(ctx context.Context, b *strings.Builde
 		}
 		krows.Close()
 		if len(creds) > 0 {
-			fmt.Fprintf(b, "## 🔑 Recovered Access / Credentials (%d)\n\n", len(creds))
+			fmt.Fprintf(b, "## Recovered Access / Credentials (%d)\n\n", len(creds))
 			b.WriteString("| Host:Port | Kind | Severity | Detail |\n|---|---|---|---|\n")
 			for _, c := range creds {
 				fmt.Fprintf(b, "| %s | %s | %s | %s |\n", c.url, mdCell(c.kind), strings.ToUpper(c.sev), mdCell(c.ev))
@@ -1789,7 +1789,7 @@ func (h *Handler) markdownNetworkSections(ctx context.Context, b *strings.Builde
 		}
 		brows.Close()
 		if len(baks) > 0 {
-			fmt.Fprintf(b, "## 🗄 Backups / Config Files (%d)\n\n", len(baks))
+			fmt.Fprintf(b, "## Backups / Config Files (%d)\n\n", len(baks))
 			b.WriteString("| URL | Status | Type |\n|---|---|---|\n")
 			for _, x := range baks {
 				fmt.Fprintf(b, "| %s | %d | %s |\n", x.url, x.status, mdCell(x.ftype))

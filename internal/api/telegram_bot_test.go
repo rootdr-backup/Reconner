@@ -119,7 +119,7 @@ func TestTelegramOutboxFansOutAndHonorsPerChatPreferences(t *testing.T) {
 	var blockedMessage, skippedMessage string
 	_ = h.db.QueryRow(`SELECT message FROM telegram_outbox WHERE event_key='scan:phase:task-1:origin_ip:blocked' LIMIT 1`).Scan(&blockedMessage)
 	_ = h.db.QueryRow(`SELECT message FROM telegram_outbox WHERE event_key='scan:phase:task-1:nuclei:skipped' LIMIT 1`).Scan(&skippedMessage)
-	if !strings.Contains(blockedMessage, "🚫 Scan phase blocked") || !strings.Contains(skippedMessage, "⏭ Scan phase skipped") {
+	if !strings.Contains(blockedMessage, "Scan phase blocked") || !strings.Contains(skippedMessage, "Scan phase skipped") {
 		t.Fatalf("terminal phase notifications lost status: blocked=%q skipped=%q", blockedMessage, skippedMessage)
 	}
 	_, _ = h.db.Exec(`UPDATE telegram_config SET enabled=0 WHERE id=1`)

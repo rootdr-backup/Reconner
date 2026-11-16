@@ -10,6 +10,21 @@ import {
 } from '../../lib/scanModules'
 import type { Target } from '../../types'
 
+// Three ascending signal-style bars indicating relative scan speed/intensity —
+// a monochrome replacement for the old turtle/lightning/rocket emoji, in the
+// same spirit as ModuleIcon's letter-badge replacement of the old module emoji.
+function SpeedLevelIcon({ level, className }: { level: 1 | 2 | 3; className?: string }) {
+  const bars = [6, 9, 12]
+  return (
+    <svg viewBox="0 0 16 14" width={14} height={12} className={className} aria-hidden="true">
+      {bars.map((h, i) => (
+        <rect key={i} x={i * 5} y={13 - h} width={3} height={h} rx={1}
+          fill="currentColor" opacity={i < level ? 1 : 0.25} />
+      ))}
+    </svg>
+  )
+}
+
 // Profiles hold explicit operator choices. resolveModuleSelection adds the
 // required discovery/verification pipeline and the backend independently plans
 // the same closure, so a stale/custom client cannot bypass dependencies.
@@ -394,16 +409,19 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Scan speed</p>
           <div className="grid grid-cols-3 gap-1.5">
             {([
-              { id: 'slow', icon: '🐢', label: 'Slow', sub: 'WAF-safe' },
-              { id: 'normal', icon: '⚡', label: 'Normal', sub: 'Balanced' },
-              { id: 'fast', icon: '🚀', label: 'Fast', sub: 'Max speed' },
+              { id: 'slow', level: 1, label: 'Slow', sub: 'WAF-safe' },
+              { id: 'normal', level: 2, label: 'Normal', sub: 'Balanced' },
+              { id: 'fast', level: 3, label: 'Fast', sub: 'Max speed' },
             ] as const).map(o => {
               const on = webSpeed === o.id
               return (
                 <button key={o.id} onClick={() => setWebSpeed(o.id)}
                   className={`px-3 py-2 rounded-lg border text-center transition-all ${
                     on ? 'bg-accent/[.12] border-accent/40 ring-1 ring-accent/20' : 'bg-white/[.02] border-white/[.06] hover:border-white/20'}`}>
-                  <div className="text-sm">{o.icon} <span className="font-medium">{o.label}</span></div>
+                  <div className="flex items-center justify-center gap-1.5 text-sm">
+                    <SpeedLevelIcon level={o.level} className={on ? 'text-accent' : 'text-text-muted'} />
+                    <span className="font-medium">{o.label}</span>
+                  </div>
                   <div className="text-[10px] text-text-muted">{o.sub}</div>
                 </button>
               )

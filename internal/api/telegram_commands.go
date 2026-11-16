@@ -138,7 +138,7 @@ func (b *TelegramBot) handleCommand(ctx context.Context, token string, chat Tele
 			task, err = b.startTelegramScan(ctx, t, profile)
 			if err == nil {
 				b.audit(chat.ChatID, "scan_start", t.ID, "ok", profile)
-				reply("✅ Scan queued for "+displayDomain(t.Domain)+"\nProfile: "+profile+"\nTask: "+shortBotID(task.ID), b.scanKeyboard(t.ID))
+				reply("Scan queued for "+displayDomain(t.Domain)+"\nProfile: "+profile+"\nTask: "+shortBotID(task.ID), b.scanKeyboard(t.ID))
 				return
 			}
 		}
@@ -164,7 +164,7 @@ func (b *TelegramBot) handleCommand(ctx context.Context, token string, chat Tele
 		if err != nil {
 			reply("Scan control failed: "+err.Error(), nil)
 		} else {
-			reply("✅ Scan "+name+" requested for "+displayDomain(t.Domain), b.scanKeyboard(t.ID))
+			reply("Scan "+name+" requested for "+displayDomain(t.Domain), b.scanKeyboard(t.ID))
 		}
 	case "addtarget":
 		if !b.requireRole(chat, "admin", reply) {
@@ -185,7 +185,7 @@ func (b *TelegramBot) handleCommand(ctx context.Context, token string, chat Tele
 		if err != nil {
 			reply("Could not add target: "+err.Error(), nil)
 		} else {
-			reply("✅ Target added\n"+b.targetText(t), b.targetKeyboard(t.ID, chat.Role))
+			reply("Target added\n"+b.targetText(t), b.targetKeyboard(t.ID, chat.Role))
 		}
 	case "edittarget":
 		if !b.requireRole(chat, "admin", reply) {
@@ -206,7 +206,7 @@ func (b *TelegramBot) handleCommand(ctx context.Context, token string, chat Tele
 			reply("Could not edit target: "+err.Error(), nil)
 		} else {
 			t, _ = b.resolveTelegramTarget(ctx, t.ID)
-			reply("✅ Target updated\n"+b.targetText(t), b.targetKeyboard(t.ID, chat.Role))
+			reply("Target updated\n"+b.targetText(t), b.targetKeyboard(t.ID, chat.Role))
 		}
 	case "deletetarget":
 		if !b.requireRole(chat, "admin", reply) {
@@ -225,7 +225,7 @@ func (b *TelegramBot) handleCommand(ctx context.Context, token string, chat Tele
 			{Text: "Delete permanently", CallbackData: "delete_confirm:" + t.ID},
 			{Text: "Keep target", CallbackData: "delete_cancel:" + t.ID},
 		}}}
-		reply("⚠️ Delete target?\n"+displayDomain(t.Domain)+"\nRunning scans and all results will be removed.", keyboard)
+		reply("Delete target?\n"+displayDomain(t.Domain)+"\nRunning scans and all results will be removed.", keyboard)
 	default:
 		reply("Unknown command. Use /help.", nil)
 	}
@@ -265,7 +265,7 @@ func (b *TelegramBot) handleCallback(ctx context.Context, token string, chat Tel
 			reply("Could not start scan: "+runErr.Error(), nil)
 		} else {
 			b.answerCallback(ctx, token, q.ID, "Scan queued")
-			reply("✅ Scan queued for "+displayDomain(t.Domain)+"\nTask: "+shortBotID(task.ID), b.scanKeyboard(t.ID))
+			reply("Scan queued for "+displayDomain(t.Domain)+"\nTask: "+shortBotID(task.ID), b.scanKeyboard(t.ID))
 		}
 	case "pause", "resume", "skip", "cancel":
 		if roleRank(chat.Role) < roleRank("operator") {
@@ -292,7 +292,7 @@ func (b *TelegramBot) handleCallback(ctx context.Context, token string, chat Tel
 			reply("Could not delete target: "+runErr.Error(), nil)
 		} else {
 			b.answerCallback(ctx, token, q.ID, "Target deleted")
-			reply("🗑 Target deleted: "+displayDomain(t.Domain), nil)
+			reply("Target deleted: "+displayDomain(t.Domain), nil)
 		}
 	case "delete_cancel":
 		b.answerCallback(ctx, token, q.ID, "Deletion cancelled")
@@ -377,12 +377,12 @@ func (b *TelegramBot) targetText(t telegramTarget) string {
 }
 
 func (b *TelegramBot) targetKeyboard(id, role string) *tgInlineKeyboard {
-	rows := [][]tgInlineButton{{{Text: "🔎 Findings", CallbackData: "findings:" + id}}}
+	rows := [][]tgInlineButton{{{Text: "Findings", CallbackData: "findings:" + id}}}
 	if roleRank(role) >= roleRank("operator") {
 		rows = append(rows,
-			[]tgInlineButton{{Text: "🚀 Standard scan", CallbackData: "scan:" + id}},
+			[]tgInlineButton{{Text: "Standard scan", CallbackData: "scan:" + id}},
 			[]tgInlineButton{{Text: "⏭ Skip phase", CallbackData: "skip:" + id}},
-			[]tgInlineButton{{Text: "⏸ Pause", CallbackData: "pause:" + id}, {Text: "▶ Resume", CallbackData: "resume:" + id}, {Text: "🛑 Cancel", CallbackData: "cancel:" + id}},
+			[]tgInlineButton{{Text: "Pause", CallbackData: "pause:" + id}, {Text: "Resume", CallbackData: "resume:" + id}, {Text: "Cancel", CallbackData: "cancel:" + id}},
 		)
 	}
 	return &tgInlineKeyboard{Rows: rows}

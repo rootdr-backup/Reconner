@@ -111,7 +111,11 @@ export function TelegramIntegration() {
         <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="grid place-items-center w-8 h-8 rounded-lg bg-[#229ED9]/15 text-lg">✈</span>
+              <span className="grid place-items-center w-8 h-8 rounded-lg bg-[#229ED9]/15 text-[#229ED9]">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+                  <path d="M22 2 15 22 11 13 2 9 22 2z" />
+                </svg>
+              </span>
               <div>
                 <h2 className="text-sm font-semibold">Telegram control bot</h2>
                 <p className="text-[11px] text-text-muted">Scan controls, target management and durable finding alerts through one or more chats.</p>

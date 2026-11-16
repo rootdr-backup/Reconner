@@ -380,7 +380,7 @@ func (b *TelegramBot) TestChat(ctx context.Context, entryID string) error {
 	if err := b.h.db.QueryRowContext(ctx, `SELECT chat_id FROM telegram_chats WHERE id=? AND enabled=1`, entryID).Scan(&chatID); err != nil {
 		return fmt.Errorf("enabled chat not found")
 	}
-	return b.sendMessage(ctx, token, chatID, "✅ Reconner is connected. Scan, phase and verified-finding notifications are enabled for this chat.", nil)
+	return b.sendMessage(ctx, token, chatID, "Reconner is connected. Scan, phase and verified-finding notifications are enabled for this chat.", nil)
 }
 
 func (b *TelegramBot) RetryFailed(ctx context.Context) error {
@@ -630,30 +630,20 @@ func (b *TelegramBot) enqueue(category, eventKey, text string, keyboard *tgInlin
 
 func (b *TelegramBot) NotifyScanStarted(taskID, targetID, domain string) {
 	b.scans.Store(taskID, time.Now())
-	text := "🚀 Scan started\nTarget: " + displayDomain(domain) + "\nTask: " + shortBotID(taskID)
+	text := "Scan started\nTarget: " + displayDomain(domain) + "\nTask: " + shortBotID(taskID)
 	b.enqueue("scan_started", "scan:start:"+taskID, text, b.scanKeyboard(targetID))
 }
 
 func (b *TelegramBot) NotifyPhaseFinished(taskID, targetID, domain, phase, status string, duration time.Duration, progress, total int) {
-	icon := map[string]string{"completed": "✅", "blocked": "🚫", "failed": "❌", "timed_out": "⏱", "skipped": "⏭", "cancelled": "🛑"}[status]
-	if icon == "" {
-		icon = "ℹ️"
-	}
-	text := fmt.Sprintf("%s Scan phase %s\nTarget: %s\nPhase: %s\nProgress: %d/%d\nDuration: %s",
-		icon, strings.ReplaceAll(status, "_", " "), displayDomain(domain), phase, progress, total, shortDuration(duration))
+	text := fmt.Sprintf("Scan phase %s\nTarget: %s\nPhase: %s\nProgress: %d/%d\nDuration: %s",
+		strings.ReplaceAll(status, "_", " "), displayDomain(domain), phase, progress, total, shortDuration(duration))
 	b.enqueue("phase_finished", "scan:phase:"+taskID+":"+phase+":"+status, text, b.scanKeyboard(targetID))
 	b.enqueueValidFindingsSince(targetID, b.findingSweepStart(taskID, duration))
 }
 
 func (b *TelegramBot) NotifyScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int) {
-	icon := "✅"
-	if status == "failed" {
-		icon = "❌"
-	} else if status == "cancelled" {
-		icon = "🛑"
-	}
-	text := fmt.Sprintf("%s Scan %s\nTarget: %s\nDuration: %s\nSubdomains: %d · Alive: %d\nVerified findings: %d\nNative: %d · Nuclei: %d · Backups: %d · Redirects: %d · JS: %d",
-		icon, status, displayDomain(domain), shortDuration(duration), stats["subdomains"], stats["alive"], stats["verified"],
+	text := fmt.Sprintf("Scan %s\nTarget: %s\nDuration: %s\nSubdomains: %d · Alive: %d\nVerified findings: %d\nNative: %d · Nuclei: %d · Backups: %d · Redirects: %d · JS: %d",
+		status, displayDomain(domain), shortDuration(duration), stats["subdomains"], stats["alive"], stats["verified"],
 		stats["vulns"], stats["nuclei"], stats["backups"], stats["redirects"], stats["js"])
 	b.enqueue("scan_finished", "scan:finish:"+taskID+":"+status, text, b.scanKeyboard(targetID))
 	b.enqueueValidFindingsSince(targetID, b.findingSweepStart(taskID, duration))
@@ -670,7 +660,7 @@ func (b *TelegramBot) findingSweepStart(taskID string, fallbackDuration time.Dur
 }
 
 func (b *TelegramBot) NotifyNewVuln(findingID, targetID, domain, vulnType, severity, rawURL, parameter string) {
-	text := "🚨 Verified finding\nTarget: " + displayDomain(domain) + "\nSeverity: " + strings.ToUpper(severity) +
+	text := "Verified finding\nTarget: " + displayDomain(domain) + "\nSeverity: " + strings.ToUpper(severity) +
 		"\nType: " + vulnType + "\nURL: " + rawURL
 	if parameter != "" {
 		text += "\nParameter: " + parameter
@@ -679,7 +669,7 @@ func (b *TelegramBot) NotifyNewVuln(findingID, targetID, domain, vulnType, sever
 }
 
 func (b *TelegramBot) NotifyMonitorChange(targetID, domain, changeType, title, rawURL, oldVal, newVal string) {
-	text := "🔭 Monitor change\nTarget: " + displayDomain(domain) + "\nType: " + changeType
+	text := "Monitor change\nTarget: " + displayDomain(domain) + "\nType: " + changeType
 	// The notification title is the human-readable summary ("3 new subdomain(s)
 	// found on x.com", "security header removed", …) — surface it so the alert
 	// says WHAT changed, not just the change category + URL.
@@ -736,7 +726,7 @@ func (b *TelegramBot) enqueueValidFindingsSince(targetID string, since time.Time
 		rows.Close()
 	}
 	for _, f := range all {
-		text := "🚨 Verified finding\nTarget: " + displayDomain(domain) + "\nSeverity: " + strings.ToUpper(f.severity) +
+		text := "Verified finding\nTarget: " + displayDomain(domain) + "\nSeverity: " + strings.ToUpper(f.severity) +
 			"\nType: " + f.typ + "\nURL: " + f.rawURL + "\nProof: " + f.qualifier
 		if f.param != "" {
 			text += "\nParameter: " + f.param
@@ -747,13 +737,13 @@ func (b *TelegramBot) enqueueValidFindingsSince(targetID string, since time.Time
 
 func (b *TelegramBot) scanKeyboard(targetID string) *tgInlineKeyboard {
 	return &tgInlineKeyboard{Rows: [][]tgInlineButton{
-		{{Text: "📊 Target", CallbackData: "target:" + targetID}, {Text: "⏭ Skip phase", CallbackData: "skip:" + targetID}},
-		{{Text: "⏸ Pause", CallbackData: "pause:" + targetID}, {Text: "▶ Resume", CallbackData: "resume:" + targetID}, {Text: "🛑 Cancel", CallbackData: "cancel:" + targetID}},
+		{{Text: "Target", CallbackData: "target:" + targetID}, {Text: "Skip phase", CallbackData: "skip:" + targetID}},
+		{{Text: "Pause", CallbackData: "pause:" + targetID}, {Text: "Resume", CallbackData: "resume:" + targetID}, {Text: "Cancel", CallbackData: "cancel:" + targetID}},
 	}}
 }
 
 func (b *TelegramBot) findingKeyboard(targetID string) *tgInlineKeyboard {
-	return &tgInlineKeyboard{Rows: [][]tgInlineButton{{{Text: "🔎 Latest findings", CallbackData: "findings:" + targetID}, {Text: "📊 Target", CallbackData: "target:" + targetID}}}}
+	return &tgInlineKeyboard{Rows: [][]tgInlineButton{{{Text: "Latest findings", CallbackData: "findings:" + targetID}, {Text: "Target", CallbackData: "target:" + targetID}}}}
 }
 
 func boolInt(v bool) int {
