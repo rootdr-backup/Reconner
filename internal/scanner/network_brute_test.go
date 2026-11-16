@@ -294,9 +294,12 @@ func TestMySQLEscapeHandlesDSNSpecialChars(t *testing.T) {
 
 // TestNetworkCredAuditGateBlocksEveryProtocolWithoutAuthorization proves the
 // shared fail-closed gate: with NEITHER the server-wide switch nor the
-// per-scan token set, none of the five brute modules ever reaches the network
-// at all (BlockedPhase for "no verified ... service" is not reached because
-// the authorization guard returns first).
+// per-scan token set, none of the credential-audit modules (the five native
+// protocols here, the four tool-backed ones in network_brute_tools.go, and
+// RunBasicAuth in network.go — every one of them calls guardAuthorized/
+// networkAuthorized before touching the network) ever reaches the network at
+// all (BlockedPhase for "no verified ... service" is not reached because the
+// authorization guard returns first).
 func TestNetworkCredAuditGateBlocksEveryProtocolWithoutAuthorization(t *testing.T) {
 	s := &NetworkScanner{cfg: &config.Config{}}
 	if s.networkAuthorized(context.Background()) {

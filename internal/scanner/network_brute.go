@@ -38,14 +38,19 @@ import (
 //     post-auth "database does not exist" reply — auth itself already
 //     succeeded), or Redis replying +OK to AUTH. Zero false positives.
 //
-// RDP/VNC/Telnet/SMB are deliberately NOT included: there is no way to prove a
-// credential against them without either a full NTLM/CredSSP or RFB protocol
-// implementation (high correctness risk, hand-rolled) or a third-party brute
-// tool — and this project has twice evaluated and explicitly retired that path
-// (see the "retired/unused tool" guards in tool_install_test.go and
-// module_contracts_test.go). Those services are still enumerated and
-// fingerprinted by the port-scan module; only guessing their credentials is
-// out of scope here.
+// RDP/VNC/Telnet/SMB are NOT implemented here: there is no safe, dependency-
+// light way to prove a credential against them natively (RDP/SMB need a full
+// NTLM/CredSSP handshake, VNC a still-binary RFB challenge-response), and a
+// hand-rolled implementation of any of those is a real correctness risk for a
+// security-sensitive auth check. They are instead covered by the tool-backed
+// half of this same module in network_brute_tools.go, which shells out to
+// ncrack (rdp/vnc/telnet) and hydra (smb) — two purpose-built, widely audited
+// network-login crackers — under the exact same authorization/scoping/rate-
+// limiting discipline as every check in this file. (This project has
+// previously retired other third-party tools found unreliable or unused —
+// see the "retired/unused tool" guard in tool_install_test.go — ncrack and
+// hydra are a deliberate, scoped exception for these four protocols
+// specifically, not a reversal of that general caution.)
 
 //go:embed netassets/net_passwords.txt
 var netPasswordListRaw string

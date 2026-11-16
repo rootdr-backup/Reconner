@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
+	"github.com/recon-platform/internal/database"
 )
 
 func TestNativeConnectScanFindsOnlyOpenLocalPort(t *testing.T) {
@@ -48,8 +49,14 @@ func TestNmapXMLServiceAndOSParsing(t *testing.T) {
 	}
 }
 
-func TestBasicAuthAuditRequiresChallengeAndStableSuccess(t *testing.T) {
-	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:admin"))
+// basicAuthTestServer returns an httptest server plus the seeded
+// network_services row every RunBasicAuth test in this file needs: a real
+// Basic challenge on an unauthenticated request, accepting ONLY the exact
+// credential want (any other Authorization header — including none, and
+// including the negative-control credential — gets the same 401 challenge).
+func basicAuthTestServer(t *testing.T, db *database.DB, targetID, user, pass string) string {
+	t.Helper()
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == want {
 			w.WriteHeader(http.StatusOK)
@@ -58,17 +65,23 @@ func TestBasicAuthAuditRequiresChallengeAndStableSuccess(t *testing.T) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="local-test"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	u, _ := url.Parse(server.URL)
 	port, _ := strconv.Atoi(u.Port())
-	db, targetID := testDB(t)
-	defer db.Close()
-	_, err := db.Exec(`INSERT INTO network_services(id,target_id,ip,port,protocol,is_web,web_url,web_status) VALUES(?,?,?,?,'tcp',1,?,401)`, uuid.New().String(), targetID, u.Hostname(), port, server.URL)
-	if err != nil {
+	if _, err := db.Exec(`INSERT INTO network_services(id,target_id,ip,port,protocol,is_web,web_url,web_status) VALUES(?,?,?,?,'tcp',1,?,401)`,
+		uuid.New().String(), targetID, u.Hostname(), port, server.URL); err != nil {
 		t.Fatal(err)
 	}
+	return server.URL
+}
+
+func TestBasicAuthAuditRequiresChallengeAndStableSuccess(t *testing.T) {
+	db, targetID := testDB(t)
+	defer db.Close()
+	basicAuthTestServer(t, db, targetID, "admin", "admin")
 	s := NewNetworkScanner(db, nil, &config.Config{}, nil)
-	if err := s.RunBasicAuth(context.Background(), targetID, "127.0.0.1", func(string, string, string) {}); err != nil {
+	ctx := WithNetCredAuthorized(context.Background(), true)
+	if err := s.RunBasicAuth(ctx, targetID, "127.0.0.1", func(string, string, string) {}); err != nil {
 		t.Fatal(err)
 	}
 	var payload string
@@ -77,6 +90,66 @@ func TestBasicAuthAuditRequiresChallengeAndStableSuccess(t *testing.T) {
 	}
 	if payload != "admin:admin" {
 		t.Fatalf("payload=%q", payload)
+	}
+}
+
+// TestBasicAuthAuditRequiresExplicitAuthorization is the regression test for
+// the v5 fix: RunBasicAuth used to be the one credential-audit module in this
+// package that never checked networkAuthorized at all, unlike every sibling
+// RunBruteXxx. Without authorization it must never send a single credential.
+func TestBasicAuthAuditRequiresExplicitAuthorization(t *testing.T) {
+	db, targetID := testDB(t)
+	defer db.Close()
+	basicAuthTestServer(t, db, targetID, "admin", "admin")
+	s := NewNetworkScanner(db, nil, &config.Config{}, nil)
+	if err := s.RunBasicAuth(context.Background(), targetID, "127.0.0.1", func(string, string, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='http_basic_weak_credentials'`, targetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("unauthorized RunBasicAuth sent credentials and found %d finding(s)", count)
+	}
+}
+
+// TestBasicAuthAuditSkipsEndpointThatAcceptsAnyCredential is the regression
+// test for the negative-control fix: an endpoint that returns a real Basic
+// challenge but then accepts EVERY Authorization header, valid-looking or
+// not (a misconfigured proxy, an auth check that never actually runs), must
+// never be reported — the old code would have reported whichever candidate
+// happened to be tried first, since "stable on replay" alone can't tell a
+// real credential from a non-functioning check.
+func TestBasicAuthAuditSkipsEndpointThatAcceptsAnyCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="local-test"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK) // ANY non-empty Authorization header "succeeds"
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(u.Port())
+	db, targetID := testDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO network_services(id,target_id,ip,port,protocol,is_web,web_url,web_status) VALUES(?,?,?,?,'tcp',1,?,401)`,
+		uuid.New().String(), targetID, u.Hostname(), port, server.URL); err != nil {
+		t.Fatal(err)
+	}
+	s := NewNetworkScanner(db, nil, &config.Config{}, nil)
+	ctx := WithNetCredAuthorized(context.Background(), true)
+	if err := s.RunBasicAuth(ctx, targetID, "127.0.0.1", func(string, string, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='http_basic_weak_credentials'`, targetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("a non-discriminating endpoint produced %d finding(s), want 0 (negative control should have skipped it)", count)
 	}
 }
 
