@@ -234,16 +234,29 @@ ENV PATH="/opt/venv/bin:${PATH}"
 # upstream graph first, apply that narrow metadata correction, then make
 # `pip check` prove the final environment is internally consistent.
 # msgpack 1.2.3 fixes CVE-2026-114613 (DoS via memory leak during map
-# deserialization); soupsieve 4.0.0 fixes CVE-2026-126190/126191 (both are
-# transitive deps — waymore pulls msgpack, waymore's beautifulsoup4 pulls
-# soupsieve — at pre-fix versions with no upper bound, so the upgrade-only
-# `--no-deps` pin here is enough; `pip check` below still proves it).
+# deserialization) — a transitive dep (waymore pulls it in at a pre-fix
+# version with no upper bound), so the upgrade-only `--no-deps` pin here is
+# enough; `pip check` below still proves it.
+#
+# soupsieve (waymore's beautifulsoup4 pulls it in, also pre-fix/unbounded)
+# has two matching CVEs, 2026-126190 and 2026-126191, fixed in 4.0.0 and
+# 3.0.2 respectively — but EVERY release that fixes either one declares
+# `Requires-Python >=3.11.5` on PyPI, and this stage's Debian base
+# (bookworm) ships python3 3.11.2. There is no installable fixed version on
+# this interpreter: the highest soupsieve pip can resolve here is 2.10,
+# which is the already-vulnerable version both CVEs were filed against.
+# Raising the floor means moving bookworm -> trixie for every stage sharing
+# DEBIAN_VERSION, in lockstep with GO_VERSION's own "-bookworm" suffix (see
+# the glibc/ABI note atop this file) — a coordinated base-image bump across
+# every CGO-linked tool, deserving its own dedicated, tested change rather
+# than landing inside this CVE-batch fix. Tracked instead via a scoped,
+# documented exception in .trivy/ignore-policy.rego for just these two IDs.
 RUN pip install --no-cache-dir --upgrade \
       pip==26.2.1 setuptools==80.9.0 \
  && pip install --no-cache-dir \
       dirsearch==0.5.0 uro==1.0.2 waymore==8.9 \
  && pip install --no-cache-dir --upgrade --no-deps \
-      cryptography==50.0.0 pyOpenSSL==26.4.0 msgpack==1.2.3 soupsieve==4.0.0 \
+      cryptography==50.0.0 pyOpenSSL==26.4.0 msgpack==1.2.3 \
  && sed -i 's/Requires-Dist: pyopenssl==26.1.0/Requires-Dist: pyopenssl>=26.4.0,<27/' \
       /opt/venv/lib/python*/site-packages/dirsearch-0.5.0.dist-info/METADATA \
  && pip check \
