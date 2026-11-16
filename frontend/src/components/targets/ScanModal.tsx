@@ -5,7 +5,7 @@ import { targets as targetsApi } from '../../lib/api'
 import { useUIStore } from '../../store/ui'
 import { cn } from '../../lib/utils'
 import {
-  MODULE_BY_ID, SAFE_PROFILE, SCAN_BUNDLES, SCAN_GROUPS, SCAN_MODULES,
+  INITIAL_ACCESS_PROFILE, MODULE_BY_ID, SAFE_PROFILE, SCAN_BUNDLES, SCAN_GROUPS, SCAN_MODULES,
   STANDARD_PROFILE, resolveModuleSelection,
 } from '../../lib/scanModules'
 import type { Target } from '../../types'
@@ -16,6 +16,7 @@ import type { Target } from '../../types'
 const PROFILE_MODULES: Record<string, string[]> = {
   safe: SAFE_PROFILE,
   standard: STANDARD_PROFILE,
+  initial_access: INITIAL_ACCESS_PROFILE,
   deep: SCAN_MODULES.filter(module => !module.automatic).map(module => module.id),
 }
 
@@ -39,6 +40,10 @@ export function isIPLiteralScope(scanScope: string): boolean {
 const SCAN_PROFILES: { id: string; label: string; sub: string }[] = [
   { id: 'safe', label: 'Safe', sub: 'Low-impact default' },
   { id: 'standard', label: 'Standard', sub: 'Focused validation' },
+  // Red-team-style objective: only the detector classes that can themselves
+  // hand over panel/credential access, RCE, or network access — see
+  // INITIAL_ACCESS_PROFILE's own comment for exactly what and why.
+  { id: 'initial_access', label: 'Initial Access', sub: 'Panel / RCE / network only' },
   { id: 'deep', label: 'Deep', sub: 'All opt-in checks' },
   { id: 'custom', label: 'Custom', sub: 'Your picks' },
 ]
@@ -340,7 +345,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
         {/* Scan profile presets (Acunetix/Burp-style). */}
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Scan profile</p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
             {SCAN_PROFILES.map(p => (
               <button key={p.id} type="button" onClick={() => applyProfile(p.id)}
                 className={cn('flex flex-col items-start px-3 py-2 rounded-lg border text-left transition-colors',

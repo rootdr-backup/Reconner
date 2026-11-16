@@ -111,3 +111,33 @@ export const SCAN_BUNDLES = [
 
 export const SAFE_PROFILE = ['http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'passive', 'exposure', 'intel']
 export const STANDARD_PROFILE = [...SAFE_PROFILE, 'param_reflection', 'backup_discovery', 'api_data_exposure', 'open_redirect', 'xss', 'sqli', 'cors', 'jwt']
+
+// INITIAL_ACCESS_PROFILE is a red-team-style objective preset: skip every
+// detector class that cannot, by itself, hand an attacker an entry point —
+// and run full discovery for every detector class that can. The three
+// outcomes it targets, and what covers each:
+//   - panel / credential access: dir_discovery + backup_discovery (exposed
+//     admin paths and leaked config/secret files), exposure + intel (tech
+//     fingerprinting feeds nuclei's default-credential and known-panel
+//     templates), takeover (a hijackable subdomain IS a handed-over asset),
+//     jwt/idor/authz/ato (auth-bypass and cross-identity access).
+//   - RCE: sqli (stacked-query/xp_cmdshell execution), cmdi, ssti, lfi (now
+//     with php://filter/data/expect wrapper + log-poisoning confirmation),
+//     xxe, file_upload, and nuclei's own curated known-CVE RCE templates.
+//   - network access: ssrf (the pivot primitive into internal services) and
+//     oast (the out-of-band channel SSRF/blind-RCE confirmation depends on).
+// subdomain_enum is force-included here even though it is normally an
+// explicit-only opt-in everywhere else (see its own module comment) — an
+// initial-access objective benefits from the widest asset map, not a fast
+// single-host pass. Deliberately excludes client-side-only or no-entry-point
+// classes (xss, csrf, cors, cache_poison, race, smuggling, vuln_scan,
+// open_redirect, blh, nosqli, csti, api_data_exposure) to stay a focused
+// objective rather than "everything".
+export const INITIAL_ACCESS_PROFILE = [
+  'http_probe', 'js_analysis', 'js_endpoints', 'param_discovery', 'param_reflection',
+  'subdomain_enum',
+  'dir_discovery', 'backup_discovery', 'exposure', 'intel', 'takeover', 'nuclei',
+  'sqli', 'cmdi', 'ssti', 'lfi', 'xxe', 'file_upload',
+  'ssrf', 'oast',
+  'jwt', 'idor', 'authz', 'ato',
+]
