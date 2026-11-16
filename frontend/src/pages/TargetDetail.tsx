@@ -23,9 +23,12 @@ const isScannableProjectAsset = (asset: Asset) =>
 const WP_TAG = 'wp-scanner'
 
 // Findings information architecture — a logical hierarchy instead of a flat row
-// of unrelated siblings. Assets = the discovered surface; Vulnerabilities = the
-// working area (Confirmed vs Needs-Review first, then by check type); Activity =
-// change monitoring.
+// of unrelated siblings. "Surface" = the discovered recon surface, named to
+// avoid colliding with this page's OTHER, unrelated "Assets" concept (the
+// scanned-individually sub-asset list rendered above these tabs — a
+// project's set of scan targets, not a tab group); Vulnerabilities = the
+// working area (Confirmed vs Needs-Review first, then by check type);
+// Activity = change monitoring.
 //
 // This layout is NOT one-size-fits-all: a pure network (IP/CIDR) project never
 // populates the web-crawl tabs (Hosts/Scripts/Parameters/Directories/Admin
@@ -62,13 +65,13 @@ const WP_TABS = [
 export function tabGroupsFor(isNetwork: boolean, isWordPress: boolean) {
   if (isNetwork) {
     return [
-      { group: 'Assets', tabs: [{ id: 'network-services', label: 'Network services', desc: 'Every open port nmap/naabu verified, with service, product/version and banner.' }] },
+      { group: 'Surface', tabs: [{ id: 'network-services', label: 'Network services', desc: 'Every open port nmap/naabu verified, with service, product/version and banner.' }] },
       { group: 'Vulnerabilities', tabs: VULN_TABS.filter(t => ['vulns', 'candidates', 'nuclei'].includes(t.id)) },
       { group: 'Activity', tabs: [{ id: 'monitor', label: 'Changes', desc: 'Changes detected by automated monitoring re-scans.' }] },
     ]
   }
   const groups = [
-    { group: 'Assets', tabs: WEB_ASSET_TABS },
+    { group: 'Surface', tabs: WEB_ASSET_TABS },
     ...(isWordPress ? [{ group: 'WordPress', tabs: WP_TABS }] : []),
     { group: 'Vulnerabilities', tabs: VULN_TABS },
     { group: 'Activity', tabs: [{ id: 'monitor', label: 'Changes', desc: 'Changes detected by automated monitoring re-scans.' }] },
@@ -1003,16 +1006,15 @@ export default function TargetDetail() {
       <div className={cn('space-y-5', isNetwork && 'order-1')}>
       {isScanning && <LiveResults targetId={id!} active={isScanning} />}
 
-      <div className="border-b border-border flex items-stretch overflow-x-auto">
-        {tabGroups.map((g, gi) => (
-          <div key={g.group} className="flex items-center">
-            {gi > 0 && <span className="mx-1.5 my-2 w-px bg-border" />}
-            <span className="pl-2 pr-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted/60 self-center select-none">{g.group}</span>
+      <div className="flex flex-wrap items-start gap-2 border-b border-border pb-3">
+        {tabGroups.map(g => (
+          <div key={g.group} className="flex flex-wrap items-center gap-0.5 rounded-lg border border-white/[.06] bg-white/[.02] p-1">
+            <span className="px-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted/70 select-none">{g.group}</span>
             {g.tabs.map(t => (
               <button key={t.id} onClick={() => setTab(t.id)} title={t.desc}
                 className={cn(
-                  'px-3 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-all',
-                  tab === t.id ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-secondary'
+                  'rounded-md px-2.5 py-1.5 text-sm font-medium whitespace-nowrap transition-all',
+                  tab === t.id ? 'bg-accent/15 text-accent' : 'text-text-muted hover:text-text-secondary hover:bg-white/[.04]'
                 )}>
                 {t.label}
               </button>

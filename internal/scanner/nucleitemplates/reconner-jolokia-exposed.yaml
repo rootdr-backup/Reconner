@@ -1,0 +1,37 @@
+id: reconner-jolokia-exposed
+
+info:
+  name: Jolokia JMX-over-HTTP agent exposed
+  author: reconner
+  severity: high
+  description: |
+    An unauthenticated Jolokia agent exposes the JVM's JMX MBean tree over
+    plain HTTP. Read access alone leaks internal application state
+    (datasource credentials, session/cache internals); on an agent that
+    isn't locked to a read-only policy, the write/exec operations are a
+    well-documented path to remote code execution (e.g. via a
+    MemoryPoolMXBean/MLet-style MBean write). Matches only Jolokia's own
+    version-response shape, so it never fires on an unrelated JSON API.
+  reference:
+    - https://jolokia.org/reference/html/security.html
+  tags: reconner,exposure,jolokia,jmx,rce-precursor
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/jolokia/version"
+      - "{{BaseURL}}/jolokia-war/version"
+      - "{{BaseURL}}/actuator/jolokia/version"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - '"request"\s*:\s*\{\s*"type"\s*:\s*"version"\s*\}'
+      - type: word
+        part: body
+        words:
+          - '"protocol"'
+      - type: status
+        status:
+          - 200
