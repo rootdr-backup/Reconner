@@ -223,10 +223,13 @@ type Config struct {
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime
-	// of a healthy multi-phase scan is not capped. 0 ⇒ built-in default (24h).
-	// Each new phase also gets adaptive headroom based on the subdomains known at
-	// that point in the current run — this field is the FLOOR, not a hard ceiling
-	// that ignores target size.
+	// of a healthy multi-phase scan is not capped. 0 ⇒ built-in default (720h /
+	// 30 days). This is intentionally huge: it exists ONLY to eventually recover
+	// a genuinely hung subprocess, never to cap how long a real, still-
+	// progressing scan on a large target is allowed to run — a scan taking
+	// more than a day is normal, not a fault. Each phase also gets adaptive
+	// headroom on top of this floor based on the live subdomain/URL/parameter
+	// surface known at that point in the run (see scanSurface in scheduler.go).
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
 	// Removed v2 network configuration keys are intentionally absent. v3.4 uses
 	// explicit, asset-gated Network Fast/Normal/Deep plan tokens; old JSON keys are
@@ -500,12 +503,19 @@ func defaultConfig() *Config {
 		NucleiVerify:       true,  // route nuclei sqli/xss/redirect hits through the verifier
 		NucleiExtraTargets: true,  // scan discovered parameterized URLs, not just site roots
 		NucleiDAST:         false, // parameter-fuzzing templates are explicit opt-in
-		// NucleiMaxSurfaces/NucleiMaxPerHost/DirDiscoveryMaxHosts deliberately stay
-		// 0 here so they follow their documented "0 ⇒ built-in default" contract
-		// (see the field comments) instead of baking a fixed numeric ceiling into
-		// every config.json ever saved — an operator who wants a REAL cap sets one
-		// explicitly; a fresh install gets the generous built-in default.
-		ScanWatchdogHours:       24,                // per-phase watchdog floor; reset on progress and scaled for large targets
+		// NucleiMaxSurfaces/NucleiMaxPerHost/DirDiscoveryMaxHosts/ScanWatchdogHours
+		// deliberately stay 0 here so they follow their documented "0 ⇒ built-in
+		// default" contract (see the field comments) instead of baking a fixed
+		// numeric ceiling into every config.json ever saved — an operator who
+		// wants a REAL cap sets one explicitly; a fresh install gets the
+		// generous built-in default. ScanWatchdogHours previously baked in a
+		// literal 24 here, which is exactly the mistake this comment warns
+		// against: every install that ever started had "scan_watchdog_hours":24
+		// persisted, silently reintroducing the old flat 24h-kills-the-scan
+		// ceiling even after the code's own fallback was raised to 30 days. An
+		// existing install must explicitly set it to 0 (or delete the key) in
+		// its own config.json to actually pick up the new default — see the
+		// release notes.
 		EnableDAST:              true,              // native context-aware DAST (XSS/SQLi) over all insertion points
 		AIModel:                 "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
 		AIMaxIterations:         40,                // hard cap on the agent loop

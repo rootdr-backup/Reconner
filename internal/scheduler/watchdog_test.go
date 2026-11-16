@@ -73,6 +73,28 @@ func TestWatchdogScalesWithHTTPSurfaceNotJustSubdomains(t *testing.T) {
 	}
 }
 
+// TestWatchdogDefaultFloorIsThirtyDaysNotADay locks in the operator-requested
+// fix: an UNSET watchdog config (the vast majority of real deployments — see
+// the Default() config comment on why this field must never bake a non-zero
+// number into every saved config.json) now floors at 30 days, not 24 hours.
+// A scan is meant to be stopped by the operator's own Cancel, never by a
+// clock — this is the whole point of the change, so it is pinned directly.
+func TestWatchdogDefaultFloorIsThirtyDaysNotADay(t *testing.T) {
+	got := baseScanWatchdog(&config.Config{ScanWatchdogHours: 0})
+	if want := 720 * time.Hour; got != want {
+		t.Fatalf("default watchdog floor=%v, want %v (30 days)", got, want)
+	}
+	// A nil config (no config loaded yet) must behave identically, never panic.
+	if got := baseScanWatchdog(nil); got != 720*time.Hour {
+		t.Fatalf("nil-config watchdog floor=%v, want 720h", got)
+	}
+	// An operator's own EXPLICIT value is still honored — this is a generous
+	// default, not a hard-coded override of deliberate operator configuration.
+	if got := baseScanWatchdog(&config.Config{ScanWatchdogHours: 6}); got != 6*time.Hour {
+		t.Fatalf("explicit operator override=%v, want 6h honored as-is", got)
+	}
+}
+
 func TestWatchdogCapsAtMaximumRegardlessOfSurfaceSignal(t *testing.T) {
 	cfg := &config.Config{ScanWatchdogHours: 24}
 	got := effectiveWatchdog(cfg, scanSurface{subdomains: 100000, httpServices: 1000000, parameters: 5000000})

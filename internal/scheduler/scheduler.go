@@ -1438,13 +1438,20 @@ func (s *Scheduler) tryStartTask(taskID string) {
 // baseScanWatchdog is the FLOOR of the per-phase watchdog — not the whole
 // story, see effectiveWatchdog. A module that hangs would otherwise hold its
 // concurrency slot forever, permanently lowering capacity until nothing new can
-// start (a cause of scans stuck in 'pending'). The watchdog exists to catch a
-// WEDGED phase, not to cap the combined runtime of a healthy scan.
+// start (a cause of scans stuck in 'pending'). The watchdog exists ONLY to
+// eventually recover a WEDGED phase — never to cap how long a genuinely
+// healthy, still-progressing scan is allowed to take. Operator feedback was
+// explicit: a large target legitimately taking more than a day is not a bug,
+// and nothing should kill it on a clock alone — only an operator's own
+// Cancel/Skip-phase action should stop a scan that is actually making
+// progress. The floor is therefore deliberately huge (30 days); it exists as
+// a last-resort recovery mechanism for a truly hung subprocess, not a
+// practical ceiling any real scan is expected to reach.
 func baseScanWatchdog(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.ScanWatchdogHours > 0 {
 		return time.Duration(cfg.ScanWatchdogHours) * time.Hour
 	}
-	return 24 * time.Hour
+	return 720 * time.Hour // 30 days
 }
 
 // effectiveWatchdog adds adaptive headroom on top of the base floor for
@@ -1452,8 +1459,9 @@ func baseScanWatchdog(cfg *config.Config) time.Duration {
 // a bug-bounty domain with tens of thousands of subdomains genuinely needs
 // more wall-clock time to crawl/probe/fuzz than a 5-host target, and a flat
 // ceiling applied identically to both was exactly the reported bug. Capped at
-// maxScanWatchdog so a wedged module still can't hold its slot indefinitely.
-const maxScanWatchdog = 96 * time.Hour
+// maxScanWatchdog so a wedged module still can't hold its slot FOREVER —
+// but the cap itself is now measured in months, not hours.
+const maxScanWatchdog = 2160 * time.Hour // 90 days
 
 // scanSurface is every live-size signal effectiveWatchdog scales against.
 // Subdomain count alone starved the headroom for the single most common
@@ -1865,17 +1873,18 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	lastProgress := 0
 	handled := make(map[int]bool)
 	// timedOutPhases counts how many phases in THIS task have exhausted their
-	// watchdog. A single slow-but-healthy phase on a large target (see
-	// scanSurface) no longer aborts every module scheduled after it — it is
-	// recorded and the scan moves on, so nuclei/XSS/SQLi still get to run even
-	// when an earlier phase (crawling, paramfuzz, dirsearch, …) legitimately
-	// took longer than the floor. maxPhaseTimeouts is the backstop: if the
-	// target itself is unresponsive, every phase will time out in turn, and
-	// without a cap the scan would keep retrying (each with its own fresh,
-	// adaptively-large watchdog) for as long as modules remain, holding its
-	// scheduler concurrency slot the whole time.
+	// (now 30-day-floor, adaptively larger) watchdog. A single slow-but-healthy
+	// phase on a large target no longer aborts every module scheduled after it
+	// — it is recorded and the scan moves on, so nuclei/XSS/SQLi still get to
+	// run even when an earlier phase legitimately took a very long time.
+	// maxPhaseTimeouts is a LAST-RESORT backstop, not a practical limit: with a
+	// 30+ day per-phase floor, a phase actually reaching it means something is
+	// genuinely wedged (a hung subprocess), not merely slow — one or two of
+	// those across a long multi-module scan should never end it. It only stops
+	// the scan if a large majority of phases are ALL wedged in turn, which
+	// means the target/environment itself is broken, not the scan's duration.
 	timedOutPhases := 0
-	const maxPhaseTimeouts = 3
+	const maxPhaseTimeouts = 10
 	for i, module := range modules {
 		if ctx.Err() != nil {
 			break
