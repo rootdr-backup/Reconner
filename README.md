@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/reconner-hero-v3.4.png" alt="Reconner — Attack Surface Intelligence" width="100%">
+  <img src="assets/reconner-hero-v5.png" alt="Reconner — Attack Surface Intelligence" width="100%">
 </p>
 
 <p align="center">
@@ -102,10 +102,14 @@ or JavaScript seeds keep their path-level identity.
 
 ### 2. Choose a deliberate scan plan
 
-Web scans expose safe, standard, and custom module selection plus slow, normal,
-and fast request profiles. Network scans appear only for compatible assets and
-offer Fast, Normal, and Deep profiles. Web and network phases cannot be mixed
-accidentally in one task.
+Web scans expose Safe, Standard, Initial Access, and custom module selection
+plus slow, normal, and fast request profiles. **Initial Access** runs only
+the modules that lead to panel access, remote code execution, or network
+pivoting — with the rest of that closure (discovery, verification) resolved
+automatically — for an operator who wants the fastest path to a foothold
+rather than full coverage. Network scans appear only for compatible assets
+and offer Fast, Normal, and Deep profiles. Web and network phases cannot be
+mixed accidentally in one task.
 
 Whole-target scans default to prioritized, asset-first execution: every
 request-heavy module runs its full pipeline against the highest-priority
@@ -133,9 +137,18 @@ with live browser execution proof carry a captured screenshot alongside
 their evidence. The orange target count is reserved for actionable
 medium-or-higher findings instead of low-value inventory noise.
 
+A target's own page groups its tabs by what they actually are — discovered
+**Surface** (hosts, URLs, scripts, parameters, directories, admin panels),
+the **Vulnerabilities** working area (Confirmed, Needs Review, and each
+dedicated detector table), and change **Activity** — instead of one flat,
+unlabeled row.
+
 <p align="center">
   <img src="assets/screenshot-findings-collapsed.png" alt="Collapsed host-wide finding with affected URLs expanded" width="49%">
   <img src="assets/screenshot-admin-panel.png" alt="Admin panel finding with a captured screenshot" width="49%">
+</p>
+<p align="center">
+  <img src="assets/screenshot-target-detail.png" alt="A target's grouped Surface / Vulnerabilities / Activity tabs" width="100%">
 </p>
 
 ### 5. Keep the operation moving
@@ -207,28 +220,49 @@ zero false positives or false negatives on arbitrary applications. See the
 - SSRF/OAST, LFI, SSTI, CSTI, command injection, XXE, NoSQLi, and open redirects;
 - IDOR/authz, CSRF, CORS, JWT, account takeover, cache, request-smuggling, and
   race-condition workflows;
-- structured file-upload validation and proof-gated Nuclei intake.
+- structured file-upload validation and proof-gated Nuclei intake, including
+  a hand-curated, high-signal template pack (exposed panels, config/secret
+  disclosure, and real CVEs such as Grafana's CVE-2021-43798 path traversal
+  and an unauthenticated Jolokia JMX bridge) layered on top of the two
+  official, actively-maintained ProjectDiscovery template stores — the
+  broader community aggregator repos were evaluated and deliberately left
+  out after proving to be the dominant false-positive source in practice.
 
-Reconner's general XSS pipeline covers reflected and DOM XSS. Stored upload or
-processing behaviors are handled by their dedicated module rather than by
-blindly spraying the general XSS corpus.
+Reconner's general XSS pipeline covers reflected and DOM XSS, with context
+classification (which breakout a reflection point actually needs, and
+whether a `<script>` block is even JS-executable in the first place) backed
+by a real HTML5 parser rather than a position heuristic, and a bypass ladder
+that covers unquoted-attribute breakout, non-`<script>`/non-`<img>` event-
+handler vectors, and common WAF/filter evasions. Stored upload or processing
+behaviors are handled by their dedicated module rather than by blindly
+spraying the general XSS corpus.
 
 ## Network coverage
 
 Network scanning is opt-in for a single IP, CIDR, or inclusive IP range such as
-`192.168.1.1-192.168.1.10`.
+`192.168.1.1-192.168.1.10`. ASN/CIDR org-range discovery is a separate,
+explicit opt-in on top of that: it excludes shared CDN/WAF ranges (Cloudflare,
+Akamai, and the rest of the same provider dataset the Deep profile's edge
+exclusion uses) before ever probing them, and still requires the operator's
+own WHOIS/program-scope confirmation — ASN ownership alone is never treated
+as proof an address belongs in scope.
 
 | Profile | Discovery | Optional validation |
 |---|---|---|
 | **Fast** | Curated high-signal ports | Port, banner, service, and bounded OS evidence |
 | **Normal** | Top 1,000 TCP ports | Service-aware network Nuclei and proof-gated 401/403 checks |
-| **Deep** | All TCP ports | Normal checks plus an explicit, paced HTTP Basic credential audit |
+| **Deep** | All TCP ports | Normal checks plus explicit, paced credential audits: HTTP Basic, SSH, FTP, MySQL, PostgreSQL, Redis, RDP, VNC, Telnet, SMB |
 
 Naabu uses TCP connect discovery; ICMP is informational and never a liveness
 gate. Nmap fingerprints verified open ports. Recognized CDN/WAF edges and
-configured exclusions are removed before probing. Credential checks require a
-real Basic challenge, stop on lockout/rate-limit responses, and promote only
-stable replay evidence.
+configured exclusions are removed before probing. Every credential audit
+shares the same authorization gate, hard attempt/time budget, and a
+negative-control request (a credential that can never coincidentally be
+valid must still be rejected before the real sweep runs — otherwise an
+endpoint that accepts any credential would report a false "verified weak
+credential" on whichever candidate happened to run first) — promoting only
+stable, protocol-definitive replay evidence, never a bare status-code
+coincidence.
 
 Read the [scanning guide](docs/SCANNING_GUIDE.md) before running broad scopes.
 
@@ -265,28 +299,62 @@ Commands include `/status`, `/targets`, `/target`, `/scans`, `/findings`,
 `/scan`, `/pause`, `/resume`, `/skip`, `/cancel`, `/addtarget`, `/edittarget`,
 and `/deletetarget`.
 
-## v4.0.0 highlights
+## v5.0.0 highlights
 
-- prioritized, asset-first scanning is now the default execution order for
-  whole-target scans, with live per-asset progress and a tiered depth for
-  low-score/duplicate tail assets;
-- root-caused (not just tuned) SQLi slowness on WAF/rate-limited targets and
-  an XSS coverage-loss bug, plus a new WAF-bypass encoding layer for XSS;
-- fixed a shared false-negative in the WAF/block-page gate nearly every
-  differential detector relies on (SQLi, XSS, SSRF, LFI, XXE, SSTI, CSTI,
-  IDOR, NoSQLi, cache poisoning);
-- two concrete subdomain-takeover false-positive fixes: wildcard/catch-all
-  DNS detection and generic-signature confidence gating;
-- a branded, site-aware backup/secret-file wordlist plus CMS
-  automated-backup-plugin paths;
-- findings collapse by root cause (type + host + parameter) instead of one
-  row per affected URL, with screenshot capture for confirmed admin panels
-  and confirmed XSS execution proof;
-- Nuclei low/info-severity templates removed outright — no configurable
-  opt-in remains.
+- **A full-scan-killing scheduler bug, root-caused.** A single slow phase's
+  watchdog timeout used to abort the *entire* remaining scan — nuclei and XSS
+  scheduled later in the pipeline on a large target could silently never
+  run. The watchdog now only ever recovers a genuinely wedged phase (30-day
+  floor, 90-day ceiling, a 10-strike backstop before it gives up on a task)
+  and never caps a healthy, still-progressing scan's wall-clock time;
+- **Auto-pause, not auto-cancel, on a fully blocked target.** If every known
+  host for a target goes unreachable (sustained transport failures — never
+  confused with a WAF filtering/rate-limiting response), the scan pauses
+  instead of grinding on or losing its progress, with a notification
+  explaining why;
+- a new **Initial Access** scan profile (panel/RCE/network-pivot modules
+  only, full dependency closure resolved automatically);
+- **ASN/CIDR org-range discovery gets a real verification layer**: every
+  swept address is checked against the same CDN/WAF provider dataset used
+  for port-scan exclusions before it's ever probed, stacked on top of the
+  existing "PTR must resolve under the target's own domain" check;
+- a host whose probe hit a CDN bot-challenge page is now retried through
+  the same headless Chromium already used for XSS/DOM proof — recovering
+  real content instead of poisoning every downstream module with a "Just a
+  moment…" page — and origin-IP discovery no longer hard-fails without a
+  paid API key (it now falls back to AlienVault OTX's free passive DNS);
+- **a real stored-XSS false positive closed**: a payload surviving as inert
+  text inside a `<script>`/JSON block, a `<textarea>`, or a comment used to
+  auto-report as a confirmed critical finding from a substring match alone;
+  it now requires a real HTML5 parser to prove the breakout formed a live,
+  executable element;
+- **NoSQL injection via MongoDB's `$where` operator** — the one NoSQLi shape
+  with no visible boolean/error differential at all — is now detected via
+  the same statistical, linear-delay-scaling timing proof SQLi's own
+  time-based engine already uses, reused rather than re-implemented;
+- the network module's HTTP Basic-Auth bruteforce now shares the exact same
+  authorization gate, attempt/time budget, and negative-control check
+  (proving the target endpoint actually discriminates valid from invalid
+  credentials) every other protocol's credential audit already enforced —
+  it was the one outlier missing all three;
+- **parameter reflection checking is now location-aware**: a body/JSON/
+  header/cookie-located parameter used to be probed with a query-only GET
+  that could never observe it reflecting, permanently starving the
+  catch-all reflected-XSS pass of real candidates; a protocol-relative
+  JS endpoint reference (`//api.example.com/...`) was being silently
+  mangled into the wrong host entirely;
+- the backup/secret-file wordlist now draws from the full ranked
+  recon-derived vocabulary (every real product/site/parameter name
+  discovered for the target) instead of only its top 10-12 entries;
+- the target detail page's tab bar is grouped and labeled for real (Surface
+  / Vulnerabilities / Activity) instead of one unlabeled flat row, decorative
+  emoji are gone from the product's own text (reports, Telegram messages,
+  UI labels), and the dashboard's four headline stats get real, color-coded
+  icons in place of an empty placeholder box.
 
 The full technical change record is in the
-[v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md).
+[v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md) for the prior major
+version's changes.
 
 ## Toolchain
 
@@ -336,7 +404,7 @@ project hosts.
 | [Scanning guide](docs/SCANNING_GUIDE.md) | Scope types, web/network plans, proof states, controls, corpora, and exports |
 | [Capability matrix](docs/V3_CAPABILITY_MATRIX.md) | Module prerequisites, positive-proof contracts, and supported boundaries |
 | [Docker reference](README.Docker.md) | Image contents, Compose layout, capabilities, and persistence |
-| [v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md) | Current release details and local regression commands |
+| [v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md) | Prior major version's release details and local regression commands |
 | [Contributing](CONTRIBUTING.md) | Development workflow and contribution expectations |
 | [Security policy](SECURITY.md) | Private vulnerability reporting for Reconner itself |
 
