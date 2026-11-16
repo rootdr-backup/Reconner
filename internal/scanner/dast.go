@@ -475,8 +475,9 @@ func dastConfirm(a ReflectionAnalysis) (payload, needle string, confirmable bool
 	case CtxComment:
 		// Close the HTML comment, then inject a new element into HTML text.
 		return `-->` + el, el, true
-	case CtxRCDATA, CtxRAWTEXT:
-		// Close the raw-text element (</textarea> etc.), then a fresh element.
+	case CtxRCDATA, CtxRAWTEXT, CtxScriptData:
+		// Close the raw-text element (</textarea> etc.) or non-executing script
+		// data block (</script>), then a fresh element.
 		return a.CloseTag + el, el, true
 	case CtxSrcDoc:
 		// The live element exists in the nested srcdoc Document, not in the outer

@@ -106,13 +106,24 @@ func (s *VulnScanner) RunStoredBlindXSS(ctx context.Context, targetID, domain st
 				return
 			}
 			for _, pr := range probes {
-				// The raw payload must survive un-encoded AND the token must land
-				// in an executable (non-inert) context on this clean page.
+				// The raw payload must survive un-encoded, AND the breakout must
+				// genuinely form a live <svg onload=alert(1)> element under a real
+				// HTML5 parser (htmlAttrInjected, below) — not merely appear as a
+				// substring. The same bytes also appear when the value survives as
+				// INERT text (inside a <script>/JSON state blob, a <textarea>, a
+				// comment): the HTML tokenizer only ends a <script>/RAWTEXT/RCDATA
+				// element on a literal close tag, never on '>' alone, so none of
+				// those actually execute. That gap previously let inert persistence
+				// auto-report as a CONFIRMED CRITICAL finding (storeVuln always
+				// verdicts VerifyVerified) with no real execution evidence — exactly
+				// the false-positive shape the DOM/reflected XSS paths in this
+				// package already guard against via their own real-breakout or
+				// real-browser proof. htmlAttrInjected reuses the same parser-based
+				// technique as htmlTagInjected (xss_context.go) to require it here too.
 				if !strings.Contains(body, pr.payload) {
 					continue
 				}
-				kind := classifyXSSContext(body, pr.token)
-				if kind != ctxInert && kind != ctxNone {
+				if htmlAttrInjected(body, "svg", "onload", "alert(1)") {
 					ev := fmt.Sprintf("Payload injected via %s param=%s persisted and executes on %s",
 						pr.url, pr.param, pageURL)
 					// Report against the INJECTION point (that's the vulnerable input),

@@ -225,7 +225,7 @@ func buildExecPayloads(a ReflectionAnalysis) []xssExecPayload {
 		return prefixLadder(`</style>`)
 	case CtxComment:
 		return prefixLadder(`-->`)
-	case CtxRCDATA, CtxRAWTEXT:
+	case CtxRCDATA, CtxRAWTEXT, CtxScriptData:
 		close := a.CloseTag
 		if close == "" {
 			close = `</textarea>`

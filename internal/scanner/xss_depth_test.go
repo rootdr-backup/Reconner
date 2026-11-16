@@ -66,6 +66,61 @@ func TestRawTextAndSrcdocContexts(t *testing.T) {
 	}
 }
 
+// TestNonExecutableScriptTypeIsScriptDataNotJSContext is the regression test
+// for the false-positive fix to a <script type="..."> whose type is NOT a
+// JS-executable MIME type (JSON-LD structured data and client-side
+// templating libraries are the common real-world shapes). The HTML
+// tokenizer parses its content as raw text up to the literal </script> —
+// the browser never runs it as JavaScript — so a bare quote-breakout alone
+// must NOT be reported executable the way a genuine JS string context
+// would be; only a full </script>+new-element breakout counts.
+func TestNonExecutableScriptTypeIsScriptDataNotJSContext(t *testing.T) {
+	for _, typ := range []string{"application/json", "application/ld+json", "text/plain", "text/x-handlebars-template"} {
+		tag := `<script type="` + typ + `">`
+		// Only the surrounding JS-string quotes survive raw; the angle brackets
+		// are HTML-encoded (so they do NOT survive) — this is the exact
+		// false-positive shape: inert, must NOT be executable.
+		quoteOnly := AnalyzeReflection(tag + `var x = "` + xssMarker + `'"&lt;&gt;";` + `</script>`)
+		if quoteOnly.Context != CtxScriptData {
+			t.Fatalf("type=%q: Context=%q, want CtxScriptData", typ, quoteOnly.Context)
+		}
+		if quoteOnly.Executable {
+			t.Fatalf("type=%q: a bare quote-breakout inside a non-executing script data block must NOT be executable: %+v", typ, quoteOnly)
+		}
+		// Both angle brackets ALSO survive → a genuine </script>+element breakout
+		// — this must be executable regardless of the data block's own type.
+		fullBreakout := AnalyzeReflection(`<script type="` + typ + `">{"x":"` + xssMarker + `'"<>` + `</script>`)
+		if fullBreakout.Context != CtxScriptData || fullBreakout.CloseTag != "</script>" || !fullBreakout.Executable {
+			t.Fatalf("type=%q: full </script> breakout must be executable: %+v", typ, fullBreakout)
+		}
+	}
+	// A JS-executable type (explicit or implicit via module/empty) must still be
+	// treated as a genuine JS context, exactly as before this fix.
+	for _, tag := range []string{`<script>`, `<script type="text/javascript">`, `<script type="module">`, `<script type="application/javascript">`} {
+		a := AnalyzeReflection(tag + `var x = "` + xssMarker + `'"<>";` + `</script>`)
+		if a.Context != CtxJSString {
+			t.Fatalf("%q: Context=%q, want CtxJSString (JS-executable type must stay a JS context)", tag, a.Context)
+		}
+		if !a.Executable {
+			t.Fatalf("%q: a surviving JS-string quote in a genuine JS context must be executable: %+v", tag, a)
+		}
+	}
+}
+
+// TestContextPayloadForScriptDataClosesScriptNotRawtextElements guards the
+// evidence/exploit text shown to an operator: CtxScriptData must get its own
+// </script>-closing example, never CtxRAWTEXT's unrelated
+// xmp/noembed/iframe/noframes closing sequence.
+func TestContextPayloadForScriptDataClosesScriptNotRawtextElements(t *testing.T) {
+	got := contextPayload(CtxScriptData)
+	if !strings.Contains(got, "</script>") {
+		t.Fatalf("contextPayload(CtxScriptData) = %q, want it to close </script>", got)
+	}
+	if strings.Contains(got, "xmp") || strings.Contains(got, "noembed") {
+		t.Fatalf("contextPayload(CtxScriptData) = %q, must not reuse CtxRAWTEXT's unrelated closing sequence", got)
+	}
+}
+
 // TestAnalyzeReflectionSingleQuotedAttr: a single-quoted attribute is executable
 // only when the SINGLE quote survives — the old fixed-'"' check missed this.
 func TestAnalyzeReflectionSingleQuotedAttr(t *testing.T) {
