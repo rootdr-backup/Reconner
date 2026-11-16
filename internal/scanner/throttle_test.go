@@ -105,6 +105,79 @@ func TestHostThrottleSevere(t *testing.T) {
 	}
 }
 
+// TestHostUnreachableRequiresTransportFailuresNotJustWAFResponses is the
+// correctness contract behind the auto-pause feature: a WAF/rate-limiter
+// returning 403/429/503 means the host is reachable (just filtering), which
+// must NEVER be confused with the host actually being unreachable. Only a
+// sustained run of genuine transport failures (connection refused/reset,
+// dial timeout) may report a host unreachable.
+func TestHostUnreachableRequiresTransportFailuresNotJustWAFResponses(t *testing.T) {
+	host := "waf-not-unreachable.example"
+	hostThrottles.Delete(host)
+
+	for i := 0; i < 20; i++ {
+		hostThrottleObserve(host, 403, false) // a real response — WAF block page
+	}
+	if HostUnreachable(host) {
+		t.Fatalf("a host answering with WAF block pages (real HTTP responses) must never read as unreachable")
+	}
+
+	for i := 0; i < 20; i++ {
+		hostThrottleObserve(host, 429, false)
+	}
+	if HostUnreachable(host) {
+		t.Fatalf("a host answering 429 (rate-limited but reachable) must never read as unreachable")
+	}
+}
+
+func TestHostUnreachableAfterSustainedTransportFailures(t *testing.T) {
+	host := "dead-host.example"
+	hostThrottles.Delete(host)
+
+	if HostUnreachable(host) {
+		t.Fatalf("a never-observed host must not read as unreachable")
+	}
+	for i := 0; i < hostUnreachableThreshold-1; i++ {
+		hostThrottleObserve(host, 0, true)
+	}
+	if HostUnreachable(host) {
+		t.Fatalf("must not report unreachable before the threshold is actually reached")
+	}
+	hostThrottleObserve(host, 0, true) // reaches the threshold
+	if !HostUnreachable(host) {
+		t.Fatalf("must report unreachable once the consecutive-transport-failure threshold is reached")
+	}
+
+	// A single real response (even an error status) breaks the streak — the
+	// host answered, so it is reachable again.
+	hostThrottleObserve(host, 500, false)
+	if HostUnreachable(host) {
+		t.Fatalf("one real response must reset the unreachable streak")
+	}
+}
+
+func TestAllKnownHostsUnreachable(t *testing.T) {
+	healthy, dead1, dead2 := "healthy.example", "dead1.example", "dead2.example"
+	for _, h := range []string{healthy, dead1, dead2} {
+		hostThrottles.Delete(h)
+	}
+	for i := 0; i < hostUnreachableThreshold; i++ {
+		hostThrottleObserve(dead1, 0, true)
+		hostThrottleObserve(dead2, 0, true)
+	}
+	hostThrottleObserve(healthy, 200, false)
+
+	if AllKnownHostsUnreachable(nil) || AllKnownHostsUnreachable([]string{}) {
+		t.Fatalf("an empty host list must never report fully blocked — nothing to pause for")
+	}
+	if !AllKnownHostsUnreachable([]string{dead1, dead2}) {
+		t.Fatalf("a target whose every known host is unreachable must report fully blocked")
+	}
+	if AllKnownHostsUnreachable([]string{dead1, healthy, dead2}) {
+		t.Fatalf("even one reachable host must prevent the fully-blocked verdict — this must never trip on a single bad host")
+	}
+}
+
 func TestHostOfURL(t *testing.T) {
 	// hostOfURL (scope.go) returns the lower-cased hostname without port — fine for
 	// throttle keying, where a host's health is shared across its ports.

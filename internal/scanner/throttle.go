@@ -27,6 +27,17 @@ type hostThrottleState struct {
 	mu      sync.Mutex
 	backoff time.Duration
 	slots   chan struct{}
+	// consecutiveTransportFails counts IN-A-ROW transport-level failures
+	// (connection refused/reset, dial timeout — "can't even reach the host"),
+	// reset to 0 by ANY response that got a real status code back, including
+	// a 429/503. This is deliberately a DIFFERENT, stricter signal than the
+	// backoff/AIMD state above: a WAF returning 403/429 means the host is
+	// reachable but filtering, which the backoff already handles; a run of
+	// transport failures means the host (or this scanner's egress IP) is
+	// actually unreachable — the specific condition an operator wants the
+	// whole scan paused for, not just one ladder skipped. See
+	// hostUnreachable/AllKnownHostsUnreachable below.
+	consecutiveTransportFails int
 }
 
 const (
@@ -120,6 +131,13 @@ func hostThrottleObserve(host string, status int, transportErr bool) {
 	st := throttleFor(host)
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	// ANY real status code — even a 429/503 — proves the host is reachable;
+	// only a genuine transport failure keeps the unreachable streak alive.
+	if transportErr {
+		st.consecutiveTransportFails++
+	} else {
+		st.consecutiveTransportFails = 0
+	}
 	if unhealthy {
 		// multiplicative increase (double, plus a floor bump) up to the ceiling.
 		next := st.backoff*2 + throttleBumpBase
@@ -135,3 +153,60 @@ func hostThrottleObserve(host string, status int, transportErr bool) {
 		st.backoff = 0
 	}
 }
+
+// hostUnreachableThreshold is how many IN-A-ROW transport failures (not
+// WAF/rate-limit responses — see consecutiveTransportFails) a host needs
+// before it is reported unreachable. High enough that a couple of dropped
+// connections during a noisy scan never trips it, low enough to react within
+// a handful of requests to a real network-level block.
+const hostUnreachableThreshold = 6
+
+// HostUnreachable reports whether host currently has a sustained run of
+// transport-level failures (as opposed to a reachable-but-filtering WAF
+// response). Reflects every module's real request outcomes against this
+// host, shared target-wide and across the whole process — the same
+// observation stream hostThrottleObserve already feeds.
+func HostUnreachable(host string) bool {
+	if host == "" {
+		return false
+	}
+	st := throttleFor(host)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.consecutiveTransportFails >= hostUnreachableThreshold
+}
+
+// AllKnownHostsUnreachable reports whether EVERY host in hosts currently
+// reads unreachable — the deliberately narrow condition for auto-pausing a
+// whole scan (an operator-reported IP block): never on one WAF-filtered
+// path, never on one unlucky host, only when the entire known asset set for
+// the target has gone dark. A host this scan has never actually probed yet
+// reads as reachable (no observations ⇒ zero fail streak), so an empty or
+// not-yet-observed host list correctly never triggers a pause.
+func AllKnownHostsUnreachable(hosts []string) bool {
+	if len(hosts) == 0 {
+		return false
+	}
+	for _, h := range hosts {
+		if !HostUnreachable(h) {
+			return false
+		}
+	}
+	return true
+}
+
+// HostOfURL exports the same hostname normalization hostThrottleObserve's
+// callers already key the shared throttle/reachability state by — so a
+// caller outside this package (the scheduler, checking whether every known
+// asset of a target is unreachable) derives the identical key, never a
+// near-miss from reimplementing URL/host parsing a second time.
+func HostOfURL(rawURL string) string { return hostOfURL(rawURL) }
+
+// ObserveHostUnreachable records one transport-level failure observation for
+// host directly (connection refused/reset, dial timeout — no real response),
+// without performing a request. The normal path is hostThrottleObserve, fed
+// by every module through sendInjectedFull's own request outcome; this is
+// for a caller (a lightweight connectivity probe, a test) that already knows
+// a host is unreachable by some other means and needs to feed that into the
+// same shared state HostUnreachable/AllKnownHostsUnreachable read.
+func ObserveHostUnreachable(host string) { hostThrottleObserve(host, 0, true) }

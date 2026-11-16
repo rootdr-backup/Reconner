@@ -1922,6 +1922,17 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		})
 
 		s.checkMemoryPressure(taskID, logFn)
+		s.checkTargetFullyBlocked(targetID, taskID, target.Domain, logFn)
+		if s.isPaused(taskID) {
+			// The check above just auto-paused this task: block here exactly
+			// like an operator's own manual pause would, instead of still
+			// running this iteration's module once more against a target
+			// that was just confirmed unreachable.
+			s.waitIfPaused(ctx, taskID, logFn)
+			if ctx.Err() != nil {
+				break
+			}
+		}
 
 		// Re-read live discovery growth before each phase. This fixes first-pass
 		// scans where the target started with zero known subdomains/URLs/
@@ -2975,6 +2986,54 @@ func classifyMemoryPressure(percent float64) int {
 	default:
 		return 0
 	}
+}
+
+// checkTargetFullyBlocked auto-pauses a scan the moment EVERY currently-known
+// asset of the target reads as network-unreachable — a sustained run of
+// transport failures on each one (see scanner.AllKnownHostsUnreachable),
+// never a single WAF-filtered path or one unlucky host. This is the
+// operator-reported "the source IP got blocked mid-scan" case: continuing to
+// grind every remaining module/payload against a target that cannot be
+// reached at all just burns hours for zero signal, so the scan is PAUSED
+// (never cancelled — every discovered asset/finding/task-phase row and the
+// ability to simply Resume once the block lifts are all preserved exactly as
+// an operator's own manual pause would) rather than letting the work be
+// wasted or silently stalling.
+func (s *Scheduler) checkTargetFullyBlocked(targetID, taskID, domain string, logFn scanner.LogFunc) {
+	rows, err := s.db.Query(`SELECT DISTINCT url FROM http_services WHERE target_id = ? LIMIT 2000`, targetID)
+	if err != nil {
+		return
+	}
+	hosts := make(map[string]bool)
+	for rows.Next() {
+		var rawURL string
+		if rows.Scan(&rawURL) == nil {
+			if h := scanner.HostOfURL(rawURL); h != "" {
+				hosts[h] = true
+			}
+		}
+	}
+	rows.Close()
+	if len(hosts) == 0 {
+		return
+	}
+	list := make([]string, 0, len(hosts))
+	for h := range hosts {
+		list = append(list, h)
+	}
+	if !scanner.AllKnownHostsUnreachable(list) {
+		return
+	}
+	if err := s.PauseTarget(targetID); err != nil {
+		return // already paused/finished — nothing to do
+	}
+	msg := fmt.Sprintf("Scan auto-paused: all %d known host(s) of %s have gone unreachable (the source IP may be blocked). Resume once access is restored — nothing was lost.", len(list), domain)
+	logFn("warn", "scheduler", msg)
+	_, _ = s.db.Exec(`INSERT INTO notifications(id,target_id,type,title,body,url,severity,is_read)
+		VALUES(?,?,'scan_auto_paused','Scan auto-paused — target unreachable',?,?,'high',0)`,
+		uuid.NewString(), targetID, msg, "/targets/"+targetID)
+	s.hub.Broadcast("notification_created", map[string]any{"target_id": targetID, "type": "scan_auto_paused", "severity": "high"})
+	s.hub.Broadcast("task_paused", map[string]string{"task_id": taskID, "target_id": targetID})
 }
 
 func (s *Scheduler) checkMemoryPressure(_ string, logFn scanner.LogFunc) {
