@@ -73,6 +73,8 @@ func (s *NoSQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 	var wg sync.WaitGroup
 	var found atomic.Int64
 
+	var flaggedMu sync.Mutex
+	flagged := make(map[string]bool)
 	for _, ip := range points {
 		if ctx.Err() != nil {
 			break
@@ -84,10 +86,21 @@ func (s *NoSQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc)
 			defer func() { <-sem }()
 			if s.testPoint(ctx, targetID, ip, auth, logFn) {
 				found.Add(1)
+				flaggedMu.Lock()
+				flagged[insertionIdentity(ip)] = true
+				flaggedMu.Unlock()
 			}
 		}(ip)
 	}
 	wg.Wait()
+
+	// Statistical time-based pass ($where): the one NoSQLi technique with NO
+	// visible differential at all when the handler ignores the query result
+	// (a logging/audit write, a fire-and-forget filter) — boolean/error-based
+	// detection above structurally cannot see it. Runs only on candidates the
+	// deterministic/boolean pass did not already flag.
+	s.whereTimeBasedPass(ctx, targetID, points, flagged, auth, &found, logFn)
+
 	logFn("info", "nosqli", fmt.Sprintf("NoSQL injection done. Found %d.", found.Load()))
 	return nil
 }
@@ -209,6 +222,176 @@ func (s *NoSQLiScanner) booleanOpDiff(ctx context.Context, ip insertionPoint, au
 		}
 	}
 	return 0, 0, false
+}
+
+// whereTimeBasedPass runs whereTimeBasedProbe over candidates the
+// deterministic/boolean pass above did not already flag, at low concurrency
+// — each confirmation holds a connection open for several seconds, mirroring
+// SQLi's own timeBasedPass (sqli_timing.go).
+func (s *NoSQLiScanner) whereTimeBasedPass(ctx context.Context, targetID string, points []insertionPoint, flagged map[string]bool, auth map[string]string, found *atomic.Int64, logFn LogFunc) {
+	var todo []insertionPoint
+	for _, ip := range points {
+		if !flagged[insertionIdentity(ip)] {
+			todo = append(todo, ip)
+		}
+	}
+	if len(todo) == 0 {
+		return
+	}
+	logFn("info", "nosqli", fmt.Sprintf("Time-based NoSQL injection ($where, statistical linear-scaling proof) over %d insertion point(s)...", len(todo)))
+
+	sem := make(chan struct{}, 4) // low: each confirmation holds a connection for seconds
+	var wg sync.WaitGroup
+	for _, ip := range todo {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ip insertionPoint) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Hard per-candidate deadline: a genuine hit completes its 0/2/5s
+			// scaling proof in well under a minute, bounding the pathological
+			// case of a jittery-but-not-yet-severely-throttled host.
+			timingCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			ev, ok := s.whereTimeBasedProbe(timingCtx, ip, auth)
+			cancel()
+			if ok {
+				s.store(targetID, "critical", ip, ip.Param+"&$where=sleep(5000)", ev, 95)
+				found.Add(1)
+				s.report(targetID, ip, logFn, "where-time-based", 95)
+			}
+		}(ip)
+	}
+	wg.Wait()
+}
+
+// whereTimeBasedProbe tests MongoDB's $where operator — arbitrary JavaScript
+// executed server-side per matched document — via a statistical, linear-
+// scaling timing proof. $where is the one NoSQLi technique booleanOpDiff
+// structurally cannot see: it has no visible differential at all when the
+// handler ignores the query result (a logging/audit write, a fire-and-forget
+// filter), exactly why SQLi keeps a dedicated time-based pass instead of
+// trusting boolean/error detection alone. This reuses that SAME proven
+// engine (serverTTFB/sampleTTFB/timingScalingConfirmed in sqli_timing.go) —
+// median-of-N TTFB samples, a 0/2/5-second linear-scaling requirement, and
+// non-overlap with the baseline distribution — rather than trusting a single
+// timer, which is a classic false-positive source under network jitter or a
+// slow WAF.
+func (s *NoSQLiScanner) whereTimeBasedProbe(ctx context.Context, ip insertionPoint, auth map[string]string) (string, bool) {
+	loc := insertionLocation(ip)
+	if loc != "query" && loc != "body" && loc != "json" {
+		return "", false // $where cannot be represented outside these shapes
+	}
+	if hostThrottleSevere(hostOfURL(ip.URL)) {
+		return "", false
+	}
+	sleep := func(ms int) string { return fmt.Sprintf("sleep(%d)", ms) }
+	reqFor := func(whereExpr string) func(context.Context) (*http.Request, error) {
+		return func(c context.Context) (*http.Request, error) { return nosqliWhereRequest(c, ip, whereExpr, auth) }
+	}
+
+	// True zero-injection baseline (no $where key at all). Noise gate: an
+	// endpoint that is already slow or wildly jittery cannot support a
+	// trustworthy timing verdict.
+	base, _, baseMax, ok := sampleTTFB(ctx, ip, 3, 8*time.Second, reqFor(""))
+	if !ok || base > 3*time.Second || baseMax > base+2*time.Second {
+		return "", false
+	}
+
+	dl := 12 * time.Second
+	// Cheap screen: one sleep(5000) request eliminates a non-vulnerable point
+	// before paying for the full three-sample proof.
+	fast5, ok := serverTTFB(ctx, ip, dl, reqFor(sleep(5000)))
+	if !ok || fast5-base < 3500*time.Millisecond {
+		return "", false
+	}
+	// Confirm: sleep(5000) must add a clear, non-overlapping median delay.
+	i5, i5min, _, ok := sampleTTFBSeeded(ctx, ip, 3, dl, []time.Duration{fast5}, reqFor(sleep(5000)))
+	if !ok || i5-base < 3500*time.Millisecond || i5min < baseMax+2*time.Second {
+		return "", false
+	}
+	// Control: adding the $where KEY ITSELF with sleep(0) must stay ≈
+	// baseline — proves the extra operator/JSON structure isn't itself what's
+	// slow (a bigger structural change than SQLi's own "append a suffix").
+	i0, _, _, ok := sampleTTFB(ctx, ip, 2, dl, reqFor(sleep(0)))
+	if !ok || i0 > base+1500*time.Millisecond {
+		return "", false
+	}
+	// Linear scaling: sleep(2000) must add ≈2s and sleep(5000)−sleep(2000) ≈3s.
+	i2, _, _, ok := sampleTTFB(ctx, ip, 3, dl, reqFor(sleep(2000)))
+	if !ok || !timingScalingConfirmed(base, baseMax, i0, i2, i5, i5min) {
+		return "", false
+	}
+
+	add2, add5, step := i2-base, i5-base, i5-i2
+	ev := fmt.Sprintf(
+		"NoSQL $where time-based injection PROVEN by linear delay scaling (server think-time via TTFB, network noise cancelled). "+
+			"Baseline≈%dms; injected $where sleep(0)≈%dms (≈baseline → the extra operator isn't inherently slow), sleep(2000)≈%dms (+%dms), sleep(5000)≈%dms (+%dms). "+
+			"The induced delay tracks the injected sleep 1:1 (Δ(5000-2000)≈%dms) and the injected responses do not overlap the baseline — this is server-side JavaScript executing via $where, not latency/WAF.",
+		base.Milliseconds(), i0.Milliseconds(), i2.Milliseconds(), add2.Milliseconds(), i5.Milliseconds(), add5.Milliseconds(), step.Milliseconds())
+	return ev, true
+}
+
+// nosqliWhereRequest builds a request with MongoDB's $where operator added as
+// a TOP-LEVEL sibling key alongside the insertion point's own field(s) — the
+// shape a handler built on Model.find(req.query)/Model.find(req.body)
+// actually evaluates ($where is a filter-level operator; unlike $ne/$eq/
+// $regex above it is never nested under one field name). whereExpr == ""
+// builds the request with no $where key at all — the zero-injection baseline
+// the timing engine compares against.
+func nosqliWhereRequest(ctx context.Context, ip insertionPoint, whereExpr string, auth map[string]string) (*http.Request, error) {
+	finish := func(req *http.Request, err error, contentType string) (*http.Request, error) {
+		if err != nil {
+			return nil, err
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+		for k, v := range auth {
+			req.Header.Set(k, v)
+		}
+		return req, nil
+	}
+	switch insertionLocation(ip) {
+	case "json":
+		fields := make(map[string]string, len(ip.Siblings)+1)
+		for k, v := range ip.Siblings {
+			fields[k] = v
+		}
+		fields[ip.Param] = ip.Value
+		var root map[string]any
+		_ = json.Unmarshal([]byte(buildJSONFieldsTyped(fields, ip.SiblingTypes, "")), &root)
+		if root == nil {
+			root = map[string]any{}
+		}
+		if whereExpr != "" {
+			root["$where"] = whereExpr
+		}
+		body, _ := json.Marshal(root)
+		req, err := http.NewRequestWithContext(ctx, strings.ToUpper(ip.Method), ip.URL, strings.NewReader(string(body)))
+		return finish(req, err, "application/json")
+	case "body":
+		values := url.Values{}
+		for k, v := range ip.Siblings {
+			values.Set(k, v)
+		}
+		values.Set(ip.Param, ip.Value)
+		if whereExpr != "" {
+			values.Set("$where", whereExpr)
+		}
+		req, err := http.NewRequestWithContext(ctx, strings.ToUpper(ip.Method), ip.URL, strings.NewReader(values.Encode()))
+		return finish(req, err, "application/x-www-form-urlencoded")
+	default: // query
+		u := ip.URL
+		if whereExpr != "" {
+			u = setRawQueryParam(ip.URL, "$where", whereExpr)
+		}
+		req, err := http.NewRequestWithContext(ctx, strings.ToUpper(ip.Method), u, nil)
+		return finish(req, err, "")
+	}
 }
 
 const (
