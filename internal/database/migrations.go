@@ -138,6 +138,7 @@ func RunMigrations(db *DB) error {
 		createBountySyncStateTable,
 		createProjectProgramsTable,
 		createBountyScopeEventsTable,
+		createBountyScopeDecisionsTable,
 		createTelegramConfigTable,
 		alterTelegramConfigAddLastUpdateID,
 		createTelegramChatsTable,
@@ -559,6 +560,31 @@ CREATE TABLE IF NOT EXISTS bounty_scope_events (
 	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
 	FOREIGN KEY (program_asset_id) REFERENCES bounty_program_assets(id) ON DELETE SET NULL
 );`
+
+// createBountyScopeDecisionsTable keeps an operator's approve/reject decision
+// for a scope fingerprint. Without it, a rejected "added" event is recreated
+// on every catalog sync because reconcileProject only compares assets rows:
+// the rejected asset is still absent, so it looks new again. The fingerprint
+// covers the event type, identifier and the state JSON that produced the
+// event. A genuine later change gets a new fingerprint and is reported again.
+const createBountyScopeDecisionsTable = `
+CREATE TABLE IF NOT EXISTS bounty_scope_decisions (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	program_id TEXT NOT NULL,
+	program_asset_id TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	identifier TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	decision TEXT NOT NULL,
+	resolved_event_id TEXT DEFAULT '',
+	decided_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
+	UNIQUE (target_id, program_id, program_asset_id, event_type, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_scope_decisions_target ON bounty_scope_decisions(target_id, decided_at DESC);
+`
 
 const alterAssetsAddAssetType = `ALTER TABLE assets ADD COLUMN asset_type TEXT DEFAULT 'domain';`
 const alterAssetsAddSource = `ALTER TABLE assets ADD COLUMN source TEXT DEFAULT 'manual';`

@@ -2,7 +2,9 @@ package bounty
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -648,7 +650,28 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+// scopeEventFingerprint identifies one specific scope state. "added" and
+// "modified" events are keyed by the new program-asset state; "removed" events
+// are keyed by the old state that was taken away. A rejected or approved
+// decision on this fingerprint suppresses the same event on later syncs. A
+// genuine later change produces a different JSON state and is reported again.
+func scopeEventFingerprint(eventType, identifier, oldJSON, newJSON string) string {
+	state := newJSON
+	if eventType == "removed" {
+		state = oldJSON
+	}
+	sum := sha256.Sum256([]byte(eventType + "\x00" + identifier + "\x00" + state))
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON string) {
+	fingerprint := scopeEventFingerprint(eventType, identifier, oldJSON, newJSON)
+	var decided int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_decisions WHERE target_id=? AND program_id=? AND program_asset_id=? AND event_type=? AND fingerprint=?`, targetID, programID, assetID, eventType, fingerprint).Scan(&decided)
+	if decided > 0 {
+		return
+	}
 	var n int
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND program_asset_id=? AND event_type=? AND status='pending'`, targetID, assetID, eventType).Scan(&n)
 	if n > 0 {
@@ -670,13 +693,16 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 		return err
 	}
 	defer tx.Rollback()
-	var eventType, assetID, status string
-	err = tx.QueryRowContext(ctx, `SELECT event_type,COALESCE(program_asset_id,''),status FROM bounty_scope_events WHERE id=? AND target_id=?`, eventID, targetID).Scan(&eventType, &assetID, &status)
+	var eventType, assetID, status, programID, identifier, oldJSON, newJSON string
+	err = tx.QueryRowContext(ctx, `SELECT event_type,COALESCE(program_asset_id,''),status,program_id,identifier,old_json,new_json FROM bounty_scope_events WHERE id=? AND target_id=?`, eventID, targetID).Scan(&eventType, &assetID, &status, &programID, &identifier, &oldJSON, &newJSON)
 	if err != nil {
 		return err
 	}
-	if status != "pending" {
+	if status != "pending" && status != "rejected" {
 		return fmt.Errorf("scope event already resolved")
+	}
+	if status == "rejected" && decision == "reject" {
+		return fmt.Errorf("scope event already dismissed")
 	}
 	if decision == "approve" {
 		switch eventType {
@@ -707,6 +733,19 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 				return err
 			}
 		}
+	}
+	fingerprint := scopeEventFingerprint(eventType, identifier, oldJSON, newJSON)
+	// One decision per fingerprint. Upserting also lets an operator approve a
+	// scope change they dismissed earlier: the approve path below still runs,
+	// and the stored decision flips so the event cannot come back again.
+	_, err = tx.ExecContext(ctx, `INSERT INTO bounty_scope_decisions
+		(id,target_id,program_id,program_asset_id,event_type,identifier,fingerprint,decision,resolved_event_id)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(target_id,program_id,program_asset_id,event_type,fingerprint)
+		DO UPDATE SET decision=excluded.decision,resolved_event_id=excluded.resolved_event_id,decided_at=CURRENT_TIMESTAMP`,
+		uuid.New().String(), targetID, programID, assetID, eventType, identifier, fingerprint, decision, eventID)
+	if err != nil {
+		return err
 	}
 	resolved := "rejected"
 	if decision == "approve" {

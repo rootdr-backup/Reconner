@@ -552,6 +552,7 @@ export default function TargetDetail() {
   const [newAssetType, setNewAssetType] = useState('auto')
   const [assetBusy, setAssetBusy] = useState(false)
   const [scopeEvents, setScopeEvents] = useState<BountyScopeEvent[]>([])
+  const [scopeTab, setScopeTab] = useState<'pending' | 'approved' | 'rejected'>('pending')
   const [eventBusy, setEventBusy] = useState<string | null>(null)
   const [evidence, setEvidence] = useState<{ id: string; url: string; type: string } | null>(null)
   // Changes-tab noise filter + the open content-diff drawer (css/js rows).
@@ -605,7 +606,10 @@ export default function TargetDetail() {
     setEventBusy(event.id)
     try {
       await bountyApi.resolveEvent(id, event.id, decision)
-      setScopeEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: decision === 'approve' ? 'approved' : 'rejected' } : e))
+      const nextStatus = decision === 'approve' ? 'approved' : 'rejected'
+      setScopeEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: nextStatus, resolved_at: new Date().toISOString() } : e))
+      if (nextStatus === 'approved') setScopeTab('approved')
+      if (nextStatus === 'rejected') setScopeTab('rejected')
       loadAssets()
       addToast('success', decision === 'approve' ? 'Scope change approved' : 'Scope change dismissed')
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not resolve scope change') }
@@ -1046,19 +1050,45 @@ export default function TargetDetail() {
         </dl>
       </section>
 
-	  {scopeEvents.some(e => e.status === 'pending') && (
+	  {scopeEvents.length > 0 && (
 		<div className="card border-severity-medium/30 overflow-hidden">
 		  <div className="px-4 py-3 border-b border-border bg-severity-medium/[.06]">
-			<p className="text-sm font-semibold">Program scope changes need review</p>
-			<p className="mt-0.5 text-[11px] text-text-muted">Added assets stay unscanned until approved. Removed assets were suspended immediately.</p>
+			<div className="flex flex-wrap items-center justify-between gap-3">
+			  <div>
+				<p className="text-sm font-semibold">Program scope changes</p>
+				<p className="mt-0.5 text-[11px] text-text-muted">Decisions are saved. Dismissed changes stay in history and can be approved later.</p>
+			  </div>
+			  <div className="flex gap-1">
+				{(['pending','approved','rejected'] as const).map(tab => {
+				  const count = scopeEvents.filter(e => e.status === tab).length
+				  return (
+					<button key={tab} onClick={() => setScopeTab(tab)}
+					  className={cn('px-2.5 py-1 rounded text-[11px] capitalize', scopeTab === tab ? 'bg-white/10 text-text-primary' : 'text-text-muted hover:text-text-primary')}>
+					  {tab} <span className="opacity-60">{count}</span>
+					</button>
+				  )
+				})}
+			  </div>
+			</div>
 		  </div>
 		  <div className="divide-y divide-white/[.05]">
-			{scopeEvents.filter(e => e.status === 'pending').map(e => (
+			{scopeEvents.filter(e => e.status === scopeTab).map(e => (
 			  <div key={e.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3">
-				<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><Badge variant={e.event_type === 'removed' ? 'critical' : e.event_type === 'added' ? 'low' : 'medium'}>{e.event_type}</Badge><code className="text-[11px] break-all">{e.identifier}</code></div><p className="mt-1 text-[10px] text-text-muted">Detected {timeAgo(e.detected_at)}</p></div>
-				<div className="flex gap-2 self-end sm:self-auto"><Button size="sm" variant="ghost" disabled={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'reject')}>Dismiss</Button><Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>{e.event_type === 'removed' ? 'Keep suspended' : 'Approve asset'}</Button></div>
+				<div className="min-w-0 flex-1">
+				  <div className="flex items-center gap-2"><Badge variant={e.event_type === 'removed' ? 'critical' : e.event_type === 'added' ? 'low' : 'medium'}>{e.event_type}</Badge><code className="text-[11px] break-all">{e.identifier}</code></div>
+				  <p className="mt-1 text-[10px] text-text-muted">Detected {timeAgo(e.detected_at)}{e.resolved_at ? ` · Resolved ${timeAgo(e.resolved_at)}` : ''}</p>
+				</div>
+				<div className="flex gap-2 self-end sm:self-auto">
+				  {e.status === 'pending' && <Button size="sm" variant="ghost" disabled={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'reject')}>Dismiss</Button>}
+				  {e.status === 'pending' && <Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>{e.event_type === 'removed' ? 'Keep suspended' : 'Approve asset'}</Button>}
+				  {e.status === 'rejected' && <Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>Approve now</Button>}
+				  {e.status === 'approved' && <span className="badge-low">Approved</span>}
+				</div>
 			  </div>
 			))}
+			{scopeEvents.filter(e => e.status === scopeTab).length === 0 && (
+			  <p className="px-4 py-6 text-center text-xs text-text-muted">No {scopeTab} scope changes.</p>
+			)}
 		  </div>
 		</div>
 	  )}

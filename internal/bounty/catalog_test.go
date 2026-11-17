@@ -166,6 +166,91 @@ func TestResolveRejectsAssetThatBecameIneligible(t *testing.T) {
 	}
 }
 
+func TestRejectedScopeDecisionsSuppressReappearance(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "decision-1", Handle: "decide", Name: "Decide", Status: "live",
+		Assets: []Asset{
+			{ExternalID: "one", Identifier: "one.decide.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true, RawHash: "v1"},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	projectID, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{AssetIDs: []string{p.Assets[0].ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p.Assets = append(p.Assets, Asset{ExternalID: "two", Identifier: "two.decide.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true, RawHash: "v1"})
+	storeTestProgram(t, svc, &p)
+	var eventID string
+	if err := db.QueryRow(`SELECT id FROM bounty_scope_events WHERE target_id=? AND event_type='added' AND status='pending'`, projectID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResolveScopeEvent(context.Background(), projectID, eventID, "reject"); err != nil {
+		t.Fatal(err)
+	}
+
+	var decisions, pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_decisions WHERE target_id=?`, projectID).Scan(&decisions); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 1 {
+		t.Fatalf("reject did not store a decision: got %d", decisions)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND status='pending'`, projectID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("rejected event still pending: got %d", pending)
+	}
+
+	// A resync with the same program state must not recreate the event.
+	storeTestProgram(t, svc, &p)
+	var added int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND event_type='added'`, projectID).Scan(&added); err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("rejected addition reappeared: got %d added events", added)
+	}
+
+	// A rejected event can be approved later. The decision flips and the asset lands.
+	if err := svc.ResolveScopeEvent(context.Background(), projectID, eventID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	var status, decision string
+	if err := db.QueryRow(`SELECT status FROM bounty_scope_events WHERE id=?`, eventID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "approved" {
+		t.Fatalf("reopened event status=%q, want approved", status)
+	}
+	if err := db.QueryRow(`SELECT decision FROM bounty_scope_decisions WHERE target_id=? AND event_type='added'`, projectID).Scan(&decision); err != nil {
+		t.Fatal(err)
+	}
+	if decision != "approve" {
+		t.Fatalf("stored decision=%q, want approve", decision)
+	}
+	var assets int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE target_id=? AND approval_status='approved'`, projectID).Scan(&assets); err != nil {
+		t.Fatal(err)
+	}
+	if assets != 2 {
+		t.Fatalf("approved addition did not land: got %d assets", assets)
+	}
+
+	// A genuine later change has a new fingerprint and is reported again.
+	p.Assets[1].RawHash = "v2"
+	storeTestProgram(t, svc, &p)
+	var modified int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND event_type='modified' AND status='pending'`, projectID).Scan(&modified); err != nil {
+		t.Fatal(err)
+	}
+	if modified != 1 {
+		t.Fatalf("genuine scope modification was suppressed: got %d events", modified)
+	}
+}
+
 func TestHackerOneProviderContract(t *testing.T) {
 	svc, db := testCatalog(t)
 	detailCalls := 0
