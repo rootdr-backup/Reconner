@@ -239,6 +239,13 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 	if err != nil {
 		return "", err
 	}
+	return s.createProjectFromProgram(ctx, ownerID, p, req)
+}
+
+// createProjectFromProgram holds the import logic so a bulk import can reuse a
+// program that was already loaded. That avoids a second provider detail fetch
+// for every program in the batch.
+func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p Program, req CreateProjectRequest) (string, error) {
 	if len(req.AssetIDs) == 0 {
 		return "", fmt.Errorf("select at least one current scope asset")
 	}
@@ -366,6 +373,162 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	return targetID, nil
+}
+
+// maxBulkProjectCreations bounds one bulk request. Program detail fetches can
+// reach providers, so an unbounded list could tie up the API for a long time.
+const maxBulkProjectCreations = 100
+
+type BulkCreateProjectsRequest struct {
+	ProgramIDs           []string `json:"program_ids"`
+	Coverage             string   `json:"coverage"`     // breadth or deep
+	AssetPolicy          string   `json:"asset_policy"` // all_eligible_web or all_eligible
+	Priority             string   `json:"priority"`
+	NameTemplate         string   `json:"name_template"` // {program}, {handle}, {provider}
+	MonitorEnabled       bool     `json:"monitor_enabled"`
+	MonitorIntervalHours int      `json:"monitor_interval_hours"`
+	SkipExisting         bool     `json:"skip_existing"`
+}
+
+type BulkCreateProjectResult struct {
+	ProgramID      string `json:"program_id"`
+	ProgramName    string `json:"program_name,omitempty"`
+	OK             bool   `json:"ok"`
+	TargetID       string `json:"target_id,omitempty"`
+	Assets         int    `json:"assets,omitempty"`
+	SkippedNetwork int    `json:"skipped_network,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// CreateProjectsBulk imports many bounty programs in one call. Each program is
+// independent: one failure never rolls back the others. The caller gets one
+// result per program so the UI can show created, skipped and failed projects.
+func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req BulkCreateProjectsRequest) ([]BulkCreateProjectResult, error) {
+	ids := make([]string, 0, len(req.ProgramIDs))
+	seen := map[string]bool{}
+	for _, raw := range req.ProgramIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("select at least one program")
+	}
+	if len(ids) > maxBulkProjectCreations {
+		return nil, fmt.Errorf("bulk import is limited to %d programs", maxBulkProjectCreations)
+	}
+
+	coverage := strings.ToLower(strings.TrimSpace(req.Coverage))
+	if coverage == "" {
+		coverage = "breadth"
+	}
+	if coverage != "breadth" && coverage != "deep" {
+		return nil, fmt.Errorf("coverage must be breadth or deep")
+	}
+	assetPolicy := strings.ToLower(strings.TrimSpace(req.AssetPolicy))
+	if assetPolicy == "" {
+		assetPolicy = "all_eligible_web"
+	}
+	if assetPolicy != "all_eligible_web" && assetPolicy != "all_eligible" {
+		return nil, fmt.Errorf("asset_policy must be all_eligible_web or all_eligible")
+	}
+
+	results := make([]BulkCreateProjectResult, 0, len(ids))
+	for _, programID := range ids {
+		result := BulkCreateProjectResult{ProgramID: programID}
+		p, err := s.GetProgram(ctx, programID)
+		if err != nil {
+			result.Reason = "program unavailable"
+			results = append(results, result)
+			continue
+		}
+		result.ProgramName = p.Name
+
+		if req.SkipExisting {
+			var existingID string
+			err := s.db.QueryRowContext(ctx, `
+				SELECT t.id FROM project_programs pp
+				JOIN targets t ON t.id = pp.target_id
+				WHERE pp.program_id = ? AND t.owner_id = ? LIMIT 1`, programID, ownerID).Scan(&existingID)
+			if err == nil {
+				result.Reason = "already_linked"
+				result.TargetID = existingID
+				results = append(results, result)
+				continue
+			}
+			if err != sql.ErrNoRows {
+				result.Reason = "lookup failed"
+				results = append(results, result)
+				continue
+			}
+		}
+
+		assetIDs := []string{}
+		skippedNetwork := 0
+		for _, a := range p.Assets {
+			if !a.Active || !a.InScope || !a.EligibleSubmission {
+				continue
+			}
+			kind := projectAssetKind(a.AssetType)
+			if kind == "reference" {
+				continue
+			}
+			if kind == "network" {
+				if coverage == "breadth" || assetPolicy == "all_eligible_web" {
+					skippedNetwork++
+					continue
+				}
+			}
+			assetIDs = append(assetIDs, a.ID)
+		}
+		if len(assetIDs) == 0 {
+			result.Reason = "no eligible web assets"
+			results = append(results, result)
+			continue
+		}
+
+		name := p.Name
+		if strings.TrimSpace(req.NameTemplate) != "" {
+			name = strings.NewReplacer(
+				"{program}", p.Name,
+				"{handle}", p.Handle,
+				"{provider}", p.Provider,
+			).Replace(req.NameTemplate)
+		}
+		notes := ""
+		if p.URL != "" {
+			notes = "Program: " + p.URL
+		}
+		createReq := CreateProjectRequest{
+			Name:                 name,
+			Description:          "Bulk import from " + p.Provider + " public program",
+			Priority:             req.Priority,
+			Notes:                notes,
+			AssetIDs:             assetIDs,
+			MonitorEnabled:       req.MonitorEnabled && coverage == "deep",
+			MonitorIntervalHours: req.MonitorIntervalHours,
+			WatchOnly:            coverage == "breadth",
+		}
+		targetID, err := s.createProjectFromProgram(ctx, ownerID, p, createReq)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				result.Reason = "already_linked"
+			} else {
+				result.Reason = err.Error()
+			}
+			results = append(results, result)
+			continue
+		}
+		result.OK = true
+		result.TargetID = targetID
+		result.Assets = len(assetIDs)
+		result.SkippedNetwork = skippedNetwork
+		results = append(results, result)
+	}
+	return results, nil
 }
 
 type ScopeEvent struct {

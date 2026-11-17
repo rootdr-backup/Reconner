@@ -254,6 +254,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/bounty/programs", h.requireAuth(h.handleListBountyPrograms)).Methods("GET")
 	api.HandleFunc("/bounty/programs/{programID}", h.requireAuth(h.handleGetBountyProgram)).Methods("GET")
 	api.HandleFunc("/bounty/programs/{programID}/projects", h.requireAuth(h.handleCreateProjectFromProgram)).Methods("POST")
+	api.HandleFunc("/bounty/projects/bulk", h.requireAuth(h.handleBulkCreateProjectsFromPrograms)).Methods("POST")
 	api.HandleFunc("/bounty/status", h.requireAuth(h.handleBountySyncStatus)).Methods("GET")
 	api.HandleFunc("/bounty/sync", h.requireAdmin(h.handleSyncBountyCatalog)).Methods("POST")
 	api.HandleFunc("/bounty/favorites", h.requireAuth(h.handleListBountyFavorites)).Methods("GET")

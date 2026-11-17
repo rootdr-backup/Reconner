@@ -6,7 +6,7 @@ import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
 import { cn, timeAgo } from '../lib/utils'
 import type { BountyAsset, BountyProgram, BountySyncState } from '../types'
-import type { BountyFavorite, BountyProgramList } from '../lib/api'
+import type { BountyFavorite, BountyProgramList, BulkCreateProjectResult } from '../lib/api'
 
 const policyLabel: Record<string, string> = { notify: 'Notify only', light_recon: 'Notify + light recon', full_scan: 'Notify + full scan' }
 
@@ -58,6 +58,15 @@ export default function BountyPrograms() {
   const [monitorHours, setMonitorHours] = useState(12)
   const [creating, setCreating] = useState(false)
   const [importResult, setImportResult] = useState<{ name: string; assets: number; skipped: number } | null>(null)
+  const [programSelected, setProgramSelected] = useState<Set<string>>(new Set())
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkCoverage, setBulkCoverage] = useState<'breadth' | 'deep'>('breadth')
+  const [bulkAssetPolicy, setBulkAssetPolicy] = useState<'all_eligible_web' | 'all_eligible'>('all_eligible_web')
+  const [bulkPriority, setBulkPriority] = useState('medium')
+  const [bulkMonitor, setBulkMonitor] = useState(false)
+  const [bulkSkipExisting, setBulkSkipExisting] = useState(true)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkResults, setBulkResults] = useState<BulkCreateProjectResult[] | null>(null)
 
   const query = useMemo(() => {
     const q: Record<string, string> = { page: String(page), limit: '30', sort: filters.sort }
@@ -110,6 +119,40 @@ export default function BountyPrograms() {
       load()
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not fetch current program scope'); setDetail(null) }
     finally { setDetailLoading(false) }
+  }
+
+  const toggleProgramSelected = (id: string) => setProgramSelected(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+  const allPageSelected = programs.length > 0 && programs.every(p => programSelected.has(p.id))
+  const toggleSelectAllPage = () => setProgramSelected(prev => {
+    const next = new Set(prev)
+    programs.forEach(p => { if (allPageSelected) next.delete(p.id); else next.add(p.id) })
+    return next
+  })
+  const submitBulk = async () => {
+    const ids = [...programSelected]
+    if (!ids.length) return
+    setBulkBusy(true)
+    try {
+      const res = await bountyApi.createProjectsBulk({
+        program_ids: ids,
+        coverage: bulkCoverage,
+        asset_policy: bulkAssetPolicy,
+        priority: bulkPriority,
+        name_template: '',
+        monitor_enabled: bulkCoverage === 'deep' ? bulkMonitor : false,
+        monitor_interval_hours: 12,
+        skip_existing: bulkSkipExisting,
+      })
+      setBulkResults(res.results || [])
+      addToast('success', `Bulk import finished: ${res.created} project(s) created`)
+      load(true)
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Bulk import failed') }
+    finally { setBulkBusy(false) }
   }
 
   const toggleFavorite = async (programId: string) => {
@@ -241,8 +284,23 @@ export default function BountyPrograms() {
           <Input type="number" min="0" placeholder="Min max reward ($)" value={filters.minReward} onChange={e => setFilters(f => ({ ...f, minReward: e.target.value }))} />
           <Input placeholder="Exact industry" value={filters.industry} onChange={e => setFilters(f => ({ ...f, industry: e.target.value }))} />
         </div>
-        {filtersActive && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={() => setFilters(initialFilters)}>Clear filters</button>}
+        <div className="flex items-center gap-3">
+          {programs.length > 0 && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={toggleSelectAllPage}>{allPageSelected ? 'Deselect page' : 'Select page'}</button>}
+          {filtersActive && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={() => setFilters(initialFilters)}>Clear filters</button>}
+        </div>
       </div>
+
+      {programSelected.size > 0 && (
+        <div className="card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <p className="text-xs text-text-secondary">
+            <span className="font-semibold text-text-primary">{programSelected.size}</span> program(s) selected for bulk import
+          </p>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setProgramSelected(new Set())}>Clear selection</Button>
+            <Button size="sm" onClick={() => { setBulkResults(null); setBulkOpen(true) }}>Create projects</Button>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">{Array.from({ length: 9 }).map((_,i)=><div key={i} className="card p-4 space-y-3"><Skeleton className="h-5 w-2/3"/><Skeleton className="h-3 w-full"/><Skeleton className="h-12 w-full"/></div>)}</div>
@@ -250,7 +308,8 @@ export default function BountyPrograms() {
         <div className="card"><EmptyState title={running ? 'Catalog sync is running' : detailIndex?.running ? 'Checking unopened program scopes' : 'No programs match these filters'} description={running ? 'Lightweight provider indexes are being cached; individual scopes load on demand.' : detailIndex?.running ? 'The filtered list fills automatically as every cached program scope is checked.' : 'Clear filters, or ask an administrator to refresh the public catalogs.'} action={!running && !detailIndex?.running && user?.role === 'admin' ? <Button size="sm" onClick={triggerSync}>Start refresh</Button> : undefined}/></div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {programs.map(p => <ProgramCard key={p.id} program={p} favorite={favorites[p.id]} onOpen={() => openProgram(p)}
+          {programs.map(p => <ProgramCard key={p.id} program={p} favorite={favorites[p.id]} selected={programSelected.has(p.id)}
+            onToggleSelect={() => toggleProgramSelected(p.id)} onOpen={() => openProgram(p)}
             onToggleFavorite={() => toggleFavorite(p.id)} onChangePolicy={policy => setFavoritePolicy(p.id, policy)} />)}
         </div>
       )}
@@ -328,6 +387,82 @@ export default function BountyPrograms() {
           </div>
         )}
       </Modal>
+
+      <Modal open={bulkOpen} onClose={() => { if (!bulkBusy) setBulkOpen(false) }} title="Create projects from selected programs" width="lg">
+        <div className="space-y-4">
+          <p className="text-xs text-text-secondary">
+            Creates one project per selected program. Each project gets the program's current active, in-scope, submission-eligible web assets. Network/IP assets are dropped for breadth watch.
+          </p>
+          {!bulkResults && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="space-y-1">
+                  <span className="text-[11px] text-text-muted">Scan coverage</span>
+                  <Select value={bulkCoverage} onChange={v => setBulkCoverage(v as 'breadth' | 'deep')} options={[['breadth','Breadth watch'],['deep','Deep scan']]} />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-text-muted">Asset policy</span>
+                  <Select value={bulkAssetPolicy} onChange={v => setBulkAssetPolicy(v as 'all_eligible_web' | 'all_eligible')} options={[['all_eligible_web','Web assets only'],['all_eligible','All eligible assets (deep only)']]} />
+                </label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="space-y-1">
+                  <span className="text-[11px] text-text-muted">Priority</span>
+                  <Select value={bulkPriority} onChange={setBulkPriority} options={[['low','Low'],['medium','Medium'],['high','High'],['critical','Critical']]} />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-text-secondary pt-5">
+                  <input type="checkbox" checked={bulkSkipExisting} onChange={e => setBulkSkipExisting(e.target.checked)} className="accent-accent" />
+                  Skip programs already linked to a project
+                </label>
+              </div>
+              {bulkCoverage === 'deep' ? (
+                <label className="flex items-center gap-2 text-xs text-text-secondary">
+                  <input type="checkbox" checked={bulkMonitor} onChange={e => setBulkMonitor(e.target.checked)} className="accent-accent" />
+                  Enable periodic monitoring on created deep projects
+                </label>
+              ) : (
+                <div className="rounded-lg border border-accent/20 bg-accent/[.06] p-3 text-[11px] text-text-secondary">
+                  Breadth watch starts each round immediately and repeats automatically. Monitoring stays off because the watch round is the monitoring.
+                </div>
+              )}
+            </div>
+          )}
+          {bulkResults && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-severity-low">{bulkResults.filter(r => r.ok).length} created</span>
+                <span className="text-text-muted">{bulkResults.filter(r => !r.ok).length} skipped or failed</span>
+              </div>
+              <div className="max-h-[40dvh] overflow-y-auto rounded-lg border border-border divide-y divide-white/[.05]">
+                {bulkResults.map(r => (
+                  <div key={r.program_id} className="flex items-center gap-2 px-3 py-2 text-[11px]">
+                    <span className={cn('shrink-0', r.ok ? 'text-severity-low' : 'text-severity-medium')}>{r.ok ? '✓' : '—'}</span>
+                    <span className="min-w-0 flex-1 truncate text-text-primary" title={r.program_name || r.program_id}>{r.program_name || r.program_id}</span>
+                    <span className="max-w-[45%] truncate text-text-muted" title={r.reason}>
+                      {r.ok
+                        ? `${r.assets} asset(s)${r.skipped_network ? ` · ${r.skipped_network} network skipped` : ''}`
+                        : (r.reason || 'failed')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
+            {bulkResults ? (
+              <>
+                <Button variant="secondary" onClick={() => setBulkResults(null)}>Back</Button>
+                <Button onClick={() => { setBulkOpen(false); setBulkResults(null); setProgramSelected(new Set()) }}>Done</Button>
+              </>
+            ) : (
+              <>
+                <Button variant="secondary" disabled={bulkBusy} onClick={() => setBulkOpen(false)}>Cancel</Button>
+                <Button loading={bulkBusy} disabled={programSelected.size === 0} onClick={submitBulk}>Create {programSelected.size} project(s)</Button>
+              </>
+            )}
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
@@ -336,17 +471,23 @@ function Select({ value, onChange, options }: { value: string; onChange: (v:stri
   return <select value={value} onChange={e=>onChange(e.target.value)} className="h-9 w-full bg-surface-alt border border-border rounded-lg px-2.5 text-xs text-text-primary outline-none focus:border-accent/60">{options.map(([v,l])=><option key={v} value={v} className="bg-surface-3">{l}</option>)}</select>
 }
 
-function ProgramCard({ program:p, favorite, onOpen, onToggleFavorite, onChangePolicy }: {
-  program:BountyProgram; favorite?: BountyFavorite; onOpen:()=>void; onToggleFavorite:()=>void; onChangePolicy:(policy:string)=>void
+function ProgramCard({ program:p, favorite, selected, onToggleSelect, onOpen, onToggleFavorite, onChangePolicy }: {
+  program:BountyProgram; favorite?: BountyFavorite; selected:boolean; onToggleSelect:()=>void; onOpen:()=>void; onToggleFavorite:()=>void; onChangePolicy:(policy:string)=>void
 }) {
   const reward = p.offers_bounties ? (p.min_reward_cents > 0 ? `${money(p.min_reward_cents,p.currency)}–${money(p.max_reward_cents,p.currency)}` : money(p.max_reward_cents,p.currency)) : 'VDP'
   return <div className="card-hover p-4 text-left min-w-0 relative">
-    <button type="button" onClick={e => { e.stopPropagation(); onToggleFavorite() }} title={favorite ? 'Remove from favorites' : 'Favorite — get notified (and optionally auto-scanned) on new scope'}
-      className={cn('absolute top-3 right-3 z-10 text-lg leading-none transition-colors', favorite ? 'text-severity-medium' : 'text-text-muted/40 hover:text-text-muted')}>
-      {favorite ? '★' : '☆'}
-    </button>
+    <div className="flex items-center justify-between gap-2 mb-2">
+      <label className="flex items-center gap-1.5 text-[10px] text-text-muted cursor-pointer select-none">
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} className="accent-accent w-3.5 h-3.5" />
+        Select
+      </label>
+      <button type="button" onClick={onToggleFavorite} title={favorite ? 'Remove from favorites' : 'Favorite — get notified (and optionally auto-scanned) on new scope'}
+        className={cn('text-lg leading-none transition-colors', favorite ? 'text-severity-medium' : 'text-text-muted/40 hover:text-text-muted')}>
+        {favorite ? '★' : '☆'}
+      </button>
+    </div>
     <button type="button" onClick={onOpen} className="w-full text-left">
-      <div className="flex items-start gap-3 pr-6"><div className="w-10 h-10 rounded-xl border border-white/[.07] bg-white/[.03] grid place-items-center shrink-0 overflow-hidden">{p.logo_url?<img src={p.logo_url} alt="" className="w-full h-full object-contain" loading="lazy"/>:<span className="text-sm font-bold text-text-muted">{p.name.slice(0,1).toUpperCase()}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5 flex-wrap"><h2 className="text-sm font-semibold truncate">{p.name}</h2><span className={cn('text-[9px] px-1.5 py-0.5 rounded border shrink-0',providerTone(p.provider))}>{providerLabel(p.provider)}</span>{p.status && p.status !== 'live' && <span className="text-[9px] px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-text-muted shrink-0 capitalize">{p.status}</span>}</div><p className="text-[10px] text-text-muted truncate mt-0.5">{p.industry || p.handle}</p></div></div>
+      <div className="flex items-start gap-3"><div className="w-10 h-10 rounded-xl border border-white/[.07] bg-white/[.03] grid place-items-center shrink-0 overflow-hidden">{p.logo_url?<img src={p.logo_url} alt="" className="w-full h-full object-contain" loading="lazy"/>:<span className="text-sm font-bold text-text-muted">{p.name.slice(0,1).toUpperCase()}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5 flex-wrap"><h2 className="text-sm font-semibold truncate">{p.name}</h2><span className={cn('text-[9px] px-1.5 py-0.5 rounded border shrink-0',providerTone(p.provider))}>{providerLabel(p.provider)}</span>{p.status && p.status !== 'live' && <span className="text-[9px] px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-text-muted shrink-0 capitalize">{p.status}</span>}</div><p className="text-[10px] text-text-muted truncate mt-0.5">{p.industry || p.handle}</p></div></div>
       <p className="mt-3 text-[11px] text-text-secondary line-clamp-2 min-h-8">{p.description || 'Open the official scope and select assets for a project.'}</p>
       <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/[.05]"><Metric value={p.details_loaded?String(p.in_scope_count):'…'} label="assets"/><Metric value={String(p.wildcard_count)} label="wildcards"/><Metric value={reward} label={p.min_reward_cents > 0 ? 'reward range' : 'max reward'}/></div>
       <div className="flex items-center justify-between mt-3 text-[10px] text-text-muted"><span>{p.started_at?`Started ${timeAgo(p.started_at)}`:'Start date unavailable'}</span><span className="text-accent">View scope →</span></div>

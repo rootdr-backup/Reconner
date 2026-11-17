@@ -274,6 +274,8 @@ export const bounty = {
   sync: () => req<{ status: string }>('/bounty/sync', { method: 'POST' }),
   createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number; watch_only?: boolean }) =>
     req<{ id: string; url: string }>(`/bounty/programs/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
+  createProjectsBulk: (body: BulkCreateProjectsRequest) =>
+    req<BulkCreateProjectsResponse>('/bounty/projects/bulk', { method: 'POST', body: JSON.stringify(body) }),
   events: (targetId: string) => req<BountyScopeEvent[]>(`/targets/${targetId}/bounty-events`),
   resolveEvent: (targetId: string, eventId: string, decision: 'approve' | 'reject') =>
     req<{ status: string }>(`/targets/${targetId}/bounty-events/${eventId}`, { method: 'POST', body: JSON.stringify({ decision }) }),
@@ -281,6 +283,32 @@ export const bounty = {
   setFavorite: (programId: string, autoScanPolicy: string, watchIntervalHours?: number) =>
     req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'POST', body: JSON.stringify({ auto_scan_policy: autoScanPolicy, watch_interval_hours: watchIntervalHours }) }),
   removeFavorite: (programId: string) => req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'DELETE' }),
+}
+
+export type BulkCreateProjectsRequest = {
+  program_ids: string[]
+  coverage: 'breadth' | 'deep'
+  asset_policy?: 'all_eligible_web' | 'all_eligible'
+  priority?: string
+  name_template?: string
+  monitor_enabled?: boolean
+  monitor_interval_hours?: number
+  skip_existing?: boolean
+}
+
+export type BulkCreateProjectResult = {
+  program_id: string
+  program_name?: string
+  ok: boolean
+  target_id?: string
+  assets?: number
+  skipped_network?: number
+  reason?: string
+}
+
+export type BulkCreateProjectsResponse = {
+  created: number
+  results: BulkCreateProjectResult[]
 }
 
 export interface BountyFavorite {

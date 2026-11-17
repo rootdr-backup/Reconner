@@ -108,6 +108,33 @@ func (h *Handler) handleCreateProjectFromProgram(w http.ResponseWriter, r *http.
 	h.writeJSON(w, http.StatusCreated, map[string]any{"success": true, "data": map[string]string{"id": id, "url": "/targets/" + id}})
 }
 
+func (h *Handler) handleBulkCreateProjectsFromPrograms(w http.ResponseWriter, r *http.Request) {
+	var req bounty.BulkCreateProjectsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	results, err := h.bounty.CreateProjectsBulk(r.Context(), h.currentUserID(r), req)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	created := 0
+	for _, res := range results {
+		if res.OK && res.TargetID != "" {
+			created++
+			h.hub.Broadcast("target_created", map[string]string{"id": res.TargetID})
+		}
+	}
+	h.writeJSON(w, http.StatusCreated, map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"created": created,
+			"results": results,
+		},
+	})
+}
+
 func (h *Handler) handleListBountyFavorites(w http.ResponseWriter, r *http.Request) {
 	favorites, err := h.bounty.ListFavorites(r.Context(), h.currentUserID(r))
 	if err != nil {
