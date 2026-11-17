@@ -22,32 +22,45 @@ const phaseTone: Record<string,string> = {
   pending: 'border-border text-text-muted',
 }
 
+const PAGE_SIZE = 50
+type CoverageFilter = 'all' | 'deep' | 'breadth'
+
+const isBreadth = (task: Task) => task.coverage === 'breadth' || task.type === 'watch_scan'
+
 export default function Tasks() {
   const [taskList, setTaskList] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Task | null>(null)
   const [phases, setPhases] = useState<TaskPhase[]>([])
   const [statusFilter, setStatusFilter] = useState('')
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>('all')
   const [taskSort, setTaskSort] = useState('recent')
+  const [page, setPage] = useState(0)
   const { addToast } = useUIStore()
 
-  const load = async (status?: string) => {
+  const load = async () => {
     try {
-      const p: Record<string,string> = { limit: '100' }; if (status) p.status = status
+      const p: Record<string,string> = { limit: String(PAGE_SIZE), page: String(page) }
+      if (statusFilter) p.status = statusFilter
+      if (coverageFilter !== 'all') p.coverage = coverageFilter
       setTaskList(await tasksApi.list(p) || [])
     } catch { /**/ } finally { setLoading(false) }
   }
 
+  useEffect(() => { load() }, [statusFilter, coverageFilter, page])
+
   useEffect(() => {
-    load(statusFilter)
     const off = ws.on('task_update', (payload: unknown) => {
       const task = payload as Task
+      if (statusFilter && task.status !== statusFilter) return
+      if (coverageFilter === 'breadth' && !isBreadth(task)) return
+      if (coverageFilter === 'deep' && isBreadth(task)) return
       setTaskList(p => p.some(t => t.id === task.id) ? p.map(t => t.id === task.id ? task : t) : [task, ...p])
       setSelected(p => p?.id === task.id ? task : p)
     })
-    const i = setInterval(() => load(statusFilter), 15000)
+    const i = setInterval(() => load(), 15000)
     return () => { off(); clearInterval(i) }
-  }, [statusFilter])
+  }, [statusFilter, coverageFilter, page])
 
   useEffect(() => {
     if (!selected) { setPhases([]); return }
@@ -63,7 +76,7 @@ export default function Tasks() {
 
   const handleCancel = async (task: Task, e: React.MouseEvent) => {
     e.stopPropagation()
-    try { await tasksApi.cancel(task.id); addToast('info', 'Task cancelled'); load(statusFilter) }
+    try { await tasksApi.cancel(task.id); addToast('info', 'Task cancelled'); load() }
     catch { addToast('error', 'Failed to cancel') }
   }
 
@@ -81,21 +94,80 @@ export default function Tasks() {
     try {
       const newTask = await tasksApi.resume(task.id)
       addToast('success', `Resumed — ${newTask.modules.length} module(s) remaining`)
-      load(statusFilter)
+      load()
     } catch (err: unknown) {
       addToast('error', err instanceof Error ? err.message : 'Failed to resume')
     }
   }
 
+  const sorted = [...taskList].sort((a, b) => {
+    switch (taskSort) {
+      case 'status':   return (a.status || '').localeCompare(b.status || '')
+      case 'progress': return ((b.progress || 0) / Math.max(1, b.total || 1)) - ((a.progress || 0) / Math.max(1, a.total || 1))
+      case 'name':     return (a.name || a.target_domain || '').localeCompare(b.name || b.target_domain || '')
+      default:         return (b.started_at || b.created_at || '').localeCompare(a.started_at || a.created_at || '')
+    }
+  })
+  const breadthTasks = sorted.filter(isBreadth)
+  const deepTasks = sorted.filter(t => !isBreadth(t))
+
+  const taskCard = (task: Task) => (
+    <div key={task.id} onClick={() => setSelected(task)}
+      className={cn('card p-3 cursor-pointer', selected?.id === task.id ? 'border-accent/40 bg-accent/5' : 'hover:border-border-strong')}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className={cn('w-2 h-2 rounded-full shrink-0', dot[task.status] || 'bg-text-muted')}/>
+        <span className="text-xs font-medium truncate flex-1" title={task.target_domain}>{task.name || task.target_domain || 'Unknown'}</span>
+        <span className={cn('text-xs', tc[task.status])}>{task.status}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1 ml-4 mb-1">
+        <span className={cn('text-[10px] px-1.5 py-0.5 rounded-full border', isBreadth(task)
+          ? 'border-accent/40 bg-accent/10 text-accent'
+          : 'border-border text-text-muted')}>
+          {isBreadth(task) ? 'Breadth watch' : 'Deep scan'}
+        </span>
+        {task.project_breadth && !isBreadth(task) && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-severity-medium/40 bg-severity-medium/10 text-severity-medium">manual</span>
+        )}
+        {task.type && task.type !== 'full_scan' && !isBreadth(task) && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border text-text-muted" title={task.type}>{task.type}</span>
+        )}
+      </div>
+      <p className="text-xs text-text-muted ml-4">{task.modules?.join(', ') || 'all'}</p>
+      {task.current_module && <p className="text-xs text-accent ml-4 mt-0.5">{task.current_module}</p>}
+      {task.status === 'failed' && task.error && (
+        <p className="text-xs text-severity-critical ml-4 mt-0.5 truncate" title={task.error}>{task.error}</p>
+      )}
+      <div className="flex items-center gap-2 mt-1.5 ml-4">
+        {(task.status === 'running' || task.status === 'pending') && (
+          <button onClick={e => handleCancel(task, e)} className="text-xs text-text-muted hover:text-severity-critical transition-colors">Cancel</button>
+        )}
+        {canResume(task) && (
+          <button onClick={e => handleResume(task, e)} className="text-xs text-accent hover:text-accent-hover transition-colors">▶ Resume</button>
+        )}
+        <span className="text-xs text-text-muted ml-auto">{timeAgo(task.created_at)}</span>
+      </div>
+    </div>
+  )
+
   return (
     <div className="flex flex-col lg:flex-row gap-4 min-h-0 lg:h-[calc(100dvh-9rem)]">
       <div className="flex flex-col w-full lg:w-80 lg:shrink-0 max-h-[46dvh] lg:max-h-none">
         <div className="flex items-center justify-between mb-3">
-          <div><p className="page-kicker">Operations timeline</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Scan activity</h1><p className="page-lede mt-1">Live progress, failures and resumable work.</p></div>
-          <Button size="sm" variant="ghost" onClick={() => load(statusFilter)}>↻</Button>
+          <div><p className="page-kicker">Operations timeline</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Scan activity</h1><p className="page-lede mt-1">Deep scans and breadth watches, kept apart.</p></div>
+          <Button size="sm" variant="ghost" onClick={() => load()}>↻</Button>
+        </div>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {(['all','deep','breadth'] as CoverageFilter[]).map(c => (
+            <button key={c} onClick={() => { setCoverageFilter(c); setPage(0) }}
+              className={cn('text-[11px] px-2.5 py-1 rounded-full border transition-colors', coverageFilter === c
+                ? 'border-accent/50 bg-accent/10 text-accent'
+                : 'border-border text-text-muted hover:border-border-strong')}>
+              {c === 'all' ? 'All' : c === 'deep' ? 'Deep scans' : 'Breadth watches'}
+            </button>
+          ))}
         </div>
         <div className="flex gap-2 mb-3">
-          <select className="input text-xs flex-1" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <select className="input text-xs flex-1" value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(0) }}>
             {['','running','pending','finished','failed','cancelled'].map(s => <option key={s} value={s} className="bg-surface-3">{s || 'All statuses'}</option>)}
           </select>
           <select className="input text-xs flex-1" value={taskSort} onChange={e => setTaskSort(e.target.value)} title="Sort tasks">
@@ -108,37 +180,31 @@ export default function Tasks() {
         <div className="flex-1 overflow-y-auto space-y-1.5">
           {loading ? <div className="flex justify-center h-32"><Spinner/></div>
             : taskList.length === 0 ? <Empty message="No tasks"/>
-            : [...taskList].sort((a, b) => {
-                switch (taskSort) {
-                  case 'status':   return (a.status || '').localeCompare(b.status || '')
-                  case 'progress': return ((b.progress || 0) / Math.max(1, b.total || 1)) - ((a.progress || 0) / Math.max(1, a.total || 1))
-                  case 'name':     return (a.name || a.target_domain || '').localeCompare(b.name || b.target_domain || '')
-                  default:         return (b.started_at || b.created_at || '').localeCompare(a.started_at || a.created_at || '')
-                }
-              }).map(task => (
-              <div key={task.id} onClick={() => setSelected(task)}
-                className={cn('card p-3 cursor-pointer', selected?.id === task.id ? 'border-accent/40 bg-accent/5' : 'hover:border-border-strong')}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={cn('w-2 h-2 rounded-full shrink-0', dot[task.status] || 'bg-text-muted')}/>
-                  <span className="text-xs font-medium truncate flex-1" title={task.target_domain}>{task.name || task.target_domain || 'Unknown'}</span>
-                  <span className={cn('text-xs', tc[task.status])}>{task.status}</span>
-                </div>
-                <p className="text-xs text-text-muted ml-4">{task.modules?.join(', ') || 'all'}</p>
-                {task.current_module && <p className="text-xs text-accent ml-4 mt-0.5">{task.current_module}</p>}
-                {task.status === 'failed' && task.error && (
-                  <p className="text-xs text-severity-critical ml-4 mt-0.5 truncate" title={task.error}>{task.error}</p>
+            : coverageFilter === 'all' ? (
+              <>
+                {breadthTasks.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted pt-1">Breadth watches</p>
+                    {breadthTasks.map(taskCard)}
+                  </div>
                 )}
-                <div className="flex items-center gap-2 mt-1.5 ml-4">
-                  {(task.status === 'running' || task.status === 'pending') && (
-                    <button onClick={e => handleCancel(task, e)} className="text-xs text-text-muted hover:text-severity-critical transition-colors">Cancel</button>
-                  )}
-                  {canResume(task) && (
-                    <button onClick={e => handleResume(task, e)} className="text-xs text-accent hover:text-accent-hover transition-colors">▶ Resume</button>
-                  )}
-                  <span className="text-xs text-text-muted ml-auto">{timeAgo(task.created_at)}</span>
-                </div>
-              </div>
-            ))}
+                {deepTasks.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted pt-2">Deep scans</p>
+                    {deepTasks.map(taskCard)}
+                  </div>
+                )}
+              </>
+            ) : sorted.map(taskCard)}
+        </div>
+        <div className="flex items-center justify-between gap-2 pt-2 text-[11px] text-text-muted">
+          <span>Page {page + 1} · {taskList.length} task{taskList.length === 1 ? '' : 's'}</span>
+          <div className="flex gap-1.5">
+            <button disabled={page === 0} onClick={() => setPage(p => Math.max(0, p - 1))}
+              className="btn-secondary text-[11px] disabled:opacity-40">Newer</button>
+            <button disabled={taskList.length < PAGE_SIZE} onClick={() => setPage(p => p + 1)}
+              className="btn-secondary text-[11px] disabled:opacity-40">Older</button>
+          </div>
         </div>
       </div>
       <div className="flex-1 card overflow-hidden min-h-[26rem] lg:min-h-0" style={{padding:0}}>

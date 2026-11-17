@@ -54,6 +54,7 @@ var toolCatalog = map[string]toolSpec{
 	"subzy":       {methodGo, "github.com/PentestPad/subzy@v1.2.1", "https://github.com/PentestPad/subzy", ""},
 	"puredns":     {methodGo, "github.com/d3mondev/puredns/v2@v2.1.1", "https://github.com/d3mondev/puredns", "Also needs massdns on PATH."},
 	"scilla":      {methodGo, "github.com/edoardottt/scilla/cmd/scilla@v1.3.4", "https://github.com/edoardottt/scilla", ""},
+	"chaos":       {methodGo, "github.com/projectdiscovery/chaos-client/cmd/chaos@v0.5.2", "https://github.com/projectdiscovery/chaos-client", "Needs a projectdiscovery API key (PDCP_API_KEY). Set it in System → Integrations."},
 
 	// ── pip (one-click, user-space --user) ──
 	"waymore":   {methodPip, "waymore==8.9", "https://github.com/xnl-h4ck3r/waymore", ""},

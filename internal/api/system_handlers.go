@@ -37,6 +37,7 @@ func (h *Handler) apiKeyFields() []struct {
 		{"quake", "Quake (360)", "token", &c.QuakeAPIKey},
 		{"zoomeye", "ZoomEye", "API key", &c.ZoomEyeAPIKey},
 		{"virustotal", "VirusTotal", "v3 API key", &c.VirusTotalAPIKey},
+		{"chaos", "Chaos", "projectdiscovery API key", &c.ChaosAPIKey},
 	}
 }
 
@@ -105,6 +106,21 @@ type scanConfigPayload struct {
 	NucleiExcludeTemplateIDs  []string `json:"nuclei_exclude_template_ids"`
 	NucleiExtraTemplateRepos  []string `json:"nuclei_extra_template_repos"`
 	MonitorModules            []string `json:"monitor_modules"`
+	// Watch-tier knobs (the breadth/watch tier). Every value is clamped on
+	// write; the defaults live in internal/config/config.go.
+	MaxConcurrentScans            int      `json:"max_concurrent_scans"`
+	MaxConcurrentDeepScans        int      `json:"max_concurrent_deep_scans"`
+	MaxConcurrentWatchScans       int      `json:"max_concurrent_watch_scans"`
+	WatchHTTPThreads              int      `json:"watch_http_threads"`
+	WatchHTTPRateLimit            int      `json:"watch_http_rate_limit"`
+	WatchRoundsMinGap             int      `json:"watch_rounds_min_gap"`
+	WatchSourceTimeoutMinutes     int      `json:"watch_source_timeout_minutes"`
+	WatchEnumerationSources       []string `json:"watch_enumeration_sources"`
+	WatchRowsRetentionDays        int      `json:"watch_rows_retention_days"`
+	WatchScopeEventsRetentionDays int      `json:"watch_scope_events_retention_days"`
+	WatchNotifyHostCap            int      `json:"watch_notify_host_cap"`
+	WatchFailLimit                int      `json:"watch_fail_limit"`
+	WatchModuleSet                []string `json:"watch_module_set"`
 	// DefaultDNSResolvers / DefaultNucleiRepos are read-only hints so the UI can
 	// show what the built-in defaults are when the operator has set nothing.
 	DefaultDNSResolvers []string `json:"default_dns_resolvers"`
@@ -118,15 +134,28 @@ type scanConfigPayload struct {
 // and resolvers" surface.
 func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 	h.writeSuccess(w, scanConfigPayload{
-		DNSResolvers:              h.cfg.DNSResolvers,
-		SubdomainRecursionDepth:   h.cfg.SubdomainRecursionDepth,
-		SubdomainRecursionEnabled: h.cfg.SubdomainRecursionEnabled,
-		HTTPCatchallDetection:     h.cfg.HTTPCatchallDetection,
-		NucleiExcludeTemplateIDs:  h.cfg.NucleiExcludeTemplateIDs,
-		NucleiExtraTemplateRepos:  h.cfg.NucleiExtraTemplateRepos,
-		MonitorModules:            h.cfg.MonitorModules,
-		DefaultDNSResolvers:       config.DefaultDNSResolvers,
-		DefaultNucleiRepos:        scanner.DefaultNucleiExtraRepos(),
+		DNSResolvers:                  h.cfg.DNSResolvers,
+		SubdomainRecursionDepth:       h.cfg.SubdomainRecursionDepth,
+		SubdomainRecursionEnabled:     h.cfg.SubdomainRecursionEnabled,
+		HTTPCatchallDetection:         h.cfg.HTTPCatchallDetection,
+		NucleiExcludeTemplateIDs:      h.cfg.NucleiExcludeTemplateIDs,
+		NucleiExtraTemplateRepos:      h.cfg.NucleiExtraTemplateRepos,
+		MonitorModules:                h.cfg.MonitorModules,
+		MaxConcurrentScans:            h.cfg.Limits.MaxConcurrentScans,
+		MaxConcurrentDeepScans:        h.cfg.Limits.MaxConcurrentDeepScans,
+		MaxConcurrentWatchScans:       h.cfg.Limits.MaxConcurrentWatchScans,
+		WatchHTTPThreads:              h.cfg.Limits.WatchHTTPThreads,
+		WatchHTTPRateLimit:            h.cfg.Limits.WatchHTTPRateLimit,
+		WatchRoundsMinGap:             h.cfg.WatchRoundsMinGap,
+		WatchSourceTimeoutMinutes:     h.cfg.WatchSourceTimeoutMinutes,
+		WatchEnumerationSources:       h.cfg.WatchEnumerationSources,
+		WatchRowsRetentionDays:        h.cfg.WatchRowsRetentionDays,
+		WatchScopeEventsRetentionDays: h.cfg.WatchScopeEventsRetentionDays,
+		WatchNotifyHostCap:            h.cfg.WatchNotifyHostCap,
+		WatchFailLimit:                h.cfg.WatchFailLimit,
+		WatchModuleSet:                []string{"subdomain_enum", "http_probe"},
+		DefaultDNSResolvers:           config.DefaultDNSResolvers,
+		DefaultNucleiRepos:            scanner.DefaultNucleiExtraRepos(),
 	})
 }
 
@@ -143,6 +172,20 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		NucleiExcludeTemplateIDs  *[]string `json:"nuclei_exclude_template_ids"`
 		NucleiExtraTemplateRepos  *[]string `json:"nuclei_extra_template_repos"`
 		MonitorModules            *[]string `json:"monitor_modules"`
+		// Watch-tier knobs. Every numeric value is clamped; an omitted field is
+		// left unchanged.
+		MaxConcurrentScans            *int      `json:"max_concurrent_scans"`
+		MaxConcurrentDeepScans        *int      `json:"max_concurrent_deep_scans"`
+		MaxConcurrentWatchScans       *int      `json:"max_concurrent_watch_scans"`
+		WatchHTTPThreads              *int      `json:"watch_http_threads"`
+		WatchHTTPRateLimit            *int      `json:"watch_http_rate_limit"`
+		WatchRoundsMinGap             *int      `json:"watch_rounds_min_gap"`
+		WatchSourceTimeoutMinutes     *int      `json:"watch_source_timeout_minutes"`
+		WatchEnumerationSources       *[]string `json:"watch_enumeration_sources"`
+		WatchRowsRetentionDays        *int      `json:"watch_rows_retention_days"`
+		WatchScopeEventsRetentionDays *int      `json:"watch_scope_events_retention_days"`
+		WatchNotifyHostCap            *int      `json:"watch_notify_host_cap"`
+		WatchFailLimit                *int      `json:"watch_fail_limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid body")
@@ -200,6 +243,76 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		// (monitorWatchModules validates against AllModules and logs unknown
 		// tokens), so the API/UI never needs to know the module catalog.
 		h.cfg.MonitorModules = clean(*body.MonitorModules)
+	}
+	// Watch-tier knobs. Every clamp has a floor, because a zero would silently
+	// break the watch tier (no discovery budget, no HTTP probe, no rounds).
+	clamp := func(v, lo, hi int) int {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	cpuLimit := runtime.NumCPU()
+	if cpuLimit < 1 {
+		cpuLimit = 1
+	}
+	if body.MaxConcurrentScans != nil {
+		h.cfg.Limits.MaxConcurrentScans = clamp(*body.MaxConcurrentScans, 1, cpuLimit)
+	}
+	if body.MaxConcurrentDeepScans != nil {
+		h.cfg.Limits.MaxConcurrentDeepScans = clamp(*body.MaxConcurrentDeepScans, 1, 4)
+	}
+	if body.MaxConcurrentWatchScans != nil {
+		h.cfg.Limits.MaxConcurrentWatchScans = clamp(*body.MaxConcurrentWatchScans, 0, 4)
+	}
+	if body.WatchHTTPThreads != nil {
+		h.cfg.Limits.WatchHTTPThreads = clamp(*body.WatchHTTPThreads, 1, 40)
+	}
+	if body.WatchHTTPRateLimit != nil {
+		h.cfg.Limits.WatchHTTPRateLimit = clamp(*body.WatchHTTPRateLimit, 1, 150)
+	}
+	if body.WatchRoundsMinGap != nil {
+		h.cfg.WatchRoundsMinGap = clamp(*body.WatchRoundsMinGap, 5, 1440)
+	}
+	if body.WatchSourceTimeoutMinutes != nil {
+		h.cfg.WatchSourceTimeoutMinutes = clamp(*body.WatchSourceTimeoutMinutes, 1, 30)
+	}
+	if body.WatchRowsRetentionDays != nil {
+		h.cfg.WatchRowsRetentionDays = clamp(*body.WatchRowsRetentionDays, 1, 365)
+	}
+	if body.WatchScopeEventsRetentionDays != nil {
+		h.cfg.WatchScopeEventsRetentionDays = clamp(*body.WatchScopeEventsRetentionDays, 1, 3650)
+	}
+	if body.WatchNotifyHostCap != nil {
+		h.cfg.WatchNotifyHostCap = clamp(*body.WatchNotifyHostCap, 1, 100)
+	}
+	if body.WatchFailLimit != nil {
+		h.cfg.WatchFailLimit = clamp(*body.WatchFailLimit, 1, 10)
+	}
+	if body.WatchEnumerationSources != nil {
+		// Unknown source ids are dropped with a log line; an EMPTY list is
+		// rejected because a watch round with no source can never work.
+		known := map[string]bool{}
+		for _, id := range scanner.WatchEnumerationSourceIDs() {
+			known[id] = true
+		}
+		var picked []string
+		for _, id := range clean(*body.WatchEnumerationSources) {
+			id = strings.ToLower(id)
+			if !known[id] {
+				h.logger.Warn("Unknown watch enumeration source ignored", "source", id)
+				continue
+			}
+			picked = append(picked, id)
+		}
+		if len(picked) == 0 {
+			h.writeError(w, http.StatusBadRequest, "select at least one watch discovery source")
+			return
+		}
+		h.cfg.WatchEnumerationSources = picked
 	}
 	if err := h.cfg.Save(); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "saved in memory but could not persist to config.json: "+err.Error())
@@ -321,6 +434,56 @@ func (h *Handler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 		h.db.QueryRowContext(r.Context(), sql, args...).Scan(q.dest)
 	}
 
+	// Coverage split. Count the breadth (watch-only) side, then derive the deep
+	// side as total - breadth so the two sides always add up. Tasks are split by
+	// the PROJECT's coverage, not the task type: a manual deep scan on a breadth
+	// project is still breadth work and is labelled "manual" in the UI.
+	watchQueries := []struct {
+		dest  *int
+		table string
+		where string
+	}{
+		{&stats.WatchTargets, "targets", ""},
+		{&stats.WatchSubdomains, "subdomains", ""},
+		{&stats.WatchAliveHosts, "subdomains", "is_alive = 1"},
+		{&stats.WatchHTTPServices, "http_services", ""},
+		{&stats.WatchRunningTasks, "tasks", "status = 'running'"},
+		{&stats.WatchFailedTasks, "tasks", "status = 'failed'"},
+	}
+	for _, q := range watchQueries {
+		// Only targets has a watch_only column. Child tables must scope by
+		// the project instead, through target_id. Applying watch_only to a
+		// child table fails with "no such column" and leaves the stat at 0.
+		var coverageCond string
+		if q.table == "targets" {
+			coverageCond = "watch_only = 1"
+		} else {
+			coverageCond = "target_id IN (SELECT id FROM targets WHERE watch_only = 1)"
+		}
+		conds := []string{coverageCond}
+		args := []any{}
+		if q.where != "" {
+			conds = append(conds, q.where)
+		}
+		if !isAdmin {
+			// Scope to the caller's own targets as well.
+			if q.table == "targets" {
+				conds = append(conds, "owner_id = ?")
+			} else {
+				conds = append(conds, "target_id IN (SELECT id FROM targets WHERE owner_id = ?)")
+			}
+			args = append(args, uid)
+		}
+		sql := "SELECT COUNT(*) FROM " + q.table + " WHERE " + strings.Join(conds, " AND ")
+		h.db.QueryRowContext(r.Context(), sql, args...).Scan(q.dest)
+	}
+	stats.DeepTargets = stats.Targets - stats.WatchTargets
+	stats.DeepSubdomains = stats.Subdomains - stats.WatchSubdomains
+	stats.DeepAliveHosts = stats.AliveHosts - stats.WatchAliveHosts
+	stats.DeepHTTPServices = stats.HTTPServices - stats.WatchHTTPServices
+	stats.DeepRunningTasks = stats.RunningTasks - stats.WatchRunningTasks
+	stats.DeepFailedTasks = stats.FailedTasks - stats.WatchFailedTasks
+
 	h.writeSuccess(w, stats)
 }
 
@@ -433,17 +596,29 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	status := q.Get("status")
 	targetID := q.Get("target_id")
+	// Coverage filters by the TASK TYPE, never by the project's current
+	// coverage: flipping a project between deep and breadth must not move its
+	// historical deep scans into the breadth tab.
+	coverage := strings.ToLower(strings.TrimSpace(q.Get("coverage")))
 	page, _ := strconv.Atoi(q.Get("page"))
 	if page < 1 {
 		page = 1
 	}
-	limit := 50
+	// The page size is a real parameter now: watch rounds add thousands of task
+	// rows, so the list must be pageable. Clamped to a sane range.
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
 	offset := (page - 1) * limit
 
 	query := `SELECT t.id, t.target_id, t.type, t.status, t.priority, t.progress, t.total,
 		t.current_module, COALESCE(t.eta_seconds,0), COALESCE(t.module_eta_seconds,0), t.modules, COALESCE(t.completed_modules,'[]'), t.error, t.started_at, t.finished_at, t.created_at, t.updated_at,
 		COALESCE(t.current_asset,''), COALESCE(t.assets_done,0), COALESCE(t.assets_total,0),
-		tgt.domain, COALESCE(tgt.name,'')
+		tgt.domain, COALESCE(tgt.name,''), COALESCE(tgt.watch_only,0)
 		FROM tasks t JOIN targets tgt ON tgt.id = t.target_id
 		WHERE 1=1`
 	args := []any{}
@@ -462,6 +637,14 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		query += " AND t.target_id = ?"
 		args = append(args, targetID)
 	}
+	switch coverage {
+	case "breadth", "watch":
+		query += " AND t.type = ?"
+		args = append(args, "watch_scan")
+	case "deep":
+		query += " AND (t.type IS NULL OR t.type <> ?)"
+		args = append(args, "watch_scan")
+	}
 
 	query += " ORDER BY t.created_at DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -478,14 +661,20 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		var t models.Task
 		var startedAt, finishedAt *string
 		var modulesJSON, completedJSON string
+		var projectBreadth int
 		err := rows.Scan(&t.ID, &t.TargetID, &t.Type, &t.Status, &t.Priority,
 			&t.Progress, &t.Total, &t.CurrentModule, &t.EtaSeconds, &t.ModuleEtaSeconds, &modulesJSON, &completedJSON, &t.Error,
-			&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.CurrentAsset, &t.AssetsDone, &t.AssetsTotal, &t.TargetDomain, &t.Name)
+			&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.CurrentAsset, &t.AssetsDone, &t.AssetsTotal, &t.TargetDomain, &t.Name, &projectBreadth)
 		if err != nil {
 			continue
 		}
 		t.Modules = models.JSONToStringSlice(modulesJSON)
 		t.CompletedModules = models.JSONToStringSlice(completedJSON)
+		t.Coverage = "deep"
+		if t.Type == "watch_scan" {
+			t.Coverage = "breadth"
+		}
+		t.ProjectBreadth = projectBreadth == 1
 
 		if startedAt != nil && *startedAt != "" {
 			parsed, _ := time.Parse("2006-01-02T15:04:05Z", *startedAt)

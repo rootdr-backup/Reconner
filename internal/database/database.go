@@ -15,7 +15,12 @@ type DB struct {
 }
 
 func New(path string) (*DB, error) {
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000", path)
+	// _txlock=immediate makes every BEGIN IMMEDIATE-style write transaction take
+	// the write lock up front. Without it SQLite starts a DEFERRED transaction and
+	// only tries to upgrade to a write lock at the first write, which deadlocks
+	// when two lanes (a deep scan and a watch round) and the hourly retention
+	// prune try to upgrade at the same time: SQLITE_BUSY on one of them.
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_txlock=immediate", path)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

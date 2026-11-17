@@ -153,6 +153,20 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind, _, _ := detectAssetKind(value)
+	// A watch-only project cannot run a watch round once it has a network
+	// asset (the project turns mixed). Refuse it with a clear 400 instead of
+	// letting the project stop silently.
+	if kind == "network" {
+		var watchOnly int
+		if err := h.db.QueryRow(`SELECT COALESCE(watch_only,0) FROM targets WHERE id=?`, id).Scan(&watchOnly); err != nil {
+			h.writeError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		if watchOnly == 1 {
+			h.writeError(w, http.StatusBadRequest, "this project runs watch rounds; network assets are not supported")
+			return
+		}
+	}
 	assetType := normalizeManualAssetType(req.AssetType, value, kind)
 	aid := uuid.New().String()
 	if _, err := h.db.Exec(
@@ -241,6 +255,19 @@ func (h *Handler) handleUpdateAsset(w http.ResponseWriter, r *http.Request) {
 		value, valueChanged = v, v != existing
 	}
 	kind, _, _ = detectAssetKind(value)
+	// Refuse a network value on a watch-only project. Gate on valueChanged so
+	// a name-only edit of a legacy network row is still allowed.
+	if valueChanged && kind == "network" {
+		var watchOnly int
+		if err := tx.QueryRowContext(r.Context(), `SELECT COALESCE(watch_only,0) FROM targets WHERE id=?`, id).Scan(&watchOnly); err != nil {
+			h.writeError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		if watchOnly == 1 {
+			h.writeError(w, http.StatusBadRequest, "this project runs watch rounds; network assets are not supported")
+			return
+		}
+	}
 	if req.AssetType != nil {
 		assetType = *req.AssetType
 	}

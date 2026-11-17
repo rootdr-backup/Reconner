@@ -215,6 +215,12 @@ type CreateProjectRequest struct {
 	AssetIDs             []string `json:"asset_ids"`
 	MonitorEnabled       bool     `json:"monitor_enabled"`
 	MonitorIntervalHours int      `json:"monitor_interval_hours"`
+	// WatchOnly creates a BREADTH project: it runs the cheap watch rounds
+	// (passive discovery + one HTTP probe) instead of the deep pipeline.
+	// The backend is the enforcement point — network/IP assets are filtered
+	// out so the project can never end up mixed, and the old monitor tier is
+	// switched off (both flags on would double-scan the project).
+	WatchOnly bool `json:"watch_only"`
 }
 
 func projectAssetKind(t string) string {
@@ -265,8 +271,16 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 	}
 	values := make([]string, 0, len(assets))
 	hasWeb, hasNet := false, false
+	skippedNetwork := []string{}
 	for _, a := range assets {
 		if a.AssetType == "other" || a.AssetType == "android" || a.AssetType == "ios" || a.AssetType == "hardware" || a.AssetType == "source_code" {
+			continue
+		}
+		// A breadth project runs WEB modules only. Network assets (CIDR/IP) have
+		// no place in a watch round, and a mixed project cannot run one at all —
+		// so the backend drops them here instead of creating a broken project.
+		if req.WatchOnly && projectAssetKind(a.AssetType) == "network" {
+			skippedNetwork = append(skippedNetwork, a.Identifier)
 			continue
 		}
 		values = append(values, a.Identifier)
@@ -275,6 +289,12 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		} else {
 			hasWeb = true
 		}
+	}
+	if req.WatchOnly && len(values) == 0 {
+		return "", fmt.Errorf("no web assets: a breadth project needs at least one web asset")
+	}
+	if len(skippedNetwork) > 0 && s.log != nil {
+		s.log.Info("Breadth project import dropped network assets", "count", len(skippedNetwork), "assets", strings.Join(skippedNetwork, ", "))
 	}
 	if len(values) == 0 {
 		values = []string{p.Provider + ":" + p.Handle}
@@ -304,8 +324,22 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO targets(id,domain,name,description,priority,notes,kind,exclude_scope,owner_id,monitor_enabled,monitor_interval_hours)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(req.MonitorEnabled), hours)
+	// A breadth project starts in the watch tier: the old monitor tier is off
+	// (both flags on would scan the project twice) and the first watch round is
+	// due immediately.
+	monitorEnabled := req.MonitorEnabled
+	watchOnly := 0
+	if req.WatchOnly {
+		monitorEnabled = false
+		watchOnly = 1
+	}
+	// watch_next_run must be a real SQLite timestamp, not a bound string: the
+	// due query compares watch_next_run <= datetime('now') as TEXT, and the
+	// literal "CURRENT_TIMESTAMP" sorts after "2026-..." so the first round
+	// would never be due. Inline CURRENT_TIMESTAMP for breadth projects; leave
+	// it NULL for deep projects (NULL means "not scheduled").
+	_, err = tx.ExecContext(ctx, `INSERT INTO targets(id,domain,name,description,priority,notes,kind,exclude_scope,owner_id,monitor_enabled,monitor_interval_hours,watch_only,watch_next_run,watch_paused,watch_fail_count,watch_root_index)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,0,0,0)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(monitorEnabled), hours, watchOnly, watchOnly)
 	if err != nil {
 		return "", err
 	}
@@ -314,9 +348,16 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	for _, a := range assets {
+		if req.WatchOnly && projectAssetKind(a.AssetType) == "network" {
+			continue // network assets are not part of a breadth project
+		}
 		meta, _ := json.Marshal(map[string]any{"provider": p.Provider, "program": p.Handle, "raw_hash": a.RawHash, "eligible_bounty": a.EligibleBounty, "max_severity": a.MaxSeverity, "instruction": a.Instruction})
+		assetMonitor := 1
+		if req.WatchOnly {
+			assetMonitor = 0 // the old monitor tier is off for breadth projects
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at)
-		VALUES(?,?,?,?,?,?,?,?, 'approved',1,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, "bounty:"+p.Provider, a.ID, string(meta))
+		VALUES(?,?,?,?,?,?,?,?, 'approved',?,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, "bounty:"+p.Provider, a.ID, assetMonitor, string(meta))
 		if err != nil {
 			return "", err
 		}
@@ -489,7 +530,11 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 			}
 			meta := map[string]any{"raw_hash": a.RawHash, "eligible_bounty": bounty == 1, "max_severity": a.MaxSeverity, "instruction": a.Instruction}
 			metaJSON, _ := json.Marshal(meta)
-			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, a.ID, string(metaJSON))
+			// The upsert must NOT rewrite a row the watch tier landed
+			// (source='watch:scope'): that row is the operator's landed scope
+			// and keeps its own source, asset_type and metadata. The WHERE on
+			// the conflict clause leaves the landed row untouched.
+			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP WHERE assets.source <> 'watch:scope'`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, a.ID, string(metaJSON))
 			if err != nil {
 				return err
 			}

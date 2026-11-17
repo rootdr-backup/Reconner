@@ -165,6 +165,15 @@ func RunMigrations(db *DB) error {
 		alterSubdomainsAddCatchall,
 		alterTargetsAddCatchallDetection,
 		createMonitoringChangesTargetTimeIndex,
+		alterTargetsAddWatchOnly,
+		alterTargetsAddWatchLastRun,
+		alterTargetsAddWatchNextRun,
+		alterTargetsAddWatchFailCount,
+		alterTargetsAddWatchRootIndex,
+		alterTargetsAddWatchPaused,
+		createWatchScopeEventsTable,
+		createWatchTierIndexes,
+		alterTelegramChatsAddWatchPrefs,
 	}
 
 	for i, m := range migrations {
@@ -1816,3 +1825,78 @@ const alterTasksAddAssetsTotal = `ALTER TABLE tasks ADD COLUMN assets_total INTE
 // thumbnail than by reading raw evidence text alone.
 const alterAdminPanelFindingsAddScreenshotID = `ALTER TABLE admin_panel_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
 const alterVulnFindingsAddScreenshotID = `ALTER TABLE vuln_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
+
+// ── Breadth ("watch") tier columns ─────────────────────────────────────────
+//
+// watch_only marks a target as a BREADTH project: it runs the cheap watch
+// rounds (passive discovery + one HTTP probe) instead of the deep pipeline.
+// The other columns drive the chained-round schedule:
+//
+//	watch_last_run   when the last round finished
+//	watch_next_run   when the next round is due (NULL = not scheduled)
+//	watch_fail_count consecutive failed rounds (the chain stops at the limit)
+//	watch_root_index which domain/wildcard asset the next round enumerates
+//	watch_paused     the operator's stop switch (1 = watching stopped)
+//
+// The two timestamps use the SQLite datetime layout (YYYY-MM-DD HH:MM:SS), so
+// the scheduler can compare them with datetime('now') directly. A NULL
+// watch_next_run means "not scheduled" and must NEVER make a project due.
+const alterTargetsAddWatchOnly = `ALTER TABLE targets ADD COLUMN watch_only INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchLastRun = `ALTER TABLE targets ADD COLUMN watch_last_run DATETIME;`
+const alterTargetsAddWatchNextRun = `ALTER TABLE targets ADD COLUMN watch_next_run DATETIME;`
+const alterTargetsAddWatchFailCount = `ALTER TABLE targets ADD COLUMN watch_fail_count INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchRootIndex = `ALTER TABLE targets ADD COLUMN watch_root_index INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchPaused = `ALTER TABLE targets ADD COLUMN watch_paused INTEGER NOT NULL DEFAULT 0;`
+
+// watch_scope_events is the audit trail of the auto-land: every host the watch
+// tier brought into a project's eligible scope, with the program it came from.
+//
+// announced is three-state:
+//
+//	0 = not announced yet
+//	2 = claimed by a flush that is sending it right now
+//	1 = announced
+//
+// A claim that is never released (a crash mid-send) is picked up again by the
+// next flush, so a landing is never silently lost.
+const createWatchScopeEventsTable = `
+CREATE TABLE IF NOT EXISTS watch_scope_events (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	program_id TEXT DEFAULT '',
+	identifier TEXT NOT NULL,
+	event_type TEXT DEFAULT 'landed',
+	asset_id TEXT DEFAULT '',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	announced INTEGER NOT NULL DEFAULT 0,
+	metadata TEXT DEFAULT '{}',
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_watch_scope_events_target ON watch_scope_events(target_id, detected_at);
+CREATE INDEX IF NOT EXISTS idx_watch_scope_events_announced ON watch_scope_events(announced);`
+
+// createWatchTierIndexes serves the watch workload: the scheduler lists tasks
+// by type and status, the task list pages per target, and the Projects filter
+// reads the coverage column.
+//
+// The asset index is NOT unique on purpose: SQLite compares TEXT with BINARY
+// collation, so a unique index on LOWER(value) would fail to build on an
+// existing database that already holds Example.com next to example.com. The
+// auto-land writes lowercased values instead, and the existing
+// UNIQUE(target_id, value) then covers the normal case.
+const createWatchTierIndexes = `
+CREATE INDEX IF NOT EXISTS idx_tasks_type_status_created ON tasks(type, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_target_created ON tasks(target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_targets_watch_only ON targets(watch_only);
+CREATE INDEX IF NOT EXISTS idx_assets_target_lower_value ON assets(target_id, LOWER(value));`
+
+// alterTelegramChatsAddWatchPrefs adds the two-tier alert switches to every
+// Telegram chat. The watch tier is a separate workload, so its alerts are
+// separate: the deep "scan started" and "scan finished" messages stay off for
+// watch rounds by default (a watch round runs every 30 minutes per project and
+// would otherwise flood the channel), while the scope-landed alert is ON because
+// a newly eligible host is the one event the operator must never miss.
+const alterTelegramChatsAddWatchPrefs = `
+ALTER TABLE telegram_chats ADD COLUMN notify_watch_scan_started INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE telegram_chats ADD COLUMN notify_watch_scan_finished INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE telegram_chats ADD COLUMN notify_scope_landed INTEGER NOT NULL DEFAULT 1;`

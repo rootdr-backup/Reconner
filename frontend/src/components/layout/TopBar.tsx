@@ -128,6 +128,10 @@ export const TopBar = () => {
   const [items, setItems] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
   const [open, setOpen] = useState(false)
+  // Bell bucket: all | deep | watch | findings. The server maps the bucket to
+  // the stored notification types, so a bucket is never empty because the
+  // stored type is more granular than the bucket.
+  const [bucket, setBucket] = useState<'all' | 'deep' | 'watch' | 'findings'>('all')
   const bellRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => { const i = setInterval(() => setConnected(ws.connected), 2000); return () => clearInterval(i) }, [])
@@ -136,7 +140,7 @@ export const TopBar = () => {
     let alive = true
     const load = async () => {
       try {
-        const r = await notifApi.list()
+        const r = await notifApi.list(bucket)
         if (alive) { setItems(r.notifications || []); setUnread(r.unread || 0) }
       } catch { /* ignore */ }
     }
@@ -145,13 +149,16 @@ export const TopBar = () => {
     // Monitoring persists its notification before emitting this event. Task
     // completion is a fallback for older/new-subdomain producers that only
     // persist a bell row. This removes the previous one-minute blind spot.
+    // scope_landed is its own event: a watch round writes the bell row without
+    // the notification_created broadcast, so the bell needs this listener.
     const offs = [
       ws.on('notification_created', load),
       ws.on('task_finished', load),
+      ws.on('scope_landed', load),
       ws.on('bounty_catalog_sync', load),
     ]
     return () => { alive = false; clearInterval(t); offs.forEach(off => off()) }
-  }, [])
+  }, [bucket])
 
   // Close the dropdown on an outside click.
   useEffect(() => {
@@ -220,11 +227,21 @@ export const TopBar = () => {
 
             {open && (
               <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-80 max-h-[70dvh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-[110]">
-                <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-border">
                   <span className="text-sm font-semibold">Notifications</span>
-                  {unread > 0 && (
-                    <button onClick={markAllRead} className="text-[11px] text-accent hover:underline">Mark all read</button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <select value={bucket} onChange={e => setBucket(e.target.value as typeof bucket)}
+                      title="Filter notifications"
+                      className="bg-surface-1 border border-border rounded text-[11px] text-text-secondary px-1.5 py-0.5">
+                      <option value="all">All</option>
+                      <option value="deep">Deep</option>
+                      <option value="watch">Watch</option>
+                      <option value="findings">Findings</option>
+                    </select>
+                    {unread > 0 && (
+                      <button onClick={markAllRead} className="text-[11px] text-accent hover:underline">Mark all read</button>
+                    )}
+                  </div>
                 </div>
                 <div className="overflow-y-auto">
                   {updateVisible && updateInfo && (

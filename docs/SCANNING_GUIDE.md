@@ -152,12 +152,98 @@ Every redirect hop is scope-checked. Failed asset fetches remain listed instead
 of disappearing silently. The bundle may contain secrets and authenticated
 evidence; store and share it accordingly.
 
+## Two-tier scanning: deep scans and breadth watches
+
+Reconner runs two independent tiers. A project has one coverage mode, set on the
+Projects page or the project detail page.
+
+- **Deep scan** (default): the full module pipeline, all discovery sources, every
+  phase. Use it for the small set of targets that find bugs.
+- **Breadth watch** (`watch_only=1`): passive discovery plus one HTTP probe, in a
+  chained loop. Use it for many bounty programs where you cannot review each
+  target by hand.
+
+A watch round enumerates one eligible root per round and rotates through the
+project's domain assets. It then resolves the names and probes every known host
+of the project at the root path, over both http and https. Brute force,
+permutations, recursion, ASN sweeps, virtual-host probing, crawling, injection,
+and all post-processing modules are skipped. The task log lists every skipped
+module group. There is no round timeout and no host cap: a watch round always
+finishes.
+
+When a round finishes, the project is re-queued after the minimum gap. A failed
+round increments a consecutive-failure counter; at the limit the watch chain
+pauses and raises one alert. Cancelling a watch task also stops the chain. A
+"Pause watching" switch on the project detail page stops it without losing
+state.
+
+Only bounty-eligible scope lands automatically. The eligible set is the union
+of in-scope, eligible-submission assets of every program linked to the project.
+A discovered host that matches the eligible set is added to the project assets
+as approved scope after the HTTP phase confirms it. Hosts never verified by the
+HTTP probe are not landed. Landed hosts are scope, not scan roots: a deep scan
+does not pick them up until you promote them with "Promote to Deep seed" in the
+Watch Scope panel. Hosts that leave the eligible scope are marked
+`out_of_scope` and excluded from later diffs; they are not deleted.
+
+### Watch tuning knobs
+
+All watch numbers live in `internal/config/config.go` and are editable under
+**System → Scanning → Watch scanning (breadth tier)**.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Limits.MaxConcurrentScans` | 2 | Global cap for deep + watch together |
+| `Limits.MaxConcurrentDeepScans` | 1 | Deep lane cap (also bounded by the memory guard) |
+| `Limits.MaxConcurrentWatchScans` | 1 | Watch lane cap; deep slots are reserved |
+| `WatchRoundsMinGap` | 30 min | Minimum wait before the next chained round |
+| `WatchSourceTimeoutMinutes` | 5 | Per-discovery-source timeout; no shared round budget |
+| `WatchEnumerationSources` | `subfinder,assetfinder,chaos,findomain` | Enabled watch discovery sources (toggle each in the UI) |
+| `Limits.WatchHTTPThreads` | 10 | httpx threads per watch round (deep keeps `Workers.HTTPProbing`) |
+| `Limits.WatchHTTPRateLimit` | 25 rps | httpx rate per watch round (deep keeps `HTTPRateLimit`) |
+| `WatchRowsRetentionDays` | 30 days | Prune raw watch-only rows older than this |
+| `WatchScopeEventsRetentionDays` | 180 days | Prune the scope landing audit trail |
+| `WatchNotifyHostCap` | 20 | Host names listed per grouped scope alert |
+| `WatchFailLimit` | 3 | Consecutive failed rounds before the chain pauses |
+
+The global ceiling is `min(MaxConcurrentScans, NumCPU, effectiveMaxConcurrent+1)`.
+The deep lane is capped by the memory guard; the watch lane takes only the slots
+the deep lane did not reserve. A deep scan therefore never waits for a watch
+round, and watch rounds still run while deep scans are queued. The chaos source
+needs a projectdiscovery API key, set under **System → Integrations → Passive
+intelligence providers**; without it, chaos is skipped with one log line.
+
+### Watch FAQ
+
+- **Are watch rounds fully passive?** No. They query the target's nameservers
+  (findomain + DNS admission) and send one HTTP request per host per scheme.
+  Liveness cannot be determined without traffic to the host.
+- **Why did my project get no new scope?** Manual projects have no linked bounty
+  program, so there is no eligible set to land against. The round still runs and
+  records hosts. The log says "no bounty program linked".
+- **Why is a breadth project skipped?** A watch round only runs on a `web`
+  project. Mixed or network projects are refused and raise one alert. Remove the
+  network assets before enabling breadth.
+- **Where do deep scans appear in the UI?** Scan activity splits by TASK type,
+  so flipping a project's coverage never rewrites its history. A manual deep scan
+  on a breadth project carries a "manual" badge.
+- **What survives pruning?** Landed scope, notifications, and task history. Raw
+  subdomains, HTTP services, and scope events age out by the retention knobs.
+  Deep-tier data and finding tables are never pruned.
+
 ## Telegram operations
 
 Configure the bot under **System → Integrations → Telegram**. Chats are
 allowlisted individually as viewer, operator, or admin. Notifications can cover
 scan start, each terminal phase status, final results, monitoring changes, and
 validated findings.
+
+Watch rounds use separate templates and preferences: "Watch start", "Watch
+result", and "New scope". Watch start and result are off by default; "New scope"
+is on. Scope landings are grouped into one message per watch tick across all
+projects, with per-program counts and up to `WatchNotifyHostCap` host names. A
+tick with no new eligible scope sends nothing. Watch rounds never emit the deep
+scan start or phase messages.
 
 The bot uses long polling and a durable per-chat outbox. Operator actions are
 audited. Admin target deletion always requires inline confirmation.

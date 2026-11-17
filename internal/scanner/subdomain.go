@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -120,20 +119,33 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// return nothing). We only srcWg.Wait() later, before the resolution pass, so
 	// these goroutines run alongside the whole CLI-tool phase.
 	type passiveSrc struct {
+		id   string
 		name string
 		fn   func(string) ([]string, error)
 	}
 	sources := []passiveSrc{
-		{"crt.sh", queryCRTSH},
-		{"certspotter", queryCertSpotter},
-		{"hackertarget", queryHackerTarget},
-		{"rapiddns", queryRapidDNS},
-		{"otx", queryOTX},
-		{"anubis", queryAnubis},
-		{"urlscan", queryURLScan},
+		{"crtsh", "crt.sh", queryCRTSH},
+		{"certspotter", "certspotter", queryCertSpotter},
+		{"hackertarget", "hackertarget", queryHackerTarget},
+		{"rapiddns", "rapiddns", queryRapidDNS},
+		{"otx", "otx", queryOTX},
+		{"anubis", "anubis", queryAnubis},
+		{"urlscan", "urlscan", queryURLScan},
 	}
 	var srcWg sync.WaitGroup
+	// passiveOK counts the sources that ran without an error. In the watch tier a
+	// round where EVERY enabled source failed must FAIL, not quietly "finish"
+	// with zero names (decision D66) — otherwise a broken setup (missing binary,
+	// missing API key) spins forever without ever hitting the failure limit.
+	passiveOK := 0
+	var passiveMu sync.Mutex
 	for _, src := range sources {
+		// Watch tier: the operator can switch a passive source off. Deep tier:
+		// every source runs, exactly as before.
+		if !watchSourceEnabled(ctx, src.id) {
+			logFn("info", "subdomain_enum", fmt.Sprintf("%s skipped: disabled by operator", src.name))
+			continue
+		}
 		srcWg.Add(1)
 		go func(name string, fn func(string) ([]string, error)) {
 			defer srcWg.Done()
@@ -157,160 +169,41 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 					added++
 				}
 			}
+			passiveMu.Lock()
+			passiveOK++
+			passiveMu.Unlock()
 			logFn("info", "subdomain_enum", fmt.Sprintf("%s: +%d, total: %d", name, added, countFound()))
 		}(src.name, src.fn)
 	}
 
-	// subfinder — try plain text first (most compatible). -all enables every
-	// keyless source (crt.sh, wayback, etc.) so large domains still yield results
-	// even without provider API keys.
-	if s.exec.IsToolAvailable("subfinder") {
-		logFn("info", "subdomain_enum", "Running subfinder...")
-		before := countFound()
-		tctx, tcancel := context.WithTimeout(ctx, 4*time.Minute)
-		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
-			line = strings.ToLower(strings.TrimSpace(line))
-			// skip lines that look like status messages
-			if line == "" || strings.Contains(line, "[") || strings.Contains(line, ":") {
-				return
-			}
-			if isValidSubdomain(line, domain) {
-				storeNew(line)
-			}
-		}, "subfinder", "-d", domain, "-silent", "-all")
-		tcancel()
-		// subfinder exits with status 1 when no API keys configured — ignore.
-		// Only bail if the PARENT ctx was cancelled (real cancel), not our tool
-		// timeout.
-		if err != nil && ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("subfinder hit its 4m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("subfinder found %d subdomains", countFound()-before))
-		}
-	}
+	// CLI discovery sources.
+	//
+	// DEEP tier: they run SEQUENTIALLY, each with its own historical budget, so
+	// the operator sees a predictable order (and the worst case stays ~17 min).
+	//
+	// WATCH tier: the ENABLED sources run CONCURRENTLY, each on its own timeout
+	// (WatchSourceTimeoutMinutes). There is NO shared round budget: the round
+	// costs the slowest source instead of the sum, and the DNS admission pass
+	// plus the HTTP probe that follow always get the parent context.
+	//
 	// amass removed by design: it's the slowest passive source and added ~0 new
 	// subdomains on real targets (subfinder + assetfinder + findomain + passive
 	// sources cover the same surface far faster).
-
-	// assetfinder
-	if s.exec.IsToolAvailable("assetfinder") {
-		logFn("info", "subdomain_enum", "Running assetfinder...")
-		before := countFound()
-		tctx, tcancel := context.WithTimeout(ctx, 2*time.Minute)
-		result, err := s.exec.Run(tctx, "assetfinder", "--subs-only", domain)
-		tcancel()
-		if err == nil {
-			sc := bufio.NewScanner(strings.NewReader(result.Stdout))
-			for sc.Scan() {
-				line := strings.ToLower(strings.TrimSpace(sc.Text()))
-				if isValidSubdomain(line, domain) {
-					storeNew(line)
-				}
-			}
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("assetfinder hit its 2m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("assetfinder found %d new subdomains", countFound()-before))
-		}
+	runner := &discoveryRunner{
+		scanner: s,
+		ctx:     ctx,
+		target:  targetID,
+		domain:  domain,
+		logFn:   logFn,
+		store:   storeNew,
+		count:   countFound,
 	}
-
-	// findomain
-	if s.exec.IsToolAvailable("findomain") {
-		logFn("info", "subdomain_enum", "Running findomain...")
-		before := countFound()
-		tctx, tcancel := context.WithTimeout(ctx, 2*time.Minute)
-		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
-			line = strings.ToLower(strings.TrimSpace(line))
-			if isValidSubdomain(line, domain) {
-				storeNew(line)
-			}
-		}, "findomain", "-t", domain, "-q")
-		tcancel()
-		if err != nil && ctx.Err() == nil {
-			s.logger.Debug("findomain error", "error", err)
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("findomain hit its 2m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("findomain found %d new subdomains", countFound()-before))
-		}
+	watchMode := watchModeEnabled(ctx)
+	watchBudget := 5 * time.Minute
+	if s.cfg != nil && s.cfg.WatchSourceTimeoutMinutes > 0 {
+		watchBudget = time.Duration(s.cfg.WatchSourceTimeoutMinutes) * time.Minute
 	}
-
-	// scilla — extra passive/DNS subdomain source (edoardottt/scilla). Graceful
-	// no-op when not installed. Parses hostnames out of its plain output.
-	if s.exec.IsToolAvailable("scilla") {
-		logFn("info", "subdomain_enum", "Running scilla...")
-		before := countFound()
-		tctx, tcancel := context.WithTimeout(ctx, 3*time.Minute)
-		err := s.exec.RunWithCallback(tctx, targetID, func(line string) {
-			line = strings.ToLower(strings.TrimSpace(line))
-			// scilla decorates some lines; keep only things that look like a host
-			// under the target domain.
-			line = strings.TrimPrefix(line, "http://")
-			line = strings.TrimPrefix(line, "https://")
-			if i := strings.IndexAny(line, "/ \t"); i >= 0 {
-				line = line[:i]
-			}
-			if isValidSubdomain(line, domain) {
-				storeNew(line)
-			}
-		}, "scilla", "subdomain", "-target", domain, "-no-color")
-		tcancel()
-		if err != nil && ctx.Err() == nil {
-			s.logger.Debug("scilla error", "error", err)
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("scilla hit its 3m budget — %d found so far, likely PARTIAL for a large domain", countFound()-before))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("scilla found %d new subdomains", countFound()-before))
-		}
-	}
-
-	// waybackurls for subdomain extraction
-	if s.exec.IsToolAvailable("waybackurls") {
-		logFn("info", "subdomain_enum", "Querying Wayback Machine...")
-		tctx, tcancel := context.WithTimeout(ctx, 3*time.Minute)
-		result, err := s.exec.Run(tctx, "waybackurls", domain)
-		tcancel()
-		if err == nil {
-			sc := bufio.NewScanner(strings.NewReader(result.Stdout))
-			for sc.Scan() {
-				if sub := extractSubdomain(sc.Text(), domain); sub != "" {
-					storeNew(sub)
-				}
-			}
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("waybackurls hit its 3m budget — PARTIAL results, total so far: %d", countFound()))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("waybackurls added, total: %d", countFound()))
-		}
-	}
-
-	// gau for subdomain extraction
-	if s.exec.IsToolAvailable("gau") {
-		logFn("info", "subdomain_enum", "Querying GAU (GetAllURLs)...")
-		tctx, tcancel := context.WithTimeout(ctx, 3*time.Minute)
-		result, err := s.exec.Run(tctx, "gau", "--subs", domain)
-		tcancel()
-		if err == nil {
-			sc := bufio.NewScanner(strings.NewReader(result.Stdout))
-			for sc.Scan() {
-				if sub := extractSubdomain(sc.Text(), domain); sub != "" {
-					storeNew(sub)
-				}
-			}
-		}
-		if tctx.Err() == context.DeadlineExceeded {
-			logFn("warn", "subdomain_enum", fmt.Sprintf("gau hit its 3m budget — PARTIAL results, total so far: %d", countFound()))
-		} else {
-			logFn("info", "subdomain_enum", fmt.Sprintf("gau added, total: %d", countFound()))
-		}
-	}
+	cliOK, cliTotal := runner.runDiscoverySources(watchMode, watchBudget)
 
 	// Wait for the passive HTTP sources launched up front to finish before the
 	// resolution pass (they've been running concurrently with the CLI tools).
@@ -372,7 +265,15 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// against the IPs we already know, via the Host header, and record any that
 	// the server actually serves — internal/forgotten vhosts DNS enumeration
 	// can't see. Stored with source='vhost' so the UI can flag them.
-	s.vhostScan(ctx, targetID, domain, found, &mu, wildcardProfile, logFn)
+	//
+	// The watch tier skips it: vhost probing sends forged Host headers to the
+	// target, which is active traffic beyond the plain probe the watch round is
+	// allowed to send.
+	if watchMode {
+		logFn("info", "subdomain_enum", "Virtual-host probing skipped — watch rounds send no forged Host headers.")
+	} else {
+		s.vhostScan(ctx, targetID, domain, found, &mu, wildcardProfile, logFn)
+	}
 
 	// Vhost verification had the final chance to promote wildcard/unresolved names.
 	// Remove only old eager-DNS rows which still lack evidence; explicit seeds,
@@ -394,12 +295,26 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	logFn("info", "subdomain_enum", fmt.Sprintf("Subdomain enumeration complete. %d verified assets stored from %d discovered candidates.", s.countSubdomains(targetID), countFound()))
 
 	// Notify on genuinely new subdomains (re-scan only — see startSubCount above).
-	if startSubCount > 0 {
+	//
+	// The watch tier does NOT raise this notification. A watch round runs on
+	// dozens of projects every cycle, so one "new subdomain(s) found" row per
+	// project per round would drown the bell. The watch tier reports NEW ELIGIBLE
+	// SCOPE instead (the grouped scope_landed message), which is the signal the
+	// operator actually acts on.
+	if startSubCount > 0 && !watchMode {
 		if end := s.countSubdomains(targetID); end > startSubCount {
 			n := end - startSubCount
 			notify(s.db, targetID, "new_subdomain", notificationTitle("new_subdomain"),
 				fmt.Sprintf("%d new subdomain(s) found on %s", n, domain), domain, "medium")
 		}
+	}
+
+	// A watch round where EVERY enabled discovery source failed must FAIL, not
+	// "finish" with zero names (decision D66). Otherwise a broken setup (missing
+	// binary, missing API key, wrong flag) spins forever and the failure limit
+	// never triggers. "0 subdomains found cleanly" stays a finished round.
+	if watchMode && cliTotal > 0 && cliOK == 0 && passiveOK == 0 {
+		return fmt.Errorf("every enabled discovery source failed (no working tool, no API key, or all sources errored)")
 	}
 	return nil
 }

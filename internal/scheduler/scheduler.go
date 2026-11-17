@@ -196,6 +196,14 @@ type Notifier interface {
 	NotifyScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int)
 	NotifyNewVuln(findingID, targetID, domain, vulnType, severity, url, parameter string)
 	NotifyMonitorChange(targetID, domain, changeType, title, url, oldVal, newVal string)
+	// Watch-tier events. The breadth/watch tier is a separate workload with its
+	// own volume, so it gets its own templates and its own per-chat switches.
+	// A watch round never sends the deep start/phase/finish messages.
+	NotifyWatchScanStarted(taskID, targetID, domain string)
+	NotifyWatchScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int, skippedSummary string)
+	// NotifyScopeLanded delivers the grouped scope-landed alert. The scheduler
+	// owns the event key, so the outbox deduplicates the whole window.
+	NotifyScopeLanded(eventKey, summary string, hosts []string)
 }
 
 type Scheduler struct {
@@ -258,6 +266,15 @@ type Scheduler struct {
 	// taskTargets mirrors running so admission can enforce MaxScansPerTarget
 	// without racing on a database status transition that has not committed yet.
 	taskTargets map[string]string
+	// taskTypes mirrors running with the task type, so admission can count the
+	// deep lane and the watch lane separately.
+	taskTypes map[string]string
+	// watchRootFails counts consecutive FAILED watch rounds on the SAME root of
+	// a project. It is the poison-root escape (plan §3): after two failures on
+	// the same root the rotation advances anyway, so one broken domain cannot
+	// stop the chain for every healthy root. watch_fail_count stays per project
+	// in the database; this counter is deliberately in memory.
+	watchRootFails map[string]int
 	// throttleLog dedupes the cooldown warning so a loaded box logs it once, not
 	// every 2s drain tick.
 	throttleLog atomic.Bool
@@ -280,19 +297,21 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	exec := tools.NewExecutor(cfg, log)
 
 	s := &Scheduler{
-		db:          db,
-		hub:         hub,
-		cfg:         cfg,
-		logger:      log,
-		executor:    exec,
-		queue:       make(chan string, 100),
-		cancelMap:   make(map[string]context.CancelFunc),
-		skipCancel:  make(map[string]context.CancelFunc),
-		skipReq:     make(map[string]bool),
-		running:     make(map[string]bool),
-		taskTargets: make(map[string]string),
-		stopCh:      make(chan struct{}),
-		paused:      make(map[string]bool),
+		db:             db,
+		hub:            hub,
+		cfg:            cfg,
+		logger:         log,
+		executor:       exec,
+		queue:          make(chan string, 100),
+		cancelMap:      make(map[string]context.CancelFunc),
+		skipCancel:     make(map[string]context.CancelFunc),
+		skipReq:        make(map[string]bool),
+		running:        make(map[string]bool),
+		taskTargets:    make(map[string]string),
+		taskTypes:      make(map[string]string),
+		watchRootFails: make(map[string]int),
+		stopCh:         make(chan struct{}),
+		paused:         make(map[string]bool),
 	}
 
 	// Wrapped broadcast: fan out to websocket clients AND route high-signal
@@ -429,6 +448,22 @@ func (s *Scheduler) Start() {
 	s.wg.Add(1)
 	go s.monitoringScheduler()
 
+	// The retention prune removes the raw rows a watch round produced. It is
+	// tier-scoped: deep rows and every finding row survive.
+	s.wg.Add(1)
+	go s.retentionScheduler()
+
+	// A project that is a breadth project but no longer 'web' cannot run a
+	// watch round. Tell the operator once per state change.
+	s.wg.Add(1)
+	go s.watchKindGuardScheduler()
+
+	// The breadth tier has its own loop: watch rounds are chained per project
+	// (a finished round queues the next one), so they are not driven by the
+	// monitor interval.
+	s.wg.Add(1)
+	go s.watchScheduler()
+
 	// Catalog synchronization can take a few minutes on the first Bugcrowd
 	// import. Keep it isolated so it can never delay due project monitors.
 	s.wg.Add(1)
@@ -466,21 +501,29 @@ func (s *Scheduler) recoverPendingTasks() {
 	// its in-memory context is gone, so it can never make progress or be
 	// cancelled. Mark it cancelled rather than blindly resurrecting it — that was
 	// the cause of "stuck running / can't cancel" after a restart.
-	rows, err := s.db.Query(`SELECT id, target_id FROM tasks WHERE status IN ('running','paused')`)
+	rows, err := s.db.Query(`SELECT id, target_id, COALESCE(type,'') FROM tasks WHERE status IN ('running','paused')`)
 	if err == nil {
 		var stale []string
 		staleTargets := map[string]string{}
+		staleTypes := map[string]string{}
 		for rows.Next() {
-			var id, targetID string
-			if err := rows.Scan(&id, &targetID); err == nil {
+			var id, targetID, taskType string
+			if err := rows.Scan(&id, &targetID, &taskType); err == nil {
 				stale = append(stale, id)
 				staleTargets[id] = targetID
+				staleTypes[id] = taskType
 			}
 		}
 		rows.Close()
 		for _, id := range stale {
 			_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 			s.hub.Broadcast("task_cancelled", map[string]string{"task_id": id, "target_id": staleTargets[id]})
+			// A cancelled watch round needs the same terminal treatment as a
+			// normally-finished one, otherwise the project stays due in the past
+			// and the round restarts immediately after every restart.
+			if staleTypes[id] == watchScanType {
+				s.recoverWatchTask(staleTargets[id])
+			}
 		}
 		if len(stale) > 0 {
 			s.logger.Info("Cleaned up zombie running/paused tasks from previous run", "count", len(stale))
@@ -937,19 +980,30 @@ func (s *Scheduler) ResumeTask(taskID string) (*models.Task, error) {
 	// A module's completion doesn't necessarily land as a clean prefix of `all`
 	// (a parallel group can finish some of its members and not others), so
 	// build BOTH lists by filtering in original order rather than slicing.
+	//
+	// Scan-option tokens ("no_subdomain_brute", speed tokens, …) are NOT phases.
+	// They stay in tasks.modules for restart fidelity, but a resume must not
+	// carry them as work: with only tokens left, createTask would fail with
+	// "select at least one executable module".
 	var remaining, skipped []string
 	for _, m := range all {
 		if done[m] {
 			skipped = append(skipped, m)
-		} else {
-			remaining = append(remaining, m)
+			continue
 		}
+		if scanOptionToken(m) {
+			// Keep the token only when real work remains next to it.
+			continue
+		}
+		remaining = append(remaining, m)
 	}
 	if len(remaining) == 0 {
 		return nil, ErrNothingToResume
 	}
 
-	newTask, err := s.CreateTask(targetID, remaining, priority)
+	// The resumed task keeps the ORIGINAL task type. A watch round resumed as a
+	// deep scan would run the whole heavy pipeline and land in the deep drain.
+	newTask, err := s.CreateTaskTyped(targetID, remaining, priority, resumeTypeTag(originalType))
 	if err != nil {
 		return nil, err
 	}
@@ -1359,12 +1413,15 @@ func (s *Scheduler) processQueue() {
 }
 
 func (s *Scheduler) drainPendingTasks() {
+	// The deep drain NEVER touches watch rounds: they have their own lane, their
+	// own drain (drainPendingWatchTasks) and their own admission cap. Mixing them
+	// here would let a deep drain starve the watch tier (and vice versa).
 	rows, err := s.db.Query(`
 		SELECT t.id FROM tasks t
-		WHERE t.status = 'pending'
+		WHERE t.status = 'pending' AND COALESCE(t.type,'') <> ?
 		ORDER BY t.priority DESC, t.created_at ASC
 		LIMIT 10
-	`)
+	`, watchScanType)
 	if err != nil {
 		return
 	}
@@ -1397,10 +1454,11 @@ func (s *Scheduler) drainPendingTasks() {
 }
 
 func (s *Scheduler) tryStartTask(taskID string) {
-	var targetID, status string
-	if err := s.db.QueryRow(`SELECT target_id,status FROM tasks WHERE id=?`, taskID).Scan(&targetID, &status); err != nil || status != "pending" {
+	var targetID, status, taskType string
+	if err := s.db.QueryRow(`SELECT target_id,status,COALESCE(type,'') FROM tasks WHERE id=?`, taskID).Scan(&targetID, &status, &taskType); err != nil || status != "pending" {
 		return
 	}
+	isWatch := taskType == watchScanType
 
 	// Smart admission: the ceiling isn't a fixed number — it drops when the box is
 	// under memory/CPU pressure (cooldown) and rises back toward the configured
@@ -1412,26 +1470,80 @@ func (s *Scheduler) tryStartTask(taskID string) {
 		return
 	}
 	runningCount := len(s.running)
-	if runningCount >= s.effectiveMaxConcurrent(runningCount) {
+	// Total slots (deep + watch) and the per-lane caps. The watch lane only gets
+	// the slots the deep lane did not reserve, so a deep scan never waits for a
+	// watch round.
+	if runningCount >= s.globalScanCeiling(runningCount) {
 		s.mu.Unlock()
 		return
+	}
+	if isWatch {
+		watchRunning := 0
+		for id := range s.running {
+			if s.taskTypes[id] == watchScanType {
+				watchRunning++
+			}
+		}
+		if watchRunning >= s.watchLaneCap(runningCount) {
+			s.mu.Unlock()
+			return
+		}
+		// A queued watch round whose project was flipped back to deep (or turned
+		// mixed) must not start: the project is no longer a watch project.
+		var watchOnly int
+		var kind string
+		_ = s.db.QueryRow(`SELECT COALESCE(watch_only,0),COALESCE(kind,'web') FROM targets WHERE id=?`, targetID).Scan(&watchOnly, &kind)
+		if watchOnly != 1 || kind != "web" {
+			s.mu.Unlock()
+			s.cancelStaleWatchTask(taskID, targetID)
+			return
+		}
+	} else {
+		deepRunning := 0
+		for id := range s.running {
+			if s.taskTypes[id] != watchScanType {
+				deepRunning++
+			}
+		}
+		if deepRunning >= s.deepLaneCap(runningCount) {
+			s.mu.Unlock()
+			return
+		}
 	}
 	maxPerTarget := 1
 	if s.cfg != nil && s.cfg.Limits.MaxScansPerTarget > 0 {
 		maxPerTarget = s.cfg.Limits.MaxScansPerTarget
 	}
 	perTarget := 0
+	watchRunningForTarget := false
 	for id := range s.running {
-		if s.taskTargets[id] == targetID {
-			perTarget++
+		if s.taskTargets[id] != targetID {
+			continue
+		}
+		perTarget++
+		if s.taskTypes[id] == watchScanType {
+			watchRunningForTarget = true
 		}
 	}
 	if perTarget >= maxPerTarget {
 		s.mu.Unlock()
 		return
 	}
+	// The deep lane and the watch lane must never work on the SAME project at
+	// the same time: they write the same subdomains and assets and would race.
+	// The deep tier keeps its own per-target limit (MaxScansPerTarget), so this
+	// only blocks the deep↔watch overlap.
+	if isWatch && perTarget >= 1 {
+		s.mu.Unlock()
+		return
+	}
+	if !isWatch && watchRunningForTarget {
+		s.mu.Unlock()
+		return
+	}
 	s.running[taskID] = true
 	s.taskTargets[taskID] = targetID
+	s.taskTypes[taskID] = taskType
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelMap[taskID] = cancel
 	// Register before releasing the admission lock so Stop cannot begin Wait
@@ -1446,10 +1558,23 @@ func (s *Scheduler) tryStartTask(taskID string) {
 			delete(s.running, taskID)
 			delete(s.cancelMap, taskID)
 			delete(s.taskTargets, taskID)
+			delete(s.taskTypes, taskID)
 			s.mu.Unlock()
 		}()
 		s.executeTask(ctx, taskID)
 	}()
+}
+
+// cancelStaleWatchTask drops a queued watch round whose project is no longer a
+// watch project (the operator flipped it back to deep, or it gained a network
+// asset). Without this the stale round would start later and run the wrong
+// pipeline on the wrong project.
+func (s *Scheduler) cancelStaleWatchTask(taskID, targetID string) {
+	_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP,
+		updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'`, taskID)
+	s.logger.Info("Dropped stale watch round — project is no longer a watch project",
+		"task_id", taskID, "target_id", targetID)
+	s.hub.Broadcast("task_cancelled", map[string]string{"task_id": taskID, "target_id": targetID})
 }
 
 // baseScanWatchdog is the FLOOR of the per-phase watchdog — not the whole
@@ -1577,6 +1702,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var subdomainRoots []string
 	if !networkTask {
 		subdomainRoots = s.loadSubdomainRoots(ctx, targetID, effectiveScope, scopeOverride)
+		// A watch round enumerates ONE root and rotates through the project's
+		// roots across rounds. A project with N domain assets would otherwise
+		// cost N sequential enumeration rounds per watch cycle.
+		if taskType == watchScanType {
+			subdomainRoots = s.watchRoundRoot(ctx, targetID, effectiveScope, subdomainRoots)
+		}
 	}
 	// A scope token may be a bare host (example.com) OR a full ENDPOINT URL
 	// (https://x.com/appointment?h=…). Seed the HOST into subdomains so http_probe
@@ -1701,6 +1832,20 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
 	ctx = scanner.WithWPCredAuthorized(ctx, wpCredAuthorized)
 	ctx = scanner.WithNetCredAuthorized(ctx, netCredAuthorized)
+	// Watch rounds run the BREADTH pipeline: passive discovery plus one HTTP
+	// probe, no brute force, no recursion, no ASN sweep and only the discovery
+	// sources the operator enabled. The task type forces these on top of the
+	// operator's global settings, because a watch round must never inherit the
+	// deep tier's heavy behaviour.
+	if taskType == watchScanType {
+		ctx = scanner.WithWatchMode(ctx, true)
+		if s.cfg != nil {
+			ctx = scanner.WithWatchSources(ctx, s.cfg.WatchEnumerationSources)
+		}
+		ctx = scanner.WithSubdomainBrute(ctx, false)
+		ctx = scanner.WithSubdomainRecursion(ctx, false)
+		ctx = scanner.WithASNDiscovery(ctx, false)
+	}
 	// Single-endpoint mode: confine the pipeline to the seeded endpoint URL(s) and
 	// the paths under them. Also force the slow subdomain brute OFF (there is one
 	// host) and drop subdomain enumeration from the module list — the point is to
@@ -1756,7 +1901,13 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 	s.hub.Broadcast("task_started", map[string]string{"task_id": taskID, "target_id": targetID})
 	if s.notifier != nil {
-		s.notifier.NotifyScanStarted(taskID, targetID, target.Domain)
+		// The two tiers get different templates. A watch round uses the watch
+		// start message, never the deep one, so the two workloads never mix.
+		if taskType == watchScanType {
+			s.notifier.NotifyWatchScanStarted(taskID, targetID, target.Domain)
+		} else {
+			s.notifier.NotifyScanStarted(taskID, targetID, target.Domain)
+		}
 	}
 
 	logFn := func(level, module, message string) {
@@ -1774,6 +1925,21 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			"time":      time.Now().Format(time.RFC3339),
 		})
 	}
+	// The skipped-module report: a watch round runs two phases, so everything
+	// else in the deep pipeline is SKIPPED. The report is written when the
+	// worker starts the task (not at task creation), so the log always matches
+	// what the round actually ran.
+	if taskType == watchScanType {
+		if line := watchModulesSkippedLine(); line != "" {
+			logFn("info", "scheduler", line)
+		}
+		// The full module list stays in the task log only — a message with 45
+		// names is noise, but the log must stay complete.
+		if full := watchModulesSkippedFull(); full != "" {
+			logFn("info", "scheduler", "Skipped deep-only modules (full list):\n"+full)
+		}
+	}
+
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
 		moduleCtx = scanner.WithCoverageReporter(moduleCtx, func(metric scanner.CoverageMetric, delta int64) {
 			column := map[scanner.CoverageMetric]string{
@@ -1905,7 +2071,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			for _, result := range results {
 				phaseStatus, reason := phaseOutcome(result.err, skipped, timedOut && result.err != nil, ctx.Err())
 				s.finishTaskPhase(taskID, result.module, phaseStatus, reason, result.duration)
-				if s.notifier != nil {
+				if s.notifier != nil && taskType != watchScanType {
 					s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, result.module, phaseStatus, result.duration, s.terminalTaskPhaseCount(taskID), len(modules))
 				}
 				if result.err == nil && !skipped {
@@ -1973,7 +2139,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					// unexpectedly re-run part of a phase the operator explicitly skipped.
 					completedModules = markModulesCompleted(completedModules, group)
 				}
-				if s.notifier != nil {
+				if s.notifier != nil && taskType != watchScanType {
 					for _, result := range results {
 						phaseStatus, reason := phaseOutcome(result.err, skipped, timedOut && result.err != nil, ctx.Err())
 						s.finishTaskPhase(taskID, result.module, phaseStatus, reason, result.duration)
@@ -2013,7 +2179,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		skipped, timedOut := finishPhase()
 		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
 		s.finishTaskPhase(taskID, module, phaseStatus, phaseReason, time.Since(phaseStartedAt))
-		if s.notifier != nil {
+		if s.notifier != nil && taskType != watchScanType {
 			s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, module, phaseStatus, time.Since(phaseStartedAt), s.terminalTaskPhaseCount(taskID), len(modules))
 		}
 		if timedOut {
@@ -2110,11 +2276,39 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if taskType == monitorWatchType && (finalStatus == "finished" || finalStatus == "cancelled") {
 		_, _ = s.db.Exec(`UPDATE targets SET monitor_last_run=CURRENT_TIMESTAMP WHERE id=?`, targetID)
 	}
+	// A watch round chains the next one: the terminal status decides WHEN the
+	// next round may start, whether the chain continues and how many failures in
+	// a row are tolerated. The timestamp is always written, even when the watch
+	// lane is saturated.
+	if taskType == watchScanType {
+		s.applyWatchTerminalRules(targetID, finalStatus)
+		switch finalStatus {
+		case "finished":
+			// The rotation advances on a finished round. The per-root failure
+			// counter resets with it.
+			s.resetWatchRootFailures(targetID)
+			s.advanceWatchRootIndex(ctx, targetID, effectiveScope)
+		case "failed":
+			// Poison-root escape (plan §3): two consecutive failures on the
+			// SAME root advance the rotation anyway, so one broken domain
+			// cannot block every healthy root until the chain stops.
+			// watch_fail_count keeps counting per project in
+			// applyWatchTerminalRules above.
+			if s.recordWatchRootFailure(targetID) {
+				s.advanceWatchRootIndex(context.Background(), targetID, effectiveScope)
+			}
+		default:
+			s.resetWatchRootFailures(targetID)
+		}
+	}
 	terminalTargetStatus := "idle"
 	if finalStatus == "failed" {
 		terminalTargetStatus = "failed"
 	}
-	s.refreshTargetScanStatus(targetID, terminalTargetStatus, finalStatus != InterruptedStatus)
+	// last_scan_at stays the last DEEP scan: a watch round must not make a
+	// breadth project look freshly scanned.
+	touchLastScan := finalStatus != InterruptedStatus && taskType != watchScanType
+	s.refreshTargetScanStatus(targetID, terminalTargetStatus, touchLastScan)
 
 	s.hub.Broadcast("task_finished", map[string]string{
 		"task_id":   taskID,
@@ -2128,7 +2322,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		// Persist the terminal alert before the task goroutine exits. Keeping this
 		// synchronous prevents shutdown from closing the database between task
 		// completion and outbox insertion.
-		s.notifyScanDone(taskID, targetID, target.Domain, finalStatus, startedAt)
+		s.notifyScanDone(taskID, targetID, target.Domain, taskType, finalStatus, startedAt)
 	}
 	if taskType == monitorWatchType && finalStatus == "failed" {
 		// Persist a durable warning, but let due scheduling retry after its short
@@ -2463,6 +2657,17 @@ func (s *Scheduler) notifyBountyScopeEvent(ctx context.Context, targetID, progra
 		}
 	}
 	if policy == "notify" {
+		return
+	}
+	// A breadth (watch-only) project never runs the favorite auto-scan: its
+	// watch round is the scan. The program scope change only brings the next
+	// watch round forward, so the new asset is picked up quickly.
+	var watchOnly int
+	_ = s.db.QueryRow(`SELECT COALESCE(watch_only,0) FROM targets WHERE id=?`, targetID).Scan(&watchOnly)
+	if watchOnly == 1 {
+		_, _ = s.db.Exec(`UPDATE targets SET watch_next_run=CURRENT_TIMESTAMP
+			WHERE id=? AND watch_only=1 AND COALESCE(watch_paused,0)=0`, targetID)
+		s.logger.Info("Bounty scope change brought the next watch round forward", "target", targetID, "asset", identifier)
 		return
 	}
 	if err := s.bountyCatalog.ResolveScopeEvent(ctx, targetID, eventID, "approve"); err != nil {
@@ -2967,7 +3172,12 @@ func (s *Scheduler) monitorMemory() {
 	}
 }
 
-func (s *Scheduler) notifyScanDone(taskID, targetID, domain, status string, startedAt time.Time) {
+// notifyScanDone closes a finished task. The deep tier and the watch tier get
+// different alerts: the deep tier keeps its long Telegram summary, the watch
+// tier gets a short one plus its own in-app bell row. Both write a `notifications`
+// row so the in-app bell can filter by tier (the table has no tier column, so
+// the API maps the stored types onto buckets).
+func (s *Scheduler) notifyScanDone(taskID, targetID, domain, taskType, status string, startedAt time.Time) {
 	duration := time.Since(startedAt)
 	var subdomains, alive, vulns, nuclei, backups, redirects, jsFindings int
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0", targetID).Scan(&subdomains)
@@ -2987,7 +3197,20 @@ func (s *Scheduler) notifyScanDone(taskID, targetID, domain, status string, star
 		"js":         jsFindings,
 		"verified":   vulns + nuclei + backups + redirects + jsFindings,
 	}
+	if taskType == watchScanType {
+		s.notifier.NotifyWatchScanFinished(taskID, targetID, domain, status, duration, stats, watchModulesSkippedSummary())
+		// One bell row per watch round. No `notification_created` broadcast: the
+		// bell already refreshes on `task_finished`, and the broadcast path would
+		// forward this row to the Telegram "Monitor change" template.
+		s.insertNotification(targetID, "scan_watch", "Watch round "+status,
+			fmt.Sprintf("%d host(s) known · %d alive · %s", subdomains, alive, shortWatchDuration(duration)),
+			"low")
+		return
+	}
 	s.notifier.NotifyScanFinished(taskID, targetID, domain, status, duration, stats)
+	s.insertNotification(targetID, "scan_deep", "Scan "+status,
+		fmt.Sprintf("%d host(s) known · %d alive · %d verified finding(s)", subdomains, alive, stats["verified"]),
+		"low")
 }
 
 func (s *Scheduler) monitoringScheduler() {
@@ -3028,6 +3251,7 @@ func (s *Scheduler) bountyCatalogScheduler() {
 		cancel()
 	}
 	syncCatalog("Initial")
+	s.sweepWatchScope()
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -3036,7 +3260,34 @@ func (s *Scheduler) bountyCatalogScheduler() {
 			return
 		case <-ticker.C:
 			syncCatalog("Scheduled")
+			s.sweepWatchScope()
 		}
+	}
+}
+
+// sweepWatchScope marks landed hosts that fell out of the eligible program
+// scope. It runs in the program reconciliation tick, NOT inside a watch round:
+// a round only ADDS hosts. A project that was flipped back to Deep still gets
+// its markers updated.
+func (s *Scheduler) sweepWatchScope() {
+	rows, err := s.db.Query(`SELECT id FROM targets WHERE watch_only = 1`)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		scanner.SweepWatchScopeOutOfScope(ctx, s.db, id, func(level, module, message string) {
+			s.logger.Info("Watch scope sweep", "target", id, "message", message)
+		})
+		cancel()
 	}
 }
 
@@ -3116,6 +3367,7 @@ func (s *Scheduler) runDueMonitors() {
 	rows, err := s.db.Query(`
 		SELECT id, domain FROM targets
 		WHERE monitor_enabled = 1
+		AND COALESCE(watch_only,0) = 0
 		AND (
 			monitor_last_run IS NULL
 			OR datetime(monitor_last_run, '+' || MAX(1,COALESCE(monitor_interval_hours,12)) || ' hours') <= datetime('now')

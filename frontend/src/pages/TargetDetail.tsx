@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi } from '../lib/api'
+import type { WatchScopeEvent } from '../lib/api'
 import { useUIStore } from '../store/ui'
-import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows } from '../components/ui'
+import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows, Modal } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { EvidenceViewer } from '../components/targets/EvidenceViewer'
 import { ChangeDiffViewer } from '../components/targets/ChangeDiffViewer'
@@ -559,6 +560,11 @@ export default function TargetDetail() {
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
   const [catchallSaving, setCatchallSaving] = useState(false)
+  // Coverage tier: deep (full pipeline) or breadth (chained watch rounds).
+  const [coverageDialogOpen, setCoverageDialogOpen] = useState(false)
+  const [coverageChoice, setCoverageChoice] = useState<'deep' | 'breadth'>('breadth')
+  const [coverageBusy, setCoverageBusy] = useState(false)
+  const [watchScopeEvents, setWatchScopeEvents] = useState<WatchScopeEvent[]>([])
   const [paths, setPaths] = useState<AttackPath[]>([])
   const [lastFailedTask, setLastFailedTask] = useState<Task | null>(null)
   const [resuming, setResuming] = useState(false)
@@ -577,6 +583,7 @@ export default function TargetDetail() {
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
+    loadWatchScope()
     bountyApi.events(id).then(e => setScopeEvents(e || [])).catch(() => {})
   }, [id])
 
@@ -898,6 +905,59 @@ export default function TargetDetail() {
     } catch { /* ignore */ } finally { setMonitorSaving(false) }
   }
 
+  // Flip the project between the deep pipeline and the breadth watch tier.
+  // The API is the enforcement point: a project with network assets is refused
+  // a breadth flip with a 400, so the error is surfaced verbatim.
+  const applyCoverage = async (toBreadth: boolean) => {
+    if (!id) return
+    setCoverageBusy(true)
+    try {
+      await targetsApi.update(id, { watch_only: toBreadth })
+      setTarget(prev => prev ? {
+        ...prev,
+        watch_only: toBreadth,
+        watch_paused: toBreadth ? false : prev.watch_paused,
+        monitor_enabled: toBreadth ? true : prev.monitor_enabled,
+      } : prev)
+      addToast('success', toBreadth ? 'Project switched to breadth watch' : 'Project switched to deep scan')
+      setCoverageDialogOpen(false)
+      if (toBreadth) loadWatchScope()
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not change coverage')
+    } finally { setCoverageBusy(false) }
+  }
+
+  const saveWatchPaused = async (paused: boolean) => {
+    if (!id) return
+    try {
+      await targetsApi.update(id, { watch_paused: paused })
+      setTarget(prev => prev ? { ...prev, watch_paused: paused } : prev)
+      addToast('success', paused ? 'Watching paused' : 'Watching resumed')
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not change the watch state')
+    }
+  }
+
+  // Function declaration (hoisted): the mount effect at :586 calls this, so it
+  // must exist even on the first render that early-returns at the loading guard.
+  // A const arrow here stays in TDZ on that render -> "Cannot access before
+  // initialization" -> blank page for every target.
+  function loadWatchScope() {
+    if (!id) return
+    targetsApi.watchScopeEvents(id).then(r => setWatchScopeEvents(r.events || [])).catch(() => {})
+  }
+
+  const promoteWatchHosts = async (values: string[]) => {
+    if (!id || values.length === 0) return
+    try {
+      const res = await targetsApi.promoteWatchScope(id, values)
+      addToast('success', `${res.promoted} host${res.promoted === 1 ? '' : 's'} promoted to deep seed`)
+      loadAssets()
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not promote hosts')
+    }
+  }
+
   const saveCatchall = async (value: 'inherit' | 'on' | 'off') => {
     if (!id) return
     setCatchallSaving(true)
@@ -971,7 +1031,7 @@ export default function TargetDetail() {
             { label: 'Subdomains', value: target.subdomain_count },
             { label: 'Alive surface', value: target.alive_host_count, color: 'text-severity-low' },
             { label: 'Verified findings', value: target.finding_count, color: target.finding_count > 0 ? 'text-severity-high' : undefined },
-            { label: 'Automation', value: target.monitor_enabled ? `Every ${target.monitor_interval_hours || 12}h` : 'Manual' },
+            { label: 'Automation', value: target.watch_only ? 'Watch rounds' : target.monitor_enabled ? `Every ${target.monitor_interval_hours || 12}h` : 'Manual' },
             { label: 'Last scan', value: target.last_scan_at ? timeAgo(target.last_scan_at) : 'Never' },
             { label: 'Asset type', value: target.kind || 'web' },
           ].map(metric => (
@@ -1059,14 +1119,64 @@ export default function TargetDetail() {
       </div>
 
       <div className={cn('space-y-5', isNetwork && 'order-2')}>
+      {/* Scan coverage: deep pipeline or breadth watch rounds */}
+      <div className="card p-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-sm font-medium">Scan coverage</span>
+          <span className={cn(
+            'rounded px-2 py-0.5 text-xs font-medium',
+            target.watch_only ? 'bg-accent/15 text-accent' : 'bg-surface-alt text-text-secondary',
+          )}>
+            {target.watch_only ? 'Breadth watch' : 'Deep scan'}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => { setCoverageChoice(target.watch_only ? 'deep' : 'breadth'); setCoverageDialogOpen(true) }}
+          >
+            Change
+          </Button>
+        </div>
+        <div className="text-xs text-text-muted">
+          <span>
+            Deep: {target.last_scan_at ? timeAgo(target.last_scan_at) : 'never'}
+          </span>
+          <span className="mx-2">·</span>
+          <span>
+            Watch: {target.watch_last_run ? timeAgo(target.watch_last_run) : 'never'}
+          </span>
+          <span className="mx-2">·</span>
+          <span>
+            Next watch: {target.watch_paused ? 'paused' : target.watch_next_run ? timeAgo(target.watch_next_run) : 'not scheduled'}
+          </span>
+        </div>
+        {target.watch_only && (
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={!!target.watch_paused}
+              onChange={e => saveWatchPaused(e.target.checked)}
+              className="accent-accent w-3.5 h-3.5"
+            />
+            <span className="text-sm">Pause watching</span>
+          </label>
+        )}
+        <p className="w-full text-[11px] text-text-muted mt-1">
+          {target.watch_only
+            ? 'Breadth watch runs passive discovery plus one HTTP probe per host, in chained rounds. No brute force, no crawling, no active checks. New bounty-eligible hosts land as scope automatically.'
+            : 'Deep scan runs the full pipeline: discovery, HTTP probing, JavaScript analysis, crawling, active checks and verification.'}
+        </p>
+      </div>
+
       {/* Monitoring settings */}
       <div className="card p-4 flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
+          <label className={cn('flex items-center gap-2 select-none', target.watch_only ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer')}>
             <div
-              onClick={() => saveMonitor(!target.monitor_enabled, target.monitor_interval_hours || 12)}
+              onClick={() => { if (target.watch_only) return; saveMonitor(!target.monitor_enabled, target.monitor_interval_hours || 12) }}
               className={cn(
-                'w-10 h-5 rounded-full transition-colors relative cursor-pointer',
+                'w-10 h-5 rounded-full transition-colors relative',
+                target.watch_only ? 'cursor-not-allowed' : 'cursor-pointer',
                 target.monitor_enabled ? 'bg-accent' : 'bg-surface-alt'
               )}
             >
@@ -1076,12 +1186,16 @@ export default function TargetDetail() {
               )} />
             </div>
             <span className="text-sm font-medium">
-              {target.monitor_enabled ? 'Monitoring On' : 'Monitoring Off'}
+              {target.watch_only
+                ? 'Monitored by watch rounds'
+                : target.monitor_enabled
+                  ? 'Monitoring On'
+                  : 'Monitoring Off'}
             </span>
           </label>
           {monitorSaving && <span className="text-xs text-text-muted">Saving…</span>}
         </div>
-        {target.monitor_enabled && (
+        {target.monitor_enabled && !target.watch_only && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-text-muted">Every</span>
             <select
@@ -1098,13 +1212,46 @@ export default function TargetDetail() {
             </span>
           </div>
         )}
-        {target.monitor_enabled && (
+        {target.watch_only && (
+          <p className="w-full text-[11px] text-text-muted mt-1">
+            Breadth watch rounds monitor this project. Each round re-enumerates one asset root and lands new bounty-eligible hosts into scope. No deep monitor task runs for breadth projects.
+          </p>
+        )}
+        {target.monitor_enabled && !target.watch_only && (
           <p className="w-full text-[11px] text-text-muted mt-1">
             Each cycle re-enumerates subdomains, re-probes hosts, and runs takeover + backup/config-file discovery.
             If a new subdomain/asset or change is found, you're notified and <b>nuclei + backup discovery</b> auto-run over the new surface.
           </p>
         )}
       </div>
+
+      {/* Watch scope: hosts landed by breadth rounds from bounty-eligible scope */}
+      {target.watch_only && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Watch scope</p>
+              <p className="mt-0.5 text-[10px] text-text-muted">Bounty-eligible hosts landed automatically by breadth watch rounds.</p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={loadWatchScope}>Refresh</Button>
+          </div>
+          {watchScopeEvents.length === 0 ? (
+            <p className="text-xs text-text-muted py-2">No hosts landed yet. Eligible hosts appear after a watch round finds them alive.</p>
+          ) : (
+            <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+              {watchScopeEvents.map(ev => (
+                <div key={ev.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05] flex-wrap">
+                  <code className="text-[11px] font-mono text-text-primary min-w-0 flex-1 break-all">{ev.identifier}</code>
+                  <span className="text-[10px] text-text-muted">{timeAgo(ev.detected_at)}</span>
+                  <Button size="sm" variant="ghost" onClick={() => promoteWatchHosts([ev.identifier].map(v => v.toLowerCase()))}>
+                    Promote to Deep seed
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* HTTP catch-all detection override */}
       <div className="card p-4 flex flex-wrap items-center gap-4">
@@ -1851,6 +1998,37 @@ export default function TargetDetail() {
       {diffView && (
         <ChangeDiffViewer targetId={id!} url={diffView.url} kind={diffView.kind} onClose={() => setDiffView(null)} />
       )}
+
+      {/* Coverage change confirmation */}
+      <Modal open={coverageDialogOpen} onClose={() => !coverageBusy && setCoverageDialogOpen(false)} title="Change scan coverage" width="sm">
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="detail-coverage" checked={coverageChoice === 'breadth'} onChange={() => setCoverageChoice('breadth')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Breadth watch</span>
+                <span className="block text-xs text-text-muted">Passive discovery + HTTP probe only, chained rounds, no brute force. New bounty-eligible hosts land as scope. Monitoring is turned off; network assets are ignored and the flip is refused if any are present.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="detail-coverage" checked={coverageChoice === 'deep'} onChange={() => setCoverageChoice('deep')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Deep scan</span>
+                <span className="block text-xs text-text-muted">The full pipeline runs on the next scan. Auto-landed hosts remain as scope. Monitoring stays off until you turn it back on.</span>
+              </span>
+            </label>
+          </div>
+          {coverageChoice === 'breadth' && !assets.some(a => (a.source || '').startsWith('bounty:')) && (
+            <div className="rounded-lg border border-severity-medium/30 bg-severity-medium/5 p-3 text-[11px] text-text-secondary">
+              This project has no linked bounty program. Watch rounds will discover hosts, but no scope can land and nothing will be notified. Link a program first for automatic landing.
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2 border-t border-border">
+            <Button variant="ghost" disabled={coverageBusy} onClick={() => setCoverageDialogOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={coverageBusy} onClick={() => applyCoverage(coverageChoice === 'breadth')}>Apply</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
     </ErrorBoundary>
   )

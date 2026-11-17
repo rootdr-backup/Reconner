@@ -53,9 +53,11 @@ export default function BountyPrograms() {
   const [paidOnly, setPaidOnly] = useState(false)
   const [assetLimit, setAssetLimit] = useState(100)
   const [projectName, setProjectName] = useState('')
+  const [coverage, setCoverage] = useState<'deep' | 'breadth'>('deep')
   const [monitor, setMonitor] = useState(true)
   const [monitorHours, setMonitorHours] = useState(12)
   const [creating, setCreating] = useState(false)
+  const [importResult, setImportResult] = useState<{ name: string; assets: number; skipped: number } | null>(null)
 
   const query = useMemo(() => {
     const q: Record<string, string> = { page: String(page), limit: '30', sort: filters.sort }
@@ -154,15 +156,28 @@ export default function BountyPrograms() {
     const n = new Set(prev); if (visibleSelected) visibleAssets.forEach(a => n.delete(a.id)); else visibleAssets.forEach(a => n.add(a.id)); return n
   })
 
+  const networkAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other'])
+  const chosenAssets = (detail?.assets || []).filter(a => selected.has(a.id))
+  const skippedNetwork = coverage === 'breadth'
+    ? chosenAssets.filter(a => networkAssetTypes.has((a.asset_type || '').toLowerCase())).length
+    : 0
+  const webAssetCount = chosenAssets.length - skippedNetwork
+
   const createProject = async () => {
     if (!detail || selected.size === 0) return
     setCreating(true)
+    setImportResult(null)
     try {
       const created = await bountyApi.createProject(detail.id, {
         name: projectName.trim() || detail.name, description: `Imported from ${providerLabel(detail.provider)} public program`,
-        priority: 'medium', notes: `Program: ${detail.url}`, asset_ids: [...selected], monitor_enabled: monitor, monitor_interval_hours: monitorHours,
+        priority: 'medium', notes: `Program: ${detail.url}`, asset_ids: [...selected],
+        monitor_enabled: coverage === 'breadth' ? false : monitor,
+        monitor_interval_hours: monitorHours,
+        watch_only: coverage === 'breadth',
       })
-      addToast('success', `Project created with ${selected.size} approved assets`); navigate(created.url)
+      setImportResult({ name: projectName.trim() || detail.name, assets: webAssetCount, skipped: skippedNetwork })
+      addToast('success', `Project created with ${webAssetCount} web asset${webAssetCount === 1 ? '' : 's'}${skippedNetwork ? ` · ${skippedNetwork} network asset(s) dropped` : ''}`)
+      navigate(created.url)
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not create project') }
     finally { setCreating(false) }
   }
@@ -279,10 +294,37 @@ export default function BountyPrograms() {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="space-y-1"><span className="text-[11px] text-text-muted">Project name</span><Input value={projectName} onChange={e=>setProjectName(e.target.value)} /></label>
-              <div className="space-y-1"><span className="text-[11px] text-text-muted">Scope monitoring</span><div className="h-9 flex items-center gap-3 rounded-lg border border-border bg-surface-alt px-3"><label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={monitor} onChange={e=>setMonitor(e.target.checked)} className="accent-accent"/>Enabled</label>{monitor && <select value={monitorHours} onChange={e=>setMonitorHours(Number(e.target.value))} className="ml-auto bg-transparent text-xs text-text-primary">{[3,6,12,24,48,168].map(h=><option key={h} value={h} className="bg-surface-3">every {h<24?`${h}h`:`${h/24}d`}</option>)}</select>}</div></div>
+              <div className="space-y-1">
+                <span className="text-[11px] text-text-muted">Scan coverage</span>
+                <div className="flex gap-1.5">
+                  {(['deep','breadth'] as const).map(c => (
+                    <button key={c} onClick={()=>setCoverage(c)}
+                      className={cn('flex-1 text-xs px-2 py-2 rounded-lg border transition-colors', coverage === c
+                        ? 'border-accent/50 bg-accent/10 text-accent'
+                        : 'border-border text-text-muted hover:border-border-strong')}>
+                      {c === 'deep' ? 'Deep scan' : 'Breadth watch'}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
+            {coverage === 'breadth' ? (
+              <div className="rounded-lg border border-accent/20 bg-accent/[.06] p-3 text-[11px] text-text-secondary">
+                <p className="font-medium text-accent">Passive discovery + HTTP probe, no brute force.</p>
+                <p className="mt-1">Watch rounds start now and repeat automatically. Network/IP assets are dropped; monitoring is off because the watch round is the monitoring.</p>
+                {skippedNetwork > 0 && <p className="mt-1 text-severity-medium">{skippedNetwork} selected network/IP asset(s) will be dropped.</p>}
+              </div>
+            ) : (
+              <div className="space-y-1"><span className="text-[11px] text-text-muted">Scope monitoring</span><div className="h-9 flex items-center gap-3 rounded-lg border border-border bg-surface-alt px-3"><label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={monitor} onChange={e=>setMonitor(e.target.checked)} className="accent-accent"/>Enabled</label>{monitor && <select value={monitorHours} onChange={e=>setMonitorHours(Number(e.target.value))} className="ml-auto bg-transparent text-xs text-text-primary">{[3,6,12,24,48,168].map(h=><option key={h} value={h} className="bg-surface-3">every {h<24?`${h}h`:`${h/24}d`}</option>)}</select>}</div></div>
+            )}
+            {importResult && (
+              <div className="rounded-lg border border-severity-low/30 bg-severity-low/[.07] p-3 text-[11px] text-severity-low">
+                Imported <span className="font-semibold">{importResult.name}</span> · {importResult.assets} web asset{importResult.assets === 1 ? '' : 's'}
+                {importResult.skipped > 0 ? ` · ${importResult.skipped} network asset(s) skipped` : ''}
+              </div>
+            )}
             <div className="rounded-lg border border-accent/20 bg-accent/[.06] p-3 text-[11px] text-text-secondary">Upstream additions are never scanned automatically. Reconner creates a pending scope event for approval. Assets removed or made ineligible are suspended immediately and remain in history.</div>
-            <div className="flex justify-end gap-2"><Button variant="secondary" onClick={()=>setDetail(null)}>Cancel</Button><Button loading={creating} disabled={selected.size===0} onClick={createProject}>Create monitored project</Button></div>
+            <div className="flex justify-end gap-2"><Button variant="secondary" onClick={()=>setDetail(null)}>Cancel</Button><Button loading={creating} disabled={selected.size===0 || webAssetCount===0} onClick={createProject}>Create project</Button></div>
           </div>
         )}
       </Modal>

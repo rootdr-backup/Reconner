@@ -37,6 +37,12 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
   const [selectMode, setSelectMode] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  // Coverage axis: 'all' | 'deep' | 'breadth'. Breadth projects run chained
+  // watch rounds (passive discovery + HTTP probe) instead of the deep pipeline.
+  const [coverageFilter, setCoverageFilter] = useState<'all' | 'deep' | 'breadth'>('all')
+  const [coverageOpen, setCoverageOpen] = useState(false)
+  const [coverageChoice, setCoverageChoice] = useState<'deep' | 'breadth'>('breadth')
+  const [coverageBusy, setCoverageBusy] = useState(false)
 
   const load = async (q = search, background = false) => {
     const seq = ++loadSeq.current
@@ -74,14 +80,25 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     return filterKind === 'web' ? (k === 'web' || k === 'mixed') : (k === 'network' || k === 'mixed')
   }
   const kindTargets = targets.filter(matchesKind)
+  // Coverage is the second filter axis. 'breadth' = watch_only projects.
+  const coverageTargets = kindTargets.filter(t =>
+    coverageFilter === 'all' ? true : coverageFilter === 'breadth' ? !!t.watch_only : !t.watch_only)
+  const breadthCount = kindTargets.filter(t => t.watch_only).length
+  const deepCount = kindTargets.length - breadthCount
+  // A selected project can be refused a breadth flip when it carries network assets.
+  const networkKindTargets = coverageTargets.filter(t => {
+    if (!selected.has(t.id)) return false
+    const k = t.kind || 'web'
+    return k === 'network' || k === 'mixed'
+  })
 
   const toggleSelect = (id: string) => setSelected(prev => {
     const next = new Set(prev)
     if (next.has(id)) next.delete(id); else next.add(id)
     return next
   })
-  const allSelected = kindTargets.length > 0 && kindTargets.every(t => selected.has(t.id))
-  const toggleSelectAll = () => setSelected(allSelected ? new Set() : new Set(kindTargets.map(t => t.id)))
+  const allSelected = coverageTargets.length > 0 && coverageTargets.every(t => selected.has(t.id))
+  const toggleSelectAll = () => setSelected(allSelected ? new Set() : new Set(coverageTargets.map(t => t.id)))
 
   const handleBulkDelete = async () => {
     if (selected.size === 0) return
@@ -96,6 +113,32 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     } catch {
       addToast('error', 'Bulk delete failed')
     } finally { setBulkDeleting(false) }
+  }
+
+  // Set the coverage tier for every selected project. The API is the
+  // enforcement point: a project with network assets is refused a breadth
+  // flip, and the response reports the refusal per project.
+  const applyBulkCoverage = async (toBreadth: boolean) => {
+    if (selected.size === 0) return
+    setCoverageBusy(true)
+    try {
+      const res = await targetsApi.bulkCoverage([...selected], toBreadth)
+      const applied = (res.results || []).filter(r => r.ok)
+      const refused = (res.results || []).filter(r => !r.ok)
+      if (applied.length > 0) {
+        addToast('success', `${applied.length} project${applied.length === 1 ? '' : 's'} set to ${toBreadth ? 'breadth watch' : 'deep scan'}`)
+      }
+      if (refused.length > 0) {
+        const first = refused[0]
+        addToast('info', `${refused.length} refused: ${first.reason || 'not eligible'}${refused.length > 1 ? ` (+${refused.length - 1} more)` : ''}`)
+      }
+      setCoverageOpen(false)
+      setSelected(new Set())
+      setSelectMode(false)
+      load(search)
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not change coverage')
+    } finally { setCoverageBusy(false) }
   }
 
   useEffect(() => {
@@ -237,7 +280,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
   }
 
   const prioRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 }
-  const sortedTargets = [...kindTargets].sort((a, b) => {
+  const sortedTargets = [...coverageTargets].sort((a, b) => {
     const byName = () => (a.name || a.domain).localeCompare(b.name || b.domain) || a.id.localeCompare(b.id)
     let result = 0
     switch (sortBy) {
@@ -263,7 +306,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             {filterKind === 'web' ? 'Web Projects' : filterKind === 'network' ? 'Network Projects' : 'Projects'}
           </h1>
           <p className="page-lede mt-1">
-            {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · group domains, URLs, JavaScript files, IP-hosted web URLs, or a public bounty program
+            {kindTargets.length} project{kindTargets.length === 1 ? '' : 's'} · {deepCount} deep scan{deepCount === 1 ? '' : 's'} · {breadthCount} breadth watch{breadthCount === 1 ? '' : 'es'} · group domains, URLs, JavaScript files, IP-hosted web URLs, or a public bounty program
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -291,7 +334,22 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
           <option value="" className="bg-surface-3">All statuses</option>
           {['running', 'pending', 'paused', 'failed', 'idle'].map(s => <option key={s} value={s} className="bg-surface-3 capitalize">{s}</option>)}
         </select>
-        {(search || priorityFilter || statusFilter) && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={() => { setSearch(''); setPriorityFilter(''); setStatusFilter('') }}>Clear filters</button>}
+        {/* Coverage axis: deep scans vs breadth watch rounds. */}
+        <div className="flex items-center gap-1 rounded border border-border bg-surface-alt p-0.5" role="group" aria-label="Filter by coverage">
+          {([['all', 'All'], ['deep', 'Deep scans'], ['breadth', 'Breadth watches']] as const).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setCoverageFilter(value)}
+              className={cn(
+                'rounded px-2 py-1 text-xs transition-colors',
+                coverageFilter === value ? 'bg-accent text-white' : 'text-text-muted hover:text-text-primary',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {(search || priorityFilter || statusFilter || coverageFilter !== 'all') && <button className="text-[11px] text-accent hover:text-accent-hover" onClick={() => { setSearch(''); setPriorityFilter(''); setStatusFilter(''); setCoverageFilter('all') }}>Clear filters</button>}
         <label className="flex items-center gap-1.5 text-xs text-text-muted">
           Sort
           <select value={sortBy} onChange={e => setSortBy(e.target.value)}
@@ -313,6 +371,13 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
               Select all
             </label>
             <span className="text-text-muted">{selected.size} selected</span>
+            {/* The coverage action is pointless in the Network view: a network
+                project can never run watch rounds. */}
+            {filterKind !== 'network' && (
+              <Button size="sm" variant="ghost" disabled={selected.size === 0} onClick={() => setCoverageOpen(true)}>
+                Set coverage
+              </Button>
+            )}
             <Button size="sm" variant="danger" disabled={selected.size === 0} onClick={() => setBulkOpen(true)}>
               Delete selected
             </Button>
@@ -329,6 +394,13 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
               description={filterKind === 'web' ? 'Add a domain to start discovery, crawling, JavaScript analysis and verification.' : 'Create a project from a domain, URL, JavaScript file, or a public bounty program.'}
               action={<Button variant="primary" onClick={() => setCreateOpen(true)}>+ Create first project</Button>}
             /></div>
+          : coverageTargets.length === 0
+            ? <div className="card mt-2 min-h-[200px] grid place-items-center"><EmptyState
+                icon={<svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="8"/><path d="M12 8v4M12 16h.01"/></svg>}
+                title="No projects in this view"
+                description={`All ${kindTargets.length} project${kindTargets.length === 1 ? '' : 's'} are in the other coverage group. Switch the coverage filter to see them.`}
+                action={<Button variant="ghost" onClick={() => setCoverageFilter('all')}>Show all</Button>}
+              /></div>
           : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {sortedTargets.map(t => (
@@ -350,6 +422,21 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
                       )}
                       <span className={cn('w-2 h-2 rounded-full shrink-0', dot[t.scan_status] || 'bg-text-muted')} />
                       <span className="text-sm font-semibold truncate" title={t.domain}>{t.name || t.domain}</span>
+                      {/* Coverage badge: the tier the project runs. */}
+                      <span
+                        className={cn(
+                          'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                          t.watch_only ? 'bg-accent/15 text-accent' : 'bg-surface-alt text-text-muted',
+                        )}
+                        title={t.watch_only ? 'Breadth watch: passive discovery + HTTP probe, chained rounds' : 'Deep scan: the full pipeline'}
+                      >
+                        {t.watch_only ? 'Breadth' : 'Deep'}
+                      </span>
+                      {t.watch_only && t.watch_paused && (
+                        <span className="shrink-0 rounded bg-severity-medium/15 px-1.5 py-0.5 text-[10px] font-medium text-severity-medium" title="Watching is paused">
+                          Paused
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       <Button
@@ -503,6 +590,53 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
           <div className="flex justify-end gap-2 pt-2 border-t border-border">
             <Button variant="ghost" onClick={() => setDeleteTarget(null)}>Cancel</Button>
             <Button variant="danger" loading={deleting} onClick={handleDelete}>Delete</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Set Coverage Modal (bulk) */}
+      <Modal open={coverageOpen} onClose={() => !coverageBusy && setCoverageOpen(false)} title="Set coverage" width="sm">
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            Apply the scan tier to <span className="font-semibold text-text-primary">{selected.size}</span> selected
+            project{selected.size === 1 ? '' : 's'}.
+          </p>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="coverage" checked={coverageChoice === 'breadth'} onChange={() => setCoverageChoice('breadth')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Breadth watch</span>
+                <span className="block text-xs text-text-muted">Passive discovery + HTTP probe only, chained rounds, no brute force. New eligible scope lands automatically.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="coverage" checked={coverageChoice === 'deep'} onChange={() => setCoverageChoice('deep')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Deep scan</span>
+                <span className="block text-xs text-text-muted">The full pipeline on the next scan. Landed hosts stay as scope.</span>
+              </span>
+            </label>
+          </div>
+          {coverageChoice === 'breadth' && networkKindTargets.length > 0 && (
+            <div className="rounded-lg border border-severity-medium/30 bg-severity-medium/5 p-3 text-[11px] text-text-secondary">
+              <p className="font-semibold text-severity-medium">
+                {networkKindTargets.length} of these project{networkKindTargets.length === 1 ? '' : 's'} carry network assets and cannot run watch rounds
+              </p>
+              <ul className="mt-1 space-y-0.5">
+                {networkKindTargets.map(t => (
+                  <li key={t.id} className="truncate">
+                    {t.name || t.domain} <span className="text-text-muted">({t.kind})</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-text-muted">They are skipped. Drop their network assets first if you want breadth coverage.</p>
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2 border-t border-border">
+            <Button variant="ghost" disabled={coverageBusy} onClick={() => setCoverageOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={coverageBusy} onClick={() => applyBulkCoverage(coverageChoice === 'breadth')}>
+              Apply to {selected.size}
+            </Button>
           </div>
         </div>
       </Modal>

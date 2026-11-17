@@ -141,6 +141,15 @@ export const targets = {
     req<{ deleted: number; failed: number; requested: number }>('/targets/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   updateMonitor: (id: string, enabled: boolean, hours: number) =>
     req<void>(`/targets/${id}/monitor`, { method: 'PATCH', body: JSON.stringify({ monitor_enabled: enabled, monitor_interval_hours: hours }) }),
+  // Coverage: switch a project between the deep pipeline and the breadth
+  // (watch round) tier. The server refuses a mixed/network project.
+  bulkCoverage: (ids: string[], watchOnly: boolean) =>
+    req<{ results: { id: string; ok: boolean; reason?: string; assets?: string[] }[] }>(
+      '/targets/bulk/coverage', { method: 'POST', body: JSON.stringify({ ids, watch_only: watchOnly }) }),
+  watchScopeEvents: (id: string) =>
+    req<{ events: WatchScopeEvent[] }>(`/targets/${id}/watch-scope-events`),
+  promoteWatchScope: (id: string, values: string[]) =>
+    req<{ promoted: number }>(`/targets/${id}/watch-scope/promote`, { method: 'POST', body: JSON.stringify({ values }) }),
   setAuth: (id: string, headers: Record<string,string>) =>
     req<void>(`/targets/${id}/auth`, { method: 'PATCH', body: JSON.stringify({ auth_headers: headers }) }),
   graph: (id: string) => req<{ attack_paths: AttackPath[]; nodes: unknown[]; edges: unknown[] }>(`/targets/${id}/graph`),
@@ -263,7 +272,7 @@ export const bounty = {
   get: (id: string) => req<BountyProgram>(`/bounty/programs/${id}`),
   status: () => req<BountySyncState[]>('/bounty/status'),
   sync: () => req<{ status: string }>('/bounty/sync', { method: 'POST' }),
-  createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number }) =>
+  createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number; watch_only?: boolean }) =>
     req<{ id: string; url: string }>(`/bounty/programs/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
   events: (targetId: string) => req<BountyScopeEvent[]>(`/targets/${targetId}/bounty-events`),
   resolveEvent: (targetId: string, eventId: string, decision: 'approve' | 'reject') =>
@@ -364,13 +373,42 @@ export interface ScanConfig {
   monitor_modules: string[]
   default_dns_resolvers: string[]
   default_nuclei_repos: string[]
+  // Breadth tier (watch rounds).
+  max_concurrent_scans: number
+  max_concurrent_deep_scans: number
+  max_concurrent_watch_scans: number
+  watch_http_threads: number
+  watch_http_rate_limit: number
+  watch_rounds_min_gap: number
+  watch_source_timeout_minutes: number
+  watch_enumeration_sources: string[]
+  watch_rows_retention_days: number
+  watch_scope_events_retention_days: number
+  watch_notify_host_cap: number
+  watch_fail_limit: number
+  watch_module_set: string[]
+}
+
+/** One landing event of the breadth tier (the audit trail). */
+export interface WatchScopeEvent {
+  id: string
+  target_id: string
+  program_id: string
+  identifier: string
+  event_type: string
+  asset_id: string
+  detected_at: string
+  announced: number
+  metadata?: string
 }
 
 export type TelegramRole = 'viewer' | 'operator' | 'admin'
 export interface TelegramChat {
   id: string; chat_id: string; label: string; role: TelegramRole; enabled: boolean
   notify_scan_started: boolean; notify_phase_finished: boolean; notify_scan_finished: boolean
-  notify_findings: boolean; notify_monitoring: boolean; created_at: string; updated_at: string
+  notify_findings: boolean; notify_monitoring: boolean
+  notify_watch_scan_started: boolean; notify_watch_scan_finished: boolean; notify_scope_landed: boolean
+  created_at: string; updated_at: string
 }
 export interface TelegramState {
   configured: boolean; enabled: boolean; masked_token: string; bot_username: string
@@ -468,7 +506,12 @@ export interface Notification {
 }
 
 export const notifications = {
-  list: () => req<{ notifications: Notification[]; unread: number }>('/notifications'),
+  // type: 'all' | 'deep' | 'watch' | 'findings' — the bucket maps to a list of
+  // stored notification types server-side.
+  list: (type?: string) => {
+    const q = type ? '?type=' + encodeURIComponent(type) : ''
+    return req<{ notifications: Notification[]; unread: number }>(`/notifications${q}`)
+  },
   markRead: (ids?: string[]) =>
     req<{ message: string }>('/notifications/read', { method: 'POST', body: JSON.stringify({ ids: ids || [] }) }),
 }

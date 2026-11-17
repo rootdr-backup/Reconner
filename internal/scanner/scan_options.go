@@ -150,6 +150,69 @@ func netCredAuthorizedFromContext(ctx context.Context) bool {
 	return false
 }
 
+// ── Watch (breadth) tier ─────────────────────────────────────────────────────
+//
+// A watch round is the cheap tier: passive discovery plus one HTTP probe pass.
+// It never brute-forces, never recurses, never sweeps ASN space and never
+// probes virtual hosts. The scheduler sets the watch flag for tasks of type
+// "watch_scan"; everything below is fail-closed, so a scan without the flag
+// keeps the historical deep behaviour.
+
+type watchModeKey string
+
+const ctxWatchMode watchModeKey = "watch_mode"
+
+// WithWatchMode marks THIS scan as a breadth/watch round. The watch tier runs
+// the enabled discovery sources in parallel, forces the expensive phases off
+// (brute, permutations, recursion, ASN, vhost probing) and probes HTTP only on
+// the root path.
+func WithWatchMode(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxWatchMode, enabled)
+}
+
+// watchModeEnabled reports whether this is a watch round. Unset means a normal
+// (deep) scan, so old callers keep their behaviour.
+func watchModeEnabled(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxWatchMode).(bool); ok {
+		return v
+	}
+	return false
+}
+
+type watchSourcesKey string
+
+const ctxWatchSources watchSourcesKey = "watch_sources"
+
+// WithWatchSources sets the discovery sources a watch round may use. The ids
+// are the ones in the config (WatchEnumerationSources): crtsh, certspotter,
+// hackertarget, rapiddns, otx, anubis, urlscan, subfinder, assetfinder, chaos,
+// findomain. The scheduler reads them from the config and puts them here.
+func WithWatchSources(ctx context.Context, sources []string) context.Context {
+	set := map[string]bool{}
+	for _, src := range sources {
+		src = strings.ToLower(strings.TrimSpace(src))
+		if src != "" {
+			set[src] = true
+		}
+	}
+	return context.WithValue(ctx, ctxWatchSources, set)
+}
+
+// watchSourceEnabled reports whether a discovery source may run in this round.
+// Outside watch mode every source is allowed, so the deep tier is untouched.
+func watchSourceEnabled(ctx context.Context, id string) bool {
+	if !watchModeEnabled(ctx) {
+		return true
+	}
+	set, ok := ctx.Value(ctxWatchSources).(map[string]bool)
+	if !ok || len(set) == 0 {
+		// No list means no restriction: the scheduler always sets one, but a
+		// missing list must not silently disable every source.
+		return true
+	}
+	return set[strings.ToLower(strings.TrimSpace(id))]
+}
+
 // ── Single-endpoint scan mode ────────────────────────────────────────────────
 //
 // When the operator scans a single URL and ticks "single endpoint", the whole

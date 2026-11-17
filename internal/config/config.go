@@ -35,6 +35,27 @@ type ResourceLimits struct {
 	// HTTPRateLimit caps requests/sec for httpx & nuclei to avoid WAF bans
 	// (0 = tool default).
 	HTTPRateLimit int `json:"http_rate_limit"`
+	// ── Two-tier (deep + breadth/watch) limits ───────────────────────────────
+	// MaxConcurrentScans is the GLOBAL ceiling: how many scans (deep AND watch)
+	// may run at the same time. The effective ceiling is
+	// min(this, NumCPU, effectiveMaxConcurrent()+1) — the +1 leaves room for
+	// one cheap watch round next to one heavy deep scan on a small box.
+	// Default 2. Set via System → Scanning.
+	MaxConcurrentScans int `json:"max_concurrent_scans"`
+	// MaxConcurrentDeepScans caps the DEEP lane (the expensive full pipeline).
+	// Also bounded by effectiveMaxConcurrent(), which is memory/CPU aware.
+	// Default 1.
+	MaxConcurrentDeepScans int `json:"max_concurrent_deep_scans"`
+	// MaxConcurrentWatchScans caps the BREADTH lane (the cheap watch rounds).
+	// It never eats the deep lane's reserved slots: the effective watch cap is
+	// min(this, max(0, globalCeiling - deepLaneCap)). Default 1.
+	MaxConcurrentWatchScans int `json:"max_concurrent_watch_scans"`
+	// WatchHTTPThreads is the httpx thread count for ONE watch round. The deep
+	// tier keeps Workers.HTTPProbing. Default 10.
+	WatchHTTPThreads int `json:"watch_http_threads"`
+	// WatchHTTPRateLimit is the httpx -rate-limit for ONE watch round, in
+	// requests/sec. The deep tier keeps HTTPRateLimit. Default 25.
+	WatchHTTPRateLimit int `json:"watch_http_rate_limit"`
 }
 
 type Config struct {
@@ -259,6 +280,52 @@ type Config struct {
 	// that point in the current run — this field is the FLOOR, not a hard ceiling
 	// that ignores target size.
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
+	// ── Breadth ("watch") tier ──────────────────────────────────────────────
+	// The watch tier is the cheap tier: a breadth project runs passive
+	// discovery plus one HTTP probe every WatchRoundsMinGap minutes, and lands
+	// newly eligible hosts into the project's scope automatically.
+	//
+	// WatchRoundsMinGap is the minimum wait between two chained rounds of the
+	// SAME project. It is the only rate control for watch traffic and the time
+	// scope changes need to accumulate before one grouped alert fires.
+	// Default 30 minutes. Set via System → Scanning.
+	WatchRoundsMinGap int `json:"watch_rounds_min_gap"`
+	// WatchSourceTimeoutMinutes bounds ONE discovery source (subfinder,
+	// assetfinder, chaos, findomain) inside a watch round. There is NO shared
+	// round budget: the DNS admission and the HTTP probe run on the parent
+	// context and always finish. Default 5 minutes.
+	WatchSourceTimeoutMinutes int `json:"watch_source_timeout_minutes"`
+	// WatchEnumerationSources lists the discovery sources a watch round may
+	// use. Valid ids: crtsh, certspotter, hackertarget, rapiddns, otx, anubis,
+	// urlscan, subfinder, assetfinder, chaos, findomain. The list applies to
+	// the WATCH tier only — deep scans keep every source. Default:
+	// subfinder, assetfinder, chaos, findomain. A source that is not on the
+	// list is skipped with one log line (reason: disabled by the operator,
+	// tool not installed, or API key missing).
+	//
+	// The loader keeps a MISSING key at the default list and an explicitly
+	// empty list empty (the operator turned every source off on purpose):
+	// encoding/json leaves the field untouched when the key is absent and
+	// replaces it with an empty slice when the saved JSON says [].
+	WatchEnumerationSources []string `json:"watch_enumeration_sources"`
+	// WatchRowsRetentionDays is how long raw rows produced by a watch round are
+	// kept. Landed scope, notifications, deep-scan rows and task rows survive.
+	// Default 30 days. Set via System → Scanning.
+	WatchRowsRetentionDays int `json:"watch_rows_retention_days"`
+	// WatchScopeEventsRetentionDays is how long the watch_scope_events audit
+	// trail (one row per landed host) is kept. Default 180 days.
+	WatchScopeEventsRetentionDays int `json:"watch_scope_events_retention_days"`
+	// WatchNotifyHostCap caps how many host names ONE grouped scope-landed
+	// message lists. The total count is always shown. Default 20.
+	WatchNotifyHostCap int `json:"watch_notify_host_cap"`
+	// WatchFailLimit is how many CONSECUTIVE failed watch rounds stop the
+	// chain for a project (it then waits for the operator). Default 3.
+	WatchFailLimit int `json:"watch_fail_limit"`
+	// ChaosAPIKey is the projectdiscovery key used by the `chaos` dataset tool
+	// and by subfinder's projectdiscovery sources. It is read at RUN time by the
+	// tool executor, so a key saved in the UI works without a restart. Empty ⇒
+	// chaos is skipped with one log line.
+	ChaosAPIKey string `json:"chaos_api_key"`
 	// Removed v2 network configuration keys are intentionally absent. v3.4 uses
 	// explicit, asset-gated Network Fast/Normal/Deep plan tokens; old JSON keys are
 	// ignored for upgrade compatibility instead of implying an inactive feature
@@ -505,6 +572,13 @@ func defaultConfig() *Config {
 		workers = autoTunedWorkers(cpu)
 		limits = autoTunedLimits(cpu, memMB)
 	}
+	// The two-tier scan ceilings are FIXED operator knobs: they are NOT part of
+	// autoTunedLimits, so they survive RECON_NO_AUTOTUNE=1 unchanged.
+	limits.MaxConcurrentScans = 2
+	limits.MaxConcurrentDeepScans = 1
+	limits.MaxConcurrentWatchScans = 1
+	limits.WatchHTTPThreads = 10
+	limits.WatchHTTPRateLimit = 25
 
 	return &Config{
 		Host:               "127.0.0.1", // safe default: local-only. Set to 0.0.0.0 to expose (behind a firewall/VPN only).
@@ -546,6 +620,17 @@ func defaultConfig() *Config {
 		SubdomainRecursionDepth:   4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
 		Workers:                   workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
 		Limits:                    limits,            // auto-scaled to host CPU/RAM
+		// The watch-tier knobs are FIXED operator knobs, not machine-tuned ones:
+		// they never come from autoTunedLimits, so RECON_NO_AUTOTUNE=1 keeps
+		// them exactly as written here.
+		WatchRoundsMinGap:             30, // minutes between two chained watch rounds of the same project
+		WatchSourceTimeoutMinutes:     5,  // per-source timeout inside a watch round; NO shared round budget
+		WatchEnumerationSources:       []string{"subfinder", "assetfinder", "chaos", "findomain"},
+		WatchRowsRetentionDays:        30,  // raw watch rows survive this long
+		WatchScopeEventsRetentionDays: 180, // the landing audit trail survives this long
+		WatchNotifyHostCap:            20,  // host names listed in one grouped message
+		WatchFailLimit:                3,   // consecutive failed rounds stop the chain
+		ChaosAPIKey:                   "",  // projectdiscovery key for chaos/subfinder; empty ⇒ chaos skipped
 	}
 }
 
@@ -643,6 +728,7 @@ func (c *Config) applyEnvOverrides() {
 		"RECON_ZOOMEYE_KEY":    &c.ZoomEyeAPIKey,
 		"RECON_VIRUSTOTAL_KEY": &c.VirusTotalAPIKey,
 		"RECON_SHODAN_KEY":     &c.ShodanAPIKey,
+		"RECON_CHAOS_API_KEY":  &c.ChaosAPIKey,
 	} {
 		if v := os.Getenv(env); v != "" {
 			*dst = v

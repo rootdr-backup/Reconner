@@ -27,6 +27,65 @@ const MONITOR_MODULE_OPTIONS: { value: string; label: string; hint: string }[] =
   { value: 'backup_discovery', label: 'Backup file discovery', hint: 'looks for leaked .env/backup files' },
 ]
 
+// The discovery sources a watch round may use. The list matches the server's
+// watch-only source ids (internal/scanner/discovery_sources.go). Each source
+// runs in its own slot with its own timeout; the sources run in parallel, so
+// turning one off makes the round cheaper, never slower.
+const WATCH_SOURCE_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: 'subfinder', label: 'subfinder', hint: 'passive provider APIs — the broad sweep' },
+  { value: 'assetfinder', label: 'assetfinder', hint: 'passive — fast, small result set' },
+  { value: 'chaos', label: 'chaos', hint: 'projectdiscovery dataset — needs an API key' },
+  { value: 'findomain', label: 'findomain', hint: 'active DNS wordlist — fast, but sends queries to the nameserver' },
+  { value: 'crtsh', label: 'crt.sh', hint: 'certificate transparency logs' },
+  { value: 'certspotter', label: 'certspotter', hint: 'certificate transparency logs' },
+  { value: 'hackertarget', label: 'hackertarget', hint: 'passive host list' },
+  { value: 'rapiddns', label: 'rapiddns', hint: 'passive DNS index' },
+  { value: 'otx', label: 'otx', hint: 'AlienVault passive DNS' },
+  { value: 'anubis', label: 'anubis', hint: 'passive subdomain list' },
+  { value: 'urlscan', label: 'urlscan', hint: 'public scan index' },
+]
+
+// The watch module set is FIXED by design (D1): passive discovery plus one
+// HTTP probe. It is shown as a read-only badge list, never as checkboxes.
+const WATCH_MODULE_SET = ['subdomain_enum', 'http_probe']
+
+type ScanDraft = {
+  resolvers: string; depth: number; enabled: boolean; catchall: boolean;
+  excludeIDs: string; repos: string; monitor: string[];
+  maxConcurrentScans: number; maxConcurrentDeepScans: number; maxConcurrentWatchScans: number;
+  watchHTTPThreads: number; watchHTTPRateLimit: number; watchRoundsMinGap: number;
+  watchSourceTimeoutMinutes: number; watchSources: string[];
+  watchRowsRetentionDays: number; watchScopeEventsRetentionDays: number;
+  watchNotifyHostCap: number; watchFailLimit: number;
+}
+
+// scanDraftFrom maps the wire config into the editable draft. The defaults
+// mirror internal/config/config.go.
+const scanDraftFrom = (sc: ScanConfig): ScanDraft => ({
+  resolvers: (sc.dns_resolvers || []).join('\n'),
+  depth: sc.subdomain_recursion_depth || 4,
+  enabled: sc.subdomain_recursion_enabled === true,
+  catchall: sc.http_catchall_detection === true,
+  excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
+  repos: (sc.nuclei_extra_template_repos || []).join('\n'),
+  // Empty on the wire ⇒ the built-in default watch set applies.
+  monitor: (sc.monitor_modules && sc.monitor_modules.length ? sc.monitor_modules : DEFAULT_WATCH_MODULES),
+  maxConcurrentScans: sc.max_concurrent_scans || 2,
+  maxConcurrentDeepScans: sc.max_concurrent_deep_scans || 1,
+  maxConcurrentWatchScans: sc.max_concurrent_watch_scans ?? 1,
+  watchHTTPThreads: sc.watch_http_threads || 10,
+  watchHTTPRateLimit: sc.watch_http_rate_limit || 25,
+  watchRoundsMinGap: sc.watch_rounds_min_gap || 30,
+  watchSourceTimeoutMinutes: sc.watch_source_timeout_minutes || 5,
+  watchSources: (sc.watch_enumeration_sources && sc.watch_enumeration_sources.length
+    ? sc.watch_enumeration_sources
+    : ['subfinder', 'assetfinder', 'chaos', 'findomain']),
+  watchRowsRetentionDays: sc.watch_rows_retention_days || 30,
+  watchScopeEventsRetentionDays: sc.watch_scope_events_retention_days || 180,
+  watchNotifyHostCap: sc.watch_notify_host_cap || 20,
+  watchFailLimit: sc.watch_fail_limit || 3,
+})
+
 export default function System() {
   const [activeTab, setActiveTab] = useState<'overview' | 'integrations' | 'corpora' | 'toolchain' | 'team'>('overview')
   const [tools, setTools] = useState<Record<string,boolean>>({})
@@ -40,7 +99,7 @@ export default function System() {
   const [drafts, setDrafts] = useState<Record<string,string>>({})
   const [savingKeys, setSavingKeys] = useState(false)
   const [scanCfg, setScanCfg] = useState<ScanConfig | null>(null)
-  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; enabled: boolean; catchall: boolean; excludeIDs: string; repos: string; monitor: string[] } | null>(null)
+  const [scanDraft, setScanDraft] = useState<ScanDraft | null>(null)
   const [savingScanCfg, setSavingScanCfg] = useState(false)
   const { addToast } = useUIStore()
   const isAdmin = useAuthStore(s => s.user?.role === 'admin')
@@ -58,16 +117,7 @@ export default function System() {
       setTools(t||{}); setCatalog(cat||[]); setStats(s||{}); setApiKeys(ks?.api_keys || [])
       if (sc) {
         setScanCfg(sc)
-        setScanDraft({
-          resolvers: (sc.dns_resolvers || []).join('\n'),
-          depth: sc.subdomain_recursion_depth || 4,
-          enabled: sc.subdomain_recursion_enabled === true,
-          catchall: sc.http_catchall_detection === true,
-          excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
-          repos: (sc.nuclei_extra_template_repos || []).join('\n'),
-          // Empty on the wire ⇒ the built-in default watch set applies.
-          monitor: (sc.monitor_modules && sc.monitor_modules.length ? sc.monitor_modules : DEFAULT_WATCH_MODULES),
-        })
+        setScanDraft(scanDraftFrom(sc))
       }
     }
     catch { /**/ } finally { setLoading(false) }
@@ -120,17 +170,21 @@ export default function System() {
         nuclei_exclude_template_ids: splitLines(scanDraft.excludeIDs),
         nuclei_extra_template_repos: splitLines(scanDraft.repos),
         monitor_modules: scanDraft.monitor,
+        max_concurrent_scans: scanDraft.maxConcurrentScans,
+        max_concurrent_deep_scans: scanDraft.maxConcurrentDeepScans,
+        max_concurrent_watch_scans: scanDraft.maxConcurrentWatchScans,
+        watch_http_threads: scanDraft.watchHTTPThreads,
+        watch_http_rate_limit: scanDraft.watchHTTPRateLimit,
+        watch_rounds_min_gap: scanDraft.watchRoundsMinGap,
+        watch_source_timeout_minutes: scanDraft.watchSourceTimeoutMinutes,
+        watch_enumeration_sources: scanDraft.watchSources,
+        watch_rows_retention_days: scanDraft.watchRowsRetentionDays,
+        watch_scope_events_retention_days: scanDraft.watchScopeEventsRetentionDays,
+        watch_notify_host_cap: scanDraft.watchNotifyHostCap,
+        watch_fail_limit: scanDraft.watchFailLimit,
       })
       setScanCfg(res)
-      setScanDraft({
-        resolvers: (res.dns_resolvers || []).join('\n'),
-        depth: res.subdomain_recursion_depth || 4,
-        enabled: res.subdomain_recursion_enabled === true,
-        catchall: res.http_catchall_detection === true,
-        excludeIDs: (res.nuclei_exclude_template_ids || []).join('\n'),
-        repos: (res.nuclei_extra_template_repos || []).join('\n'),
-        monitor: (res.monitor_modules && res.monitor_modules.length ? res.monitor_modules : DEFAULT_WATCH_MODULES),
-      })
+      setScanDraft(scanDraftFrom(res))
       addToast('success', 'Scan configuration saved — watch modules apply from the next monitor cycle, the rest from the next scan')
     } catch {
       addToast('error', 'Failed to save scan configuration')
@@ -381,6 +435,109 @@ export default function System() {
                     ))}
                   </div>
                   <p className="text-[10px] text-text-muted mt-1">Modules the automatic monitor schedule runs; applies from its next cycle. The state monitor always snapshots first, before HTTP/JS refresh. Uncheck everything ⇒ the built-in set above applies.</p>
+                </div>
+                <div className="md:col-span-2 border-t border-border-subtle pt-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-xs font-medium">Watch scanning <span className="text-text-muted">(breadth tier)</span></label>
+                    <div className="flex flex-wrap gap-1">
+                      {WATCH_MODULE_SET.map(m => (
+                        <span key={m} className="px-1.5 py-0.5 rounded bg-bg-tertiary text-[10px] font-mono text-text-secondary">{m}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-text-muted mt-1 mb-3">
+                    A watch round runs passive discovery plus one HTTP probe. The module set is fixed, so it is shown as a badge list.
+                    The source toggles below pick which discovery tools it may use — they run in parallel, each with its own timeout.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {WATCH_SOURCE_OPTIONS.map(s => (
+                      <label key={s.value} className="flex items-start gap-2 text-xs font-medium">
+                        <input type="checkbox" className="accent-accent mt-0.5"
+                          checked={scanDraft.watchSources.includes(s.value)}
+                          onChange={e => setScanDraft(d => d && ({ ...d, watchSources: e.target.checked ? [...d.watchSources, s.value] : d.watchSources.filter(v => v !== s.value) }))} />
+                        <span>{s.label} <span className="font-normal text-text-muted">— {s.hint}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                    <div>
+                      <label className="text-xs font-medium">Round gap (min)</label>
+                      <input type="number" min={5} max={1440} value={scanDraft.watchRoundsMinGap}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchRoundsMinGap: parseInt(e.target.value, 10) || 30 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Minimum wait before the next chained round of the same project.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Source timeout (min)</label>
+                      <input type="number" min={1} max={30} value={scanDraft.watchSourceTimeoutMinutes}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchSourceTimeoutMinutes: parseInt(e.target.value, 10) || 5 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Per source. There is no round-wide timeout: the round always finishes.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Watch rounds in parallel</label>
+                      <input type="number" min={0} max={4} value={scanDraft.maxConcurrentWatchScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentWatchScans: parseInt(e.target.value, 10) || 0 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Watch rounds that may run at the same time.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Deep scans in parallel</label>
+                      <input type="number" min={1} max={4} value={scanDraft.maxConcurrentDeepScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentDeepScans: parseInt(e.target.value, 10) || 1 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Heavy scans. The box limit lowers this further.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Total scans in parallel</label>
+                      <input type="number" min={1} max={8} value={scanDraft.maxConcurrentScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentScans: parseInt(e.target.value, 10) || 1 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Ceiling for deep plus watch rounds together.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Watch HTTP threads</label>
+                      <input type="number" min={1} max={40} value={scanDraft.watchHTTPThreads}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchHTTPThreads: parseInt(e.target.value, 10) || 10 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">httpx threads per watch round. Deep scans keep their own.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Watch HTTP rate (rps)</label>
+                      <input type="number" min={1} max={150} value={scanDraft.watchHTTPRateLimit}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchHTTPRateLimit: parseInt(e.target.value, 10) || 25 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Requests per second per watch round.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Rows kept (days)</label>
+                      <input type="number" min={1} max={365} value={scanDraft.watchRowsRetentionDays}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchRowsRetentionDays: parseInt(e.target.value, 10) || 30 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Prunes raw watch rows. Landed scope and notifications survive.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Scope history (days)</label>
+                      <input type="number" min={1} max={3650} value={scanDraft.watchScopeEventsRetentionDays}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchScopeEventsRetentionDays: parseInt(e.target.value, 10) || 180 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">How long the landed-scope audit trail is kept.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Hosts per alert</label>
+                      <input type="number" min={1} max={100} value={scanDraft.watchNotifyHostCap}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchNotifyHostCap: parseInt(e.target.value, 10) || 20 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Names listed per grouped scope alert. The count is always shown.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Failed rounds before pause</label>
+                      <input type="number" min={1} max={10} value={scanDraft.watchFailLimit}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchFailLimit: parseInt(e.target.value, 10) || 3 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Consecutive failures that stop the chain for one project.</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
