@@ -9,7 +9,7 @@ import { EvidenceViewer } from '../components/targets/EvidenceViewer'
 import { ChangeDiffViewer } from '../components/targets/ChangeDiffViewer'
 import { LiveResults } from '../components/targets/LiveResults'
 import { ws } from '../lib/websocket'
-import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
+import { timeAgo, timeUntil, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
   DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent, NetworkService
@@ -1180,7 +1180,7 @@ export default function TargetDetail() {
           </span>
           <span className="mx-2">·</span>
           <span>
-            Next watch: {target.watch_paused ? 'paused' : target.watch_next_run ? timeAgo(target.watch_next_run) : 'not scheduled'}
+            Next watch: {target.watch_paused ? 'paused' : target.watch_next_run ? timeUntil(target.watch_next_run) : 'not scheduled'}
           </span>
         </div>
         {target.watch_only && (
