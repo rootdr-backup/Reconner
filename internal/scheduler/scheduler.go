@@ -2110,9 +2110,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		})
 
 		s.checkMemoryPressure(taskID, logFn)
-		s.checkTargetFullyBlocked(targetID, taskID, target.Domain, logFn)
+		if taskType != watchScanType {
+			s.checkTargetFullyBlocked(targetID, taskID, target.Domain, logFn)
+		}
 		if s.isPaused(taskID) {
-			// The check above just auto-paused this task: block here exactly
+			// The check above may have auto-paused this task: block here exactly
 			// like an operator's own manual pause would, instead of still
 			// running this iteration's module once more against a target
 			// that was just confirmed unreachable.

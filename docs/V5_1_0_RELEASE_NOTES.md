@@ -1,9 +1,39 @@
-# Reconner v4.9.0 — two-tier scanning: deep scans + breadth watches
+# Reconner v5.1.0 — two-tier scanning: deep scans + breadth watches
 
 This release adds a second, cheap scanning tier. You can now watch many bounty
 programs automatically without reviewing each one by hand, while your deep
 targets keep the full pipeline. The two tiers run in separate lanes, have
 separate dashboards and Telegram messages, and never block each other.
+
+
+## Inherited from upstream v5.0.0
+
+This release also merges upstream v5.0.0. Deep scans get those changes; watch
+rounds stay cheap and do not inherit the browser-heavy ones.
+
+- One slow phase no longer aborts the whole scan. The watchdog floor is now
+  30 days, the ceiling 90 days, and backstop is 10 phase timeouts.
+- Nuclei `-dast` parameter fuzzing is on for normal and slow deep scans.
+- A deep scan auto-pauses when every known HTTP host is unreachable. Watch
+  rounds keep their own fail limit and are excluded from auto-pause.
+- CDN/bot-challenge pages get a headless-browser rescue pass in deep scans.
+  Watch rounds never start Chromium.
+- New ASN/CIDR CDN filtering, OTX origin-IP fallback, MongoDB `$where` NoSQLi
+  detection, XSS false-positive fixes, and a 60-entry backup wordlist.
+- HTTP Basic Auth brute force now needs network credential authorization and
+  has attempt caps. Enable `EnableNetworkCredentialAudit` or
+  `net_cred_authorized` if you rely on those findings.
+- Target tabs are grouped and the group formerly called "Assets" is now
+  "Surface". Dashboard stat tiles have real icons. Decorative emoji were
+  removed from product text and Telegram messages.
+- Two new nuclei templates: Grafana path traversal and unauthenticated Jolokia.
+
+### Existing installations: watchdog migration
+
+Upstream no longer bakes `scan_watchdog_hours: 24` into fresh configs. If your
+`config.json` already has `"scan_watchdog_hours": 24`, delete the key or set it
+to `0`. Otherwise the old 24-hour watchdog stays active and the new 30-day
+adaptive default does not apply.
 
 ## What is new
 

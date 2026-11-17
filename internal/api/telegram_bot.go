@@ -716,7 +716,7 @@ func (b *TelegramBot) NotifyMonitorChange(targetID, domain, changeType, title, r
 // separate template from the deep scan alert: the operator reads the two tiers
 // as different workloads, and a watch round runs on its own 30-minute rhythm.
 func (b *TelegramBot) NotifyWatchScanStarted(taskID, targetID, domain string) {
-	text := "👀 Watch round started\nTarget: " + displayDomain(domain) + "\nTask: " + shortBotID(taskID)
+	text := "Watch round started\nTarget: " + displayDomain(domain) + "\nTask: " + shortBotID(taskID)
 	b.enqueue("watch_scan_started", "watch:start:"+taskID, text, b.scanKeyboard(targetID))
 }
 
@@ -724,14 +724,8 @@ func (b *TelegramBot) NotifyWatchScanStarted(taskID, targetID, domain string) {
 // host counts it produced. It stays off by default per chat: with many watch
 // projects this message repeats every round.
 func (b *TelegramBot) NotifyWatchScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int, skippedSummary string) {
-	icon := "✅"
-	if status == "failed" {
-		icon = "❌"
-	} else if status == "cancelled" {
-		icon = "🛑"
-	}
-	text := fmt.Sprintf("%s Watch round %s\nTarget: %s\nDuration: %s\nHosts seen: %d · Alive: %d",
-		icon, status, displayDomain(domain), shortDuration(duration), stats["subdomains"], stats["alive"])
+	text := fmt.Sprintf("Watch round %s\nTarget: %s\nDuration: %s\nHosts seen: %d · Alive: %d",
+		status, displayDomain(domain), shortDuration(duration), stats["subdomains"], stats["alive"])
 	if skippedSummary != "" {
 		text += "\n" + skippedSummary
 	}
@@ -742,7 +736,7 @@ func (b *TelegramBot) NotifyWatchScanFinished(taskID, targetID, domain, status s
 // owns the event key, so the outbox deduplicates the window: one message per
 // tick window across every watch project, never one message per host.
 func (b *TelegramBot) NotifyScopeLanded(eventKey, summary string, hosts []string) {
-	text := "🎯 New eligible scope\n" + summary
+	text := "New eligible scope\n" + summary
 	if len(hosts) > 0 {
 		text += "\n" + strings.Join(hosts, "\n")
 	}

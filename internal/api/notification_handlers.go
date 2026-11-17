@@ -30,7 +30,7 @@ var notificationBuckets = map[string][]string{
 	// The deep tier: full scans, discovery, monitoring changes and program
 	// scope updates.
 	"deep": {
-		"scan_deep", "new_subdomain", "monitor_failed", "bounty_scope_change",
+		"scan_deep", "scan_auto_paused", "new_subdomain", "monitor_failed", "bounty_scope_change",
 		"js_change", "css_change", "http_change", "status_change", "page_change",
 		"tech_change", "header_regression", "security_header_removed",
 		"new_host", "new_service", "content_security_change",
