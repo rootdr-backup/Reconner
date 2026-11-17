@@ -1762,12 +1762,6 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var subdomainRoots []string
 	if !networkTask {
 		subdomainRoots = s.loadSubdomainRoots(ctx, targetID, effectiveScope, scopeOverride)
-		// A watch round enumerates ONE root and rotates through the project's
-		// roots across rounds. A project with N domain assets would otherwise
-		// cost N sequential enumeration rounds per watch cycle.
-		if taskType == watchScanType {
-			subdomainRoots = s.watchRoundRoot(ctx, targetID, effectiveScope, subdomainRoots)
-		}
 	}
 	// A scope token may be a bare host (example.com) OR a full ENDPOINT URL
 	// (https://x.com/appointment?h=…). Seed the HOST into subdomains so http_probe
@@ -2388,24 +2382,6 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// lane is saturated.
 	if taskType == watchScanType {
 		s.applyWatchTerminalRules(targetID, finalStatus)
-		switch finalStatus {
-		case "finished":
-			// The rotation advances on a finished round. The per-root failure
-			// counter resets with it.
-			s.resetWatchRootFailures(targetID)
-			s.advanceWatchRootIndex(ctx, targetID, effectiveScope)
-		case "failed":
-			// Poison-root escape (plan §3): two consecutive failures on the
-			// SAME root advance the rotation anyway, so one broken domain
-			// cannot block every healthy root until the chain stops.
-			// watch_fail_count keeps counting per project in
-			// applyWatchTerminalRules above.
-			if s.recordWatchRootFailure(targetID) {
-				s.advanceWatchRootIndex(context.Background(), targetID, effectiveScope)
-			}
-		default:
-			s.resetWatchRootFailures(targetID)
-		}
 	}
 	terminalTargetStatus := "idle"
 	if finalStatus == "failed" {
@@ -3352,13 +3328,10 @@ func (s *Scheduler) notifyScanDone(taskID, targetID, domain, taskType, status st
 		"verified":   vulns + nuclei + backups + redirects + jsFindings,
 	}
 	if taskType == watchScanType {
+		// The bell stays quiet on a normal round. It only shows specific
+		// changes: scope landed and watch rounds stopped. Telegram still gets
+		// the grouped round result through NotifyWatchScanFinished.
 		s.notifier.NotifyWatchScanFinished(taskID, targetID, domain, status, duration, stats, watchModulesSkippedSummary())
-		// One bell row per watch round. No `notification_created` broadcast: the
-		// bell already refreshes on `task_finished`, and the broadcast path would
-		// forward this row to the Telegram "Monitor change" template.
-		s.insertNotification(targetID, "scan_watch", "Watch round "+status,
-			fmt.Sprintf("%d host(s) known · %d alive · %s", subdomains, alive, shortWatchDuration(duration)),
-			"low")
 		return
 	}
 	s.notifier.NotifyScanFinished(taskID, targetID, domain, status, duration, stats)

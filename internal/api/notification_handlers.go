@@ -25,7 +25,8 @@ type notification struct {
 // kind, one per finding kind), so the filter takes a BUCKET and never a raw
 // type — otherwise a bucket would silently return zero rows.
 var notificationBuckets = map[string][]string{
-	// The breadth tier: a watch round and the scope it landed.
+	// The breadth tier: specific changes only. New rounds no longer write
+	// scan_watch rows; the value stays here so older bell history stays visible.
 	"watch": {"scan_watch", "scope_landed", "watch_failed"},
 	// The deep tier: full scans, discovery, monitoring changes and program
 	// scope updates.

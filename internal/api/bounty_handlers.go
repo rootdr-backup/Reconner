@@ -114,6 +114,9 @@ func (h *Handler) handleBulkCreateProjectsFromPrograms(w http.ResponseWriter, r 
 		h.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if h.cfg != nil {
+		req.WatchIntervalMinutes = h.cfg.WatchRoundIntervalMinutes()
+	}
 	results, err := h.bounty.CreateProjectsBulk(r.Context(), h.currentUserID(r), req)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err.Error())

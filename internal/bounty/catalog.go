@@ -241,13 +241,14 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 	if err != nil {
 		return "", err
 	}
-	return s.createProjectFromProgram(ctx, ownerID, p, req)
+	return s.createProjectFromProgram(ctx, ownerID, p, req, 0)
 }
 
 // createProjectFromProgram holds the import logic so a bulk import can reuse a
 // program that was already loaded. That avoids a second provider detail fetch
-// for every program in the batch.
-func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p Program, req CreateProjectRequest) (string, error) {
+// for every program in the batch. watchStartOffsetMinutes staggers the first
+// round of bulk-created breadth projects; a single create passes 0.
+func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p Program, req CreateProjectRequest, watchStartOffsetMinutes int) (string, error) {
 	if len(req.AssetIDs) == 0 {
 		return "", fmt.Errorf("select at least one current scope asset")
 	}
@@ -345,10 +346,11 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 	// watch_next_run must be a real SQLite timestamp, not a bound string: the
 	// due query compares watch_next_run <= datetime('now') as TEXT, and the
 	// literal "CURRENT_TIMESTAMP" sorts after "2026-..." so the first round
-	// would never be due. Inline CURRENT_TIMESTAMP for breadth projects; leave
-	// it NULL for deep projects (NULL means "not scheduled").
+	// would never be due. For breadth projects, a single create starts now;
+	// bulk creates spread their first rounds across the normal interval.
+	// Deep projects keep NULL ("not scheduled").
 	_, err = tx.ExecContext(ctx, `INSERT INTO targets(id,domain,name,description,priority,notes,kind,exclude_scope,owner_id,monitor_enabled,monitor_interval_hours,watch_only,watch_next_run,watch_paused,watch_fail_count,watch_root_index)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,0,0,0)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(monitorEnabled), hours, watchOnly, watchOnly)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? = 1 THEN datetime('now','+' || ? || ' minutes') ELSE NULL END,0,0,0)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(monitorEnabled), hours, watchOnly, watchOnly, watchStartOffsetMinutes)
 	if err != nil {
 		return "", err
 	}
@@ -390,6 +392,9 @@ type BulkCreateProjectsRequest struct {
 	MonitorEnabled       bool     `json:"monitor_enabled"`
 	MonitorIntervalHours int      `json:"monitor_interval_hours"`
 	SkipExisting         bool     `json:"skip_existing"`
+	// WatchIntervalMinutes is internal. The API handler fills it from config
+	// so bulk-created breadth projects can spread their first rounds.
+	WatchIntervalMinutes int `json:"-"`
 }
 
 type BulkCreateProjectResult struct {
@@ -438,8 +443,13 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 		return nil, fmt.Errorf("asset_policy must be all_eligible_web or all_eligible")
 	}
 
+	interval := req.WatchIntervalMinutes
+	if interval <= 0 {
+		interval = 12 * 60
+	}
+	total := len(ids)
 	results := make([]BulkCreateProjectResult, 0, len(ids))
-	for _, programID := range ids {
+	for i, programID := range ids {
 		result := BulkCreateProjectResult{ProgramID: programID}
 		p, err := s.GetProgram(ctx, programID)
 		if err != nil {
@@ -514,7 +524,13 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 			MonitorIntervalHours: req.MonitorIntervalHours,
 			WatchOnly:            coverage == "breadth",
 		}
-		targetID, err := s.createProjectFromProgram(ctx, ownerID, p, createReq)
+		// Spread first rounds of breadth projects across one normal interval.
+		// Deep projects ignore the offset: their watch_next_run stays NULL.
+		watchStartOffsetMinutes := 0
+		if coverage == "breadth" && total > 0 {
+			watchStartOffsetMinutes = (i * interval / total) % interval
+		}
+		targetID, err := s.createProjectFromProgram(ctx, ownerID, p, createReq, watchStartOffsetMinutes)
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				result.Reason = "already_linked"

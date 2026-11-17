@@ -196,7 +196,10 @@ All watch numbers live in `internal/config/config.go` and are editable under
 | `Limits.MaxConcurrentScans` | 2 | Global cap for deep + watch together |
 | `Limits.MaxConcurrentDeepScans` | 1 | Deep lane cap (also bounded by the memory guard) |
 | `Limits.MaxConcurrentWatchScans` | 1 | Watch lane cap; deep slots are reserved |
-| `WatchRoundsMinGap` | 30 min | Minimum wait before the next chained round |
+| `WatchRoundIntervalHours` | 12 h | Normal wait between finished rounds of one project |
+| `WatchRoundsMinGap` | 30 min | Retry gap after a failed or interrupted round |
+
+A watch round covers all approved web roots. Root rotation is no longer used.
 | `WatchSourceTimeoutMinutes` | 5 | Per-discovery-source timeout; no shared round budget |
 | `WatchEnumerationSources` | `subfinder,assetfinder,chaos,findomain` | Enabled watch discovery sources (toggle each in the UI) |
 | `Limits.WatchHTTPThreads` | 10 | httpx threads per watch round (deep keeps `Workers.HTTPProbing`) |

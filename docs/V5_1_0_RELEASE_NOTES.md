@@ -79,7 +79,8 @@ adaptive default does not apply.
 | Global scan ceiling (`Limits.MaxConcurrentScans`) | 2 |
 | Deep lane cap (`Limits.MaxConcurrentDeepScans`) | 1 |
 | Watch lane cap (`Limits.MaxConcurrentWatchScans`) | 1 |
-| Watch round gap (`WatchRoundsMinGap`) | 30 min |
+| Watch round interval (`WatchRoundIntervalHours`) | 12 h |
+| Watch retry gap (`WatchRoundsMinGap`) | 30 min |
 | Watch source timeout (`WatchSourceTimeoutMinutes`) | 5 min (per source; no shared budget) |
 | Watch sources (`WatchEnumerationSources`) | `subfinder,assetfinder,chaos,findomain` |
 | Watch HTTP threads (`Limits.WatchHTTPThreads`) | 10 |
@@ -88,6 +89,14 @@ adaptive default does not apply.
 | Watch scope event retention (`WatchScopeEventsRetentionDays`) | 180 days |
 | Watch notify host cap (`WatchNotifyHostCap`) | 20 |
 | Watch failure limit (`WatchFailLimit`) | 3 |
+
+Existing installs keep their current next-round time. After the next finished
+round, the new 12-hour interval applies. To get 24-hour rounds, set
+`watch_round_interval_hours` to `24` in System → Scanning.
+
+A normal watch round no longer writes a bell row. The bell shows only specific
+breadth changes: new eligible scope and a stopped watch chain. Telegram still
+sends the grouped round result when that chat option is on.
 
 The global ceiling is `min(MaxConcurrentScans, NumCPU, effectiveMaxConcurrent+1)`.
 The deep lane is capped by the memory guard; the watch lane takes only the slots

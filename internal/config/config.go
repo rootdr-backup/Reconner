@@ -285,14 +285,18 @@ type Config struct {
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
 	// ── Breadth ("watch") tier ──────────────────────────────────────────────
 	// The watch tier is the cheap tier: a breadth project runs passive
-	// discovery plus one HTTP probe every WatchRoundsMinGap minutes, and lands
-	// newly eligible hosts into the project's scope automatically.
+	// discovery plus one HTTP probe on a normal cadence, and lands newly
+	// eligible hosts into the project's scope automatically.
 	//
-	// WatchRoundsMinGap is the minimum wait between two chained rounds of the
-	// SAME project. It is the only rate control for watch traffic and the time
-	// scope changes need to accumulate before one grouped alert fires.
+	// WatchRoundsMinGap is the RETRY GAP for the SAME project: the short wait
+	// after a failed or interrupted round. It is not the normal cadence.
 	// Default 30 minutes. Set via System → Scanning.
 	WatchRoundsMinGap int `json:"watch_rounds_min_gap"`
+	// WatchRoundIntervalHours is the normal wait between two finished watch
+	// rounds of the SAME project. Default 12 hours. Set to 24 for daily rounds.
+	// Failed and interrupted rounds use WatchRoundsMinGap instead, so a failed
+	// round retries quickly without breaking the normal cadence.
+	WatchRoundIntervalHours int `json:"watch_round_interval_hours"`
 	// WatchSourceTimeoutMinutes bounds ONE discovery source (subfinder,
 	// assetfinder, chaos, findomain) inside a watch round. There is NO shared
 	// round budget: the DNS admission and the HTTP probe run on the parent
@@ -633,7 +637,8 @@ func defaultConfig() *Config {
 		// The watch-tier knobs are FIXED operator knobs, not machine-tuned ones:
 		// they never come from autoTunedLimits, so RECON_NO_AUTOTUNE=1 keeps
 		// them exactly as written here.
-		WatchRoundsMinGap:             30, // minutes between two chained watch rounds of the same project
+		WatchRoundsMinGap:             30, // retry gap after a failed/interrupted round
+		WatchRoundIntervalHours:       12, // normal cadence between finished rounds
 		WatchSourceTimeoutMinutes:     5,  // per-source timeout inside a watch round; NO shared round budget
 		WatchEnumerationSources:       []string{"subfinder", "assetfinder", "chaos", "findomain"},
 		WatchRowsRetentionDays:        30,  // raw watch rows survive this long
@@ -718,6 +723,16 @@ func (c *Config) FinishLegacySecretRotation() error {
 	c.PreviousSessionSecret = ""
 	c.SecretRotationPending = false
 	return c.Save()
+}
+
+// WatchRoundIntervalMinutes returns the normal cadence between finished
+// watch rounds, in minutes. The 12-hour fallback keeps the documented contract
+// for configs written before WatchRoundIntervalHours existed.
+func (c *Config) WatchRoundIntervalMinutes() int {
+	if c != nil && c.WatchRoundIntervalHours > 0 {
+		return c.WatchRoundIntervalHours * 60
+	}
+	return 12 * 60
 }
 
 // applyEnvOverrides lets secrets be supplied via environment variables instead

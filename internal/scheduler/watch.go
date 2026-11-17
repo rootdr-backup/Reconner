@@ -87,13 +87,23 @@ func (s *Scheduler) watchLaneCap(running int) int {
 	return cap
 }
 
-// watchGapMinutes is the minimum wait before the next chained round of the
-// same project. It is the ONLY rate control for watch traffic.
+// watchGapMinutes is the retry gap: the wait before the next chained round
+// after a failed, interrupted or recovered round. Normal finished rounds use
+// watchRoundIntervalMinutes instead. Default 30 minutes.
 func (s *Scheduler) watchGapMinutes() int {
 	if s.cfg != nil && s.cfg.WatchRoundsMinGap > 0 {
 		return s.cfg.WatchRoundsMinGap
 	}
 	return 30
+}
+
+// watchRoundIntervalMinutes is the normal cadence between two finished watch
+// rounds of the same project. It falls back to 12 hours for old configs.
+func (s *Scheduler) watchRoundIntervalMinutes() int {
+	if s.cfg != nil {
+		return s.cfg.WatchRoundIntervalMinutes()
+	}
+	return 12 * 60
 }
 
 // watchFailLimit is how many consecutive failed watch rounds stop the chain.
@@ -286,7 +296,7 @@ func (s *Scheduler) watchScheduler() {
 // applyWatchTerminalRules moves the chain of a watch project to its next
 // round after a terminal task status.
 //
-//	finished    → next round in <gap> minutes, the failure counter resets
+//	finished    → next round in <interval> minutes, the failure counter resets
 //	failed      → next round in <gap> minutes, the failure counter grows;
 //	              at the limit the chain STOPS (paused, no next round) and the
 //	              operator is told once
@@ -298,11 +308,12 @@ func (s *Scheduler) watchScheduler() {
 // WHEN the next round may start.
 func (s *Scheduler) applyWatchTerminalRules(targetID, status string) {
 	gap := s.watchGapMinutes()
+	interval := s.watchRoundIntervalMinutes()
 	switch status {
 	case "finished":
 		_, _ = s.db.Exec(`UPDATE targets SET watch_last_run=CURRENT_TIMESTAMP,
 			watch_next_run=datetime('now','+' || ? || ' minutes'), watch_fail_count=0
-			WHERE id=? AND watch_only=1`, gap, targetID)
+			WHERE id=? AND watch_only=1`, interval, targetID)
 	case "failed":
 		_, _ = s.db.Exec(`UPDATE targets SET watch_last_run=CURRENT_TIMESTAMP,
 			watch_fail_count=COALESCE(watch_fail_count,0)+1

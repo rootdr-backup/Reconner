@@ -408,6 +408,7 @@ export interface ScanConfig {
   watch_http_threads: number
   watch_http_rate_limit: number
   watch_rounds_min_gap: number
+  watch_round_interval_hours: number
   watch_source_timeout_minutes: number
   watch_enumeration_sources: string[]
   watch_rows_retention_days: number

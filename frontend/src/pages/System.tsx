@@ -54,6 +54,7 @@ type ScanDraft = {
   excludeIDs: string; repos: string; monitor: string[];
   maxConcurrentScans: number; maxConcurrentDeepScans: number; maxConcurrentWatchScans: number;
   watchHTTPThreads: number; watchHTTPRateLimit: number; watchRoundsMinGap: number;
+  watchRoundIntervalHours: number;
   watchSourceTimeoutMinutes: number; watchSources: string[];
   watchRowsRetentionDays: number; watchScopeEventsRetentionDays: number;
   watchNotifyHostCap: number; watchFailLimit: number;
@@ -76,6 +77,7 @@ const scanDraftFrom = (sc: ScanConfig): ScanDraft => ({
   watchHTTPThreads: sc.watch_http_threads || 10,
   watchHTTPRateLimit: sc.watch_http_rate_limit || 25,
   watchRoundsMinGap: sc.watch_rounds_min_gap || 30,
+  watchRoundIntervalHours: sc.watch_round_interval_hours || 12,
   watchSourceTimeoutMinutes: sc.watch_source_timeout_minutes || 5,
   watchSources: (sc.watch_enumeration_sources && sc.watch_enumeration_sources.length
     ? sc.watch_enumeration_sources
@@ -176,6 +178,7 @@ export default function System() {
         watch_http_threads: scanDraft.watchHTTPThreads,
         watch_http_rate_limit: scanDraft.watchHTTPRateLimit,
         watch_rounds_min_gap: scanDraft.watchRoundsMinGap,
+        watch_round_interval_hours: scanDraft.watchRoundIntervalHours,
         watch_source_timeout_minutes: scanDraft.watchSourceTimeoutMinutes,
         watch_enumeration_sources: scanDraft.watchSources,
         watch_rows_retention_days: scanDraft.watchRowsRetentionDays,
@@ -461,11 +464,18 @@ export default function System() {
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
                     <div>
-                      <label className="text-xs font-medium">Round gap (min)</label>
+                      <label className="text-xs font-medium">Round interval (hours)</label>
+                      <input type="number" min={1} max={168} value={scanDraft.watchRoundIntervalHours}
+                        onChange={e => setScanDraft(d => d && ({ ...d, watchRoundIntervalHours: parseInt(e.target.value, 10) || 12 }))}
+                        className="input font-mono text-xs w-full mt-1" />
+                      <p className="text-[10px] text-text-muted mt-1">Normal wait between finished rounds of one project.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium">Retry gap (min)</label>
                       <input type="number" min={5} max={1440} value={scanDraft.watchRoundsMinGap}
                         onChange={e => setScanDraft(d => d && ({ ...d, watchRoundsMinGap: parseInt(e.target.value, 10) || 30 }))}
                         className="input font-mono text-xs w-full mt-1" />
-                      <p className="text-[10px] text-text-muted mt-1">Minimum wait before the next chained round of the same project.</p>
+                      <p className="text-[10px] text-text-muted mt-1">Wait after a failed or interrupted round before retrying.</p>
                     </div>
                     <div>
                       <label className="text-xs font-medium">Source timeout (min)</label>

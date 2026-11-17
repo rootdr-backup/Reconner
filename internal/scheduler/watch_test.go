@@ -34,6 +34,7 @@ func TestResumeTypeTag(t *testing.T) {
 func TestWatchTerminalRulesFinished(t *testing.T) {
 	s := newTestScheduler(t)
 	s.cfg.WatchRoundsMinGap = 30
+	s.cfg.WatchRoundIntervalHours = 12
 	s.cfg.WatchFailLimit = 3
 	if _, err := s.db.Exec(`INSERT INTO targets (id,domain,watch_only,watch_fail_count) VALUES ('w1','w1.example',1,2)`); err != nil {
 		t.Fatal(err)
@@ -56,8 +57,40 @@ func TestWatchTerminalRulesFinished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bad next_run layout: %v", err)
 	}
+	if until := time.Until(next); until <= 11*time.Hour+50*time.Minute || until > 12*time.Hour+10*time.Minute {
+		t.Fatalf("next_run gap=%v, want ~12 h", until)
+	}
+}
+
+func TestWatchTerminalRulesFailureRetriesQuickly(t *testing.T) {
+	s := newTestScheduler(t)
+	s.cfg.WatchRoundsMinGap = 30
+	s.cfg.WatchRoundIntervalHours = 12
+	s.cfg.WatchFailLimit = 3
+	if _, err := s.db.Exec(`INSERT INTO targets (id,domain,watch_only,watch_fail_count) VALUES ('w6','w6.example',1,0)`); err != nil {
+		t.Fatal(err)
+	}
+
+	s.applyWatchTerminalRules("w6", "failed")
+
+	var nextRun string
+	if err := s.db.QueryRow(`SELECT COALESCE(watch_next_run,'') FROM targets WHERE id='w6'`).Scan(&nextRun); err != nil {
+		t.Fatal(err)
+	}
+	next, err := time.Parse("2006-01-02 15:04:05", nextRun)
+	if err != nil {
+		t.Fatalf("bad next_run layout: %v", err)
+	}
 	if until := time.Until(next); until <= 25*time.Minute || until > 31*time.Minute {
-		t.Fatalf("next_run gap=%v, want ~30 min", until)
+		t.Fatalf("failed next_run gap=%v, want ~30 min retry", until)
+	}
+}
+
+func TestWatchRoundIntervalFallback(t *testing.T) {
+	s := newTestScheduler(t)
+	s.cfg.WatchRoundIntervalHours = 0
+	if got := s.watchRoundIntervalMinutes(); got != 720 {
+		t.Fatalf("watchRoundIntervalMinutes()=%d, want 720", got)
 	}
 }
 
@@ -101,7 +134,7 @@ func TestWatchTerminalRulesCancelledStopsChain(t *testing.T) {
 	}
 }
 
-func TestWatchRoundRootRotatesAndNarrows(t *testing.T) {
+func TestWatchRoundKeepsAllRoots(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets (id,domain,watch_only,watch_root_index) VALUES ('w4','w4.example',1,1)`); err != nil {
 		t.Fatal(err)
@@ -113,19 +146,7 @@ func TestWatchRoundRootRotatesAndNarrows(t *testing.T) {
 	}
 	roots := s.loadSubdomainRoots(context.Background(), "w4", "w4.example", "")
 	if len(roots) != 3 {
-		t.Fatalf("roots=%v, want 3", roots)
-	}
-	got := s.watchRoundRoot(context.Background(), "w4", "w4.example", roots)
-	if len(got) != 1 || got[0] != roots[1] {
-		t.Fatalf("watchRoundRoot=%v, want [%s] (index 1)", got, roots[1])
-	}
-	s.advanceWatchRootIndex(context.Background(), "w4", "w4.example")
-	var idx int
-	if err := s.db.QueryRow(`SELECT watch_root_index FROM targets WHERE id='w4'`).Scan(&idx); err != nil {
-		t.Fatal(err)
-	}
-	if idx != 2 {
-		t.Fatalf("advanced index=%d, want 2", idx)
+		t.Fatalf("roots=%v, want all 3", roots)
 	}
 }
 
