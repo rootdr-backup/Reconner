@@ -5,10 +5,25 @@ import { targets as targetsApi } from '../../lib/api'
 import { useUIStore } from '../../store/ui'
 import { cn } from '../../lib/utils'
 import {
-  MODULE_BY_ID, SAFE_PROFILE, SCAN_BUNDLES, SCAN_GROUPS, SCAN_MODULES,
+  INITIAL_ACCESS_PROFILE, MODULE_BY_ID, SAFE_PROFILE, SCAN_BUNDLES, SCAN_GROUPS, SCAN_MODULES,
   STANDARD_PROFILE, resolveModuleSelection,
 } from '../../lib/scanModules'
 import type { Target } from '../../types'
+
+// Three ascending signal-style bars indicating relative scan speed/intensity —
+// a monochrome replacement for the old turtle/lightning/rocket emoji, in the
+// same spirit as ModuleIcon's letter-badge replacement of the old module emoji.
+function SpeedLevelIcon({ level, className }: { level: 1 | 2 | 3; className?: string }) {
+  const bars = [6, 9, 12]
+  return (
+    <svg viewBox="0 0 16 14" width={14} height={12} className={className} aria-hidden="true">
+      {bars.map((h, i) => (
+        <rect key={i} x={i * 5} y={13 - h} width={3} height={h} rx={1}
+          fill="currentColor" opacity={i < level ? 1 : 0.25} />
+      ))}
+    </svg>
+  )
+}
 
 // Profiles hold explicit operator choices. resolveModuleSelection adds the
 // required discovery/verification pipeline and the backend independently plans
@@ -16,6 +31,7 @@ import type { Target } from '../../types'
 const PROFILE_MODULES: Record<string, string[]> = {
   safe: SAFE_PROFILE,
   standard: STANDARD_PROFILE,
+  initial_access: INITIAL_ACCESS_PROFILE,
   deep: SCAN_MODULES.filter(module => !module.automatic).map(module => module.id),
 }
 
@@ -39,6 +55,10 @@ export function isIPLiteralScope(scanScope: string): boolean {
 const SCAN_PROFILES: { id: string; label: string; sub: string }[] = [
   { id: 'safe', label: 'Safe', sub: 'Low-impact default' },
   { id: 'standard', label: 'Standard', sub: 'Focused validation' },
+  // Red-team-style objective: only the detector classes that can themselves
+  // hand over panel/credential access, RCE, or network access — see
+  // INITIAL_ACCESS_PROFILE's own comment for exactly what and why.
+  { id: 'initial_access', label: 'Initial Access', sub: 'Panel / RCE / network only' },
   { id: 'deep', label: 'Deep', sub: 'All opt-in checks' },
   { id: 'custom', label: 'Custom', sub: 'Your picks' },
 ]
@@ -340,7 +360,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
         {/* Scan profile presets (Acunetix/Burp-style). */}
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Scan profile</p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
             {SCAN_PROFILES.map(p => (
               <button key={p.id} type="button" onClick={() => applyProfile(p.id)}
                 className={cn('flex flex-col items-start px-3 py-2 rounded-lg border text-left transition-colors',
@@ -389,16 +409,19 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Scan speed</p>
           <div className="grid grid-cols-3 gap-1.5">
             {([
-              { id: 'slow', icon: '🐢', label: 'Slow', sub: 'WAF-safe' },
-              { id: 'normal', icon: '⚡', label: 'Normal', sub: 'Balanced' },
-              { id: 'fast', icon: '🚀', label: 'Fast', sub: 'Max speed' },
+              { id: 'slow', level: 1, label: 'Slow', sub: 'WAF-safe' },
+              { id: 'normal', level: 2, label: 'Normal', sub: 'Balanced' },
+              { id: 'fast', level: 3, label: 'Fast', sub: 'Max speed' },
             ] as const).map(o => {
               const on = webSpeed === o.id
               return (
                 <button key={o.id} onClick={() => setWebSpeed(o.id)}
                   className={`px-3 py-2 rounded-lg border text-center transition-all ${
                     on ? 'bg-accent/[.12] border-accent/40 ring-1 ring-accent/20' : 'bg-white/[.02] border-white/[.06] hover:border-white/20'}`}>
-                  <div className="text-sm">{o.icon} <span className="font-medium">{o.label}</span></div>
+                  <div className="flex items-center justify-center gap-1.5 text-sm">
+                    <SpeedLevelIcon level={o.level} className={on ? 'text-accent' : 'text-text-muted'} />
+                    <span className="font-medium">{o.label}</span>
+                  </div>
                   <div className="text-[10px] text-text-muted">{o.sub}</div>
                 </button>
               )
@@ -514,7 +537,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
               <span>
                 <span className="text-xs font-medium text-text-primary">ASN / CIDR discovery <span className="text-severity-high font-normal">(scope-verified only)</span></span>
                 <span className="block text-[10px] text-text-muted mt-0.5">
-                  Reverse-resolves organisation netblocks. Enable only after WHOIS/program-scope verification; ASN ownership alone does not make every IP in scope.
+                  Reverse-resolves organisation netblocks, automatically excluding shared CDN/WAF ranges (Cloudflare, Akamai, …) before probing. Still enable only after your own WHOIS/program-scope verification — ASN ownership alone does not make every IP in scope.
                 </span>
               </span>
             </label>

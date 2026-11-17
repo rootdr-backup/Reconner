@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { targets as targetsApi } from '../lib/api'
 import { useUIStore } from '../store/ui'
 import { Button, Spinner, Badge, EmptyState, cn } from '../components/ui'
+import { Icons } from '../components/layout/Sidebar'
 import type { Target, NetworkService } from '../types'
 
 // The Network Scanner is a dedicated surface for IP/CIDR/range (or domain)
@@ -270,7 +271,7 @@ export default function NetworkScanner() {
         {loading ? (
           <div className="flex justify-center py-10"><Spinner /></div>
         ) : projects.length === 0 ? (
-          <EmptyState icon="🛰️" title="No network projects yet" description="Create one above — enter one or several IP/CIDR/range scopes and pick the modules to run." />
+          <EmptyState icon={<Icons.network className="w-6 h-6" />} title="No network projects yet" description="Create one above — enter one or several IP/CIDR/range scopes and pick the modules to run." />
         ) : (
           <div className="space-y-2">
             {projects.map(t => {

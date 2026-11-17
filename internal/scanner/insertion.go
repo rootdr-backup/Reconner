@@ -118,6 +118,50 @@ func insertionHasBodySiblings(ip insertionPoint) bool {
 		strings.HasPrefix(loc, "graphql:")
 }
 
+// loadSiblingsForPoint queries the OTHER parameters stored for the exact same
+// request shape (method+url+content-type+location-group) as ip, for a caller
+// that holds a single insertion point rather than the whole target's set
+// loadInsertionPoints already groups in bulk. Omitting siblings on a body/
+// JSON/multipart/GraphQL request corrupts its shape — the application can
+// reject the request (missing a required field) before the mutated field
+// ever reaches a reflection/injection sink — so any caller that builds an
+// insertionPoint directly from one parameters row, rather than through
+// loadInsertionPoints, needs this to inject correctly.
+func loadSiblingsForPoint(ctx context.Context, db *database.DB, targetID string, ip insertionPoint) (siblings, types map[string]string) {
+	if !insertionHasBodySiblings(ip) {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT parameter, COALESCE(value,''), COALESCE(location,'query') FROM parameters
+		WHERE target_id=? AND url=? AND COALESCE(method,'GET')=? AND COALESCE(content_type,'')=?
+	`, targetID, ip.URL, strings.ToUpper(strings.TrimSpace(ip.Method)), ip.ContentType)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+	wantKey := insertionSiblingGroupKey(ip)
+	siblings = map[string]string{}
+	types = map[string]string{}
+	for rows.Next() {
+		var name, value, loc string
+		if rows.Scan(&name, &value, &loc) != nil || name == "" {
+			continue
+		}
+		sib := insertionPoint{Method: ip.Method, URL: ip.URL, ContentType: ip.ContentType, Location: loc}
+		if insertionSiblingGroupKey(sib) != wantKey {
+			continue // a different request shape under the same url/method/content-type, e.g. another GraphQL operation
+		}
+		siblings[name] = value
+		if typ := insertionJSONType(loc); typ != "" {
+			types[name] = typ
+		}
+	}
+	if len(siblings) == 0 {
+		return nil, nil
+	}
+	return siblings, types
+}
+
 // isPathLocation reports whether the insertion point injects into a path segment,
 // and returns the 0-based segment index.
 func isPathLocation(loc string) (int, bool) {

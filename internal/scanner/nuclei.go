@@ -81,6 +81,20 @@ func dropLowInfo(severity []string) []string {
 	return kept
 }
 
+// nucleiDASTEnabled decides whether nuclei runs its ACTIVE parameter fuzzing:
+// the official fuzzing-templates (reflected XSS, SQLi, SSRF, LFI, SSTI, open
+// redirect, …) driven by `-dast`. Without this nuclei only matches passive
+// templates and never fuzzes a single parameter — a large class of real
+// bug-bounty findings. It is ON for thorough scans (normal/slow speed) and for
+// the explicit NucleiDAST config override, and OFF only for the fast profile,
+// so an ordinary scan actively fuzzes while "fast" stays quick.
+func nucleiDASTEnabled(cfg *config.Config, ctx context.Context) bool {
+	if cfg != nil && cfg.NucleiDAST {
+		return true
+	}
+	return webSpeedFromCtx(ctx) != SpeedFast
+}
+
 func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []string, tags []string, logFn LogFunc) error {
 	if !s.exec.IsToolAvailable("nuclei") {
 		logFn("warn", "nuclei", "nuclei is unavailable; this phase cannot provide vulnerability-template coverage")
@@ -308,7 +322,7 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 	// they were never synced (fresh install, template-update button never pressed),
 	// -dast would load nothing and silently find no injection. Provision them once,
 	// best-effort, so nuclei's active fuzzing actually runs.
-	if s.cfg != nil && s.cfg.NucleiDAST && s.cfg.NucleiTemplates != "" && s.exec.IsToolAvailable("git") {
+	if s.cfg != nil && nucleiDASTEnabled(s.cfg, ctx) && s.cfg.NucleiTemplates != "" && s.exec.IsToolAvailable("git") {
 		fuzzDir := filepath.Join(s.cfg.NucleiTemplates, "fuzzing-templates")
 		if !dirHasTemplates(fuzzDir) {
 			logFn("info", "nuclei", "DAST enabled but fuzzing-templates missing — syncing them now (one-time)...")
@@ -570,8 +584,10 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 	}
 	// DAST mode: run the cloned fuzzing-templates against parameterized URLs.
 	// Without -dast nuclei loads but never executes them (they're skipped),
-	// so this flag is what actually turns on parameter fuzzing.
-	if s.cfg.NucleiDAST {
+	// so this flag is what actually turns on parameter fuzzing. Enabled for
+	// thorough scans (normal/slow) and the explicit config override; skipped
+	// only on the fast profile.
+	if nucleiDASTEnabled(s.cfg, ctx) {
 		args = append(args, "-dast")
 	}
 	args = append(args, ToolRequestIdentityArgs(ctx, "nuclei")...)

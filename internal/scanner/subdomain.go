@@ -784,9 +784,59 @@ func (s *SubdomainScanner) upsertVhost(targetID, subdomain, ip string) bool {
 	return n > 0
 }
 
+// filterASNSweepToOrgOwnedCandidates applies verification layer 1 (see
+// asnDiscovery's doc comment below): it drops every address that cdncheck's
+// bundled dataset identifies as belonging to a known CDN/WAF provider,
+// since such an address is shared third-party infrastructure and can never
+// be the target organisation's own network — no matter what ASN/CIDR lookup
+// surfaced it. Returns the surviving IPs plus a deduplicated, sorted list
+// of the excluded providers' names for logging.
+func filterASNSweepToOrgOwnedCandidates(ipList []string) (kept []string, excludedProviders []string) {
+	rawIPs := make([]net.IP, 0, len(ipList))
+	for _, ipStr := range ipList {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			rawIPs = append(rawIPs, ip)
+		}
+	}
+	keptIPs, blockedIPs := FilterCDNWAF(rawIPs)
+	if len(blockedIPs) == 0 {
+		return keptIPs, nil
+	}
+	providers := map[string]bool{}
+	for _, b := range blockedIPs {
+		providers[b.Provider] = true
+	}
+	names := make([]string, 0, len(providers))
+	for p := range providers {
+		names = append(names, p)
+	}
+	sort.Strings(names)
+	return keptIPs, names
+}
+
 // asnDiscovery uses asnmap to map the target's ASN/CIDR ranges, then does a
 // bounded reverse-DNS sweep to surface hosts that share the org's netblocks.
 // No-op when asnmap isn't installed.
+//
+// Two independent verification layers gate every IP before it can become an
+// in-scope asset, because an ASN/CIDR lookup alone is not proof of
+// ownership: WHOIS/announcement data for a range is routinely a cloud
+// provider rather than the tenant, and even a range genuinely dedicated to
+// the org is still fronted by third-party edge infrastructure for some
+// slice of its space.
+//
+//  1. cdncheck's bundled dataset drops any address that belongs to a known
+//     CDN/WAF provider BEFORE it is probed at all — that address is never
+//     the org's own network no matter what the ASN says, so it is excluded
+//     up front rather than relying on a PTR record to catch it later.
+//  2. Of what survives (1), only a reverse-DNS PTR that itself resolves to
+//     a name under the target's own domain (isValidSubdomain) is accepted.
+//
+// This is a technical verification floor, not a substitute for the
+// operator's own program-scope confirmation — ASN ownership legitimately
+// covers infrastructure a given bug-bounty program still excludes, which no
+// automated check here can know. The caller (the "ASN / CIDR discovery"
+// scan option) must stay opt-in and keep saying so.
 func (s *SubdomainScanner) asnDiscovery(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, logFn LogFunc) {
 	if !s.exec.IsToolAvailable("asnmap") {
 		return
@@ -827,6 +877,18 @@ func (s *SubdomainScanner) asnDiscovery(ctx context.Context, targetID, domain st
 			count++
 		}
 	}
+
+	// Verification layer 1 (see doc comment above): never spend a lookup on
+	// an address that is already known shared CDN/WAF infrastructure, since
+	// it cannot become an org asset regardless of what the PTR says.
+	totalSwept := len(ipList)
+	keptIPs, excludedProviders := filterASNSweepToOrgOwnedCandidates(ipList)
+	if len(excludedProviders) > 0 {
+		logFn("info", "subdomain_enum", fmt.Sprintf(
+			"ASN verification: excluded %d/%d swept IPs as shared CDN/WAF infrastructure (not the organisation's own network): %s",
+			totalSwept-len(keptIPs), totalSwept, strings.Join(excludedProviders, ", ")))
+	}
+	ipList = keptIPs
 
 	workers := s.cfg.Workers.SubdomainEnumeration
 	if workers <= 0 {

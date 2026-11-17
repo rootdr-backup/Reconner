@@ -23,7 +23,7 @@ const I = (p: string) => (props: { className?: string }) => (
     <path d={p} />
   </svg>
 )
-const Icons = {
+export const Icons = {
   dashboard: I('M4 13h6V4H4v9zM14 21h6V11h-6v10zM14 4v4h6V4h-6zM4 21h6v-4H4v4z'),
   targets: (p: { className?: string }) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={p.className}>
@@ -97,7 +97,7 @@ export const Sidebar = () => {
       <div className="flex items-center gap-3.5 px-5 h-[76px] border-b border-white/[.07]">
         <BrandMark size="sm" />
         <div className="leading-tight">
-          <div className="text-[17px] font-bold tracking-[-.03em] text-white">Reconner <span className="ml-1 text-[9px] align-top font-mono tracking-normal text-accent">V3</span></div>
+          <div className="text-[17px] font-bold tracking-[-.03em] text-white">Reconner <span className="ml-1 text-[9px] align-top font-mono tracking-normal text-accent">V5</span></div>
           <div className="text-[9px] text-text-muted tracking-[.2em] uppercase">Security operations</div>
         </div>
         <button type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"

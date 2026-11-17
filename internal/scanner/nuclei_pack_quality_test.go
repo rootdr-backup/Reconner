@@ -21,6 +21,12 @@ func TestReconnerNucleiTemplatesUseHighSignalProofs(t *testing.T) {
 		// unrelated JSON/YAML response mentioning both terms; must now be
 		// anchored to real YAML structure and exclude JSON responses too.
 		"docker-compose-exposure.yaml": {"^services:", "condition: and", "application/json"},
+		// CVE-2021-43798: only a real file read off the traversal counts —
+		// never a generic 200 from the plugin route itself.
+		"reconner-grafana-path-traversal-cve-2021-43798.yaml": {"root:.*:0:0:", "matchers-condition: and"},
+		// Jolokia: the exact compound version-response shape, not just "any
+		// JSON mentioning a protocol".
+		"reconner-jolokia-exposed.yaml": {`"type"\s*:\s*"version"`, `"protocol"`, "matchers-condition: and"},
 	}
 	for name, proofs := range required {
 		raw, err := reconnerTemplateFS.ReadFile("nucleitemplates/" + name)

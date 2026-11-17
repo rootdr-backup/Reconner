@@ -600,64 +600,6 @@ func xssNormalizeKey(rawURL, param string) string {
 	return host + path + "|" + strings.ToLower(param)
 }
 
-// xssContext classifies where the canary landed so we can pick the correct
-// break-out payload and avoid reporting inert reflections. This is the
-// context-aware analysis the naive "does the string appear" check lacks.
-type xssContextKind int
-
-const (
-	ctxNone       xssContextKind = iota
-	ctxHTMLText                  // between tags: <div>HERE</div>
-	ctxDoubleAttr                // inside a double-quoted attribute: value="HERE"
-	ctxSingleAttr                // inside a single-quoted attribute: value='HERE'
-	ctxScript                    // inside a <script> block (JS string context)
-	ctxURL                       // inside href/src/action (URL context)
-	ctxInert                     // textarea/comment/title/style — not executable
-)
-
-func classifyXSSContext(body, canary string) xssContextKind {
-	idx := strings.Index(body, canary)
-	if idx < 0 {
-		return ctxNone
-	}
-	before := body[:idx]
-	lb := strings.ToLower(before)
-
-	// Inert containers first — reflections here don't execute.
-	for _, tag := range []string{"textarea", "title", "style", "noscript"} {
-		if strings.LastIndex(lb, "<"+tag) > strings.LastIndex(lb, "</"+tag) {
-			return ctxInert
-		}
-	}
-	if strings.LastIndex(before, "<!--") > strings.LastIndex(before, "-->") {
-		return ctxInert
-	}
-	// Inside a <script> element → JS context.
-	if strings.LastIndex(lb, "<script") > strings.LastIndex(lb, "</script") {
-		return ctxScript
-	}
-	// Inside an open tag attribute? Look at the last unclosed '<'.
-	lastLt := strings.LastIndex(before, "<")
-	lastGt := strings.LastIndex(before, ">")
-	if lastLt > lastGt { // we are inside a tag
-		attrChunk := lb[lastLt:]
-		if strings.Contains(attrChunk, "href=") || strings.Contains(attrChunk, "src=") || strings.Contains(attrChunk, "action=") {
-			// count quotes to see if we're inside the URL value
-			dq := strings.Count(before[lastLt:], `"`)
-			if dq%2 == 1 {
-				return ctxURL
-			}
-		}
-		if strings.Count(before[lastLt:], `"`)%2 == 1 {
-			return ctxDoubleAttr
-		}
-		if strings.Count(before[lastLt:], `'`)%2 == 1 {
-			return ctxSingleAttr
-		}
-	}
-	return ctxHTMLText
-}
-
 // ── CORS misconfiguration ────────────────────────────────────────────────────
 
 func (s *VulnScanner) RunCORSCheck(ctx context.Context, targetID string, logFn LogFunc) error {

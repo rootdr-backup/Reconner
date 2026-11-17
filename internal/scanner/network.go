@@ -60,11 +60,30 @@ func NewNetworkScanner(db *database.DB, exec *tools.Executor, cfg *config.Config
 	return &NetworkScanner{db: db, exec: exec, cfg: cfg, logger: log}
 }
 
+// basicAuthControlUser/basicAuthControlPass are a deliberately-wrong
+// credential, never drawn from the real username/password corpora, used as a
+// negative control (see the comment in RunBasicAuth below).
+const (
+	basicAuthControlUser = "reconner-control-probe"
+	basicAuthControlPass = "reconner-control-probe-should-never-authenticate"
+)
+
 // RunBasicAuth is deliberately a separate module: selecting ordinary network
-// discovery never sends credentials. It verifies a real Basic challenge,
-// throttles attempts, aborts on lockout/rate-limit signals and replays a success
-// twice before recording it.
+// discovery never sends credentials. It is gated by the same authorization
+// check every other credential-audit module in this package requires
+// (networkAuthorized — the server-wide switch or the per-scan
+// net_cred_authorized token), bounded by the same global attempt cap and
+// wall-clock budget (netCredMaxAttempts/netCredBudget) so a scan that
+// discovers many Basic-Auth-protected services can never run unbounded, and
+// is capped to netCredMaxTargets services for the same reason every sibling
+// module caps its target count. It verifies a real Basic challenge, rejects
+// an endpoint that doesn't actually discriminate on credential value (the
+// negative control below), throttles attempts, aborts on lockout/rate-limit
+// signals, and replays a success twice before recording it.
 func (s *NetworkScanner) RunBasicAuth(ctx context.Context, targetID, rawScope string, logFn LogFunc) error {
+	if !s.guardAuthorized(ctx, "network_brute", logFn) {
+		return ctx.Err()
+	}
 	allowed, err := networkScopeSet(rawScope)
 	if err != nil {
 		return err
@@ -79,6 +98,9 @@ func (s *NetworkScanner) RunBasicAuth(ctx context.Context, targetID, rawScope st
 		var ip, raw string
 		if rows.Scan(&ip, &raw) == nil && allowed[ip] {
 			targets = append(targets, raw)
+			if len(targets) >= netCredMaxTargets {
+				break
+			}
 		}
 	}
 	if len(targets) == 0 {
@@ -91,12 +113,27 @@ func (s *NetworkScanner) RunBasicAuth(ctx context.Context, targetID, rawScope st
 	users := LoadCorpus(dir, "basic_auth_users", defaultBasicAuthUsers())
 	passwords := LoadCorpus(dir, "basic_auth_passwords", defaultBasicAuthPasswords())
 	client := &http.Client{Transport: sharedHTTPTransport, Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	attempts := 0
+	started := time.Now()
+targetLoop:
 	for _, raw := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		baseline, challenge := basicAuthRequest(ctx, client, raw, "", "")
 		if baseline != http.StatusUnauthorized || !strings.HasPrefix(strings.ToLower(challenge), "basic") {
+			continue
+		}
+		// Negative control: a credential that is certainly wrong must still be
+		// rejected. Without this, an endpoint that accepts ANY Authorization
+		// header regardless of value (a misconfigured proxy in front of it, an
+		// auth check that never actually runs) would let the very first
+		// candidate tried below "pass" the replay-stability check purely
+		// because it is consistently wrong for everyone — never real evidence
+		// that a specific credential was accepted.
+		controlStatus, _ := basicAuthRequest(ctx, client, raw, basicAuthControlUser, basicAuthControlPass)
+		if controlStatus != http.StatusUnauthorized {
+			logFn("info", "network_brute", fmt.Sprintf("Skipped %s: a deliberately-wrong credential was not rejected (status %d) — this endpoint does not appear to enforce Basic-Auth credentials.", raw, controlStatus))
 			continue
 		}
 		RecordCoverage(ctx, CoverageEligible, 1)
@@ -117,6 +154,10 @@ func (s *NetworkScanner) RunBasicAuth(ctx context.Context, targetID, rawScope st
 				continue
 			}
 			seen[key] = true
+			if ctx.Err() != nil || attempts >= netCredMaxAttempts || time.Since(started) > netCredBudget {
+				break targetLoop
+			}
+			attempts++
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

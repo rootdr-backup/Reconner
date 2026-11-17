@@ -316,7 +316,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             </Button>
           )}
           <Button size="sm" variant="ghost" onClick={() => fileRef.current?.click()}>Import</Button>
-          <Button size="sm" variant="ghost" onClick={() => setQuickScanOpen(true)}>⚡ Quick scan from request</Button>
+          <Button size="sm" variant="ghost" onClick={() => setQuickScanOpen(true)}>Quick scan from request</Button>
           <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>+ New Project</Button>
           <input ref={fileRef} type="file" accept=".txt,.csv" onChange={handleImport} className="hidden" />
         </div>

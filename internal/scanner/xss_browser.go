@@ -790,7 +790,7 @@ func xssBrowserPayloadsForAnalysis(a *ReflectionAnalysis) []string {
 		out = []string{`</style><svg onload="top.document.title='%s'">`}
 	case CtxComment:
 		out = []string{`--><svg onload="top.document.title='%s'">`}
-	case CtxRCDATA, CtxRAWTEXT:
+	case CtxRCDATA, CtxRAWTEXT, CtxScriptData:
 		if a.CloseTag != "" {
 			out = []string{a.CloseTag + `<svg onload="top.document.title='%s'">`}
 		} else {

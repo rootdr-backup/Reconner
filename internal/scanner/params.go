@@ -872,7 +872,8 @@ func (s *ParamScanner) CheckReflection(ctx context.Context, targetID string, log
 	logFn("info", "param_reflection", "Checking parameter reflection (active probe)...")
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT url, parameter FROM parameters
+		SELECT DISTINCT url, parameter, COALESCE(method,'GET'), COALESCE(content_type,''), COALESCE(location,'query')
+		FROM parameters
 		WHERE target_id = ? AND is_reflected = 0
 		LIMIT ?
 	`, targetID, s.cfg.URLLimit())
@@ -880,9 +881,12 @@ func (s *ParamScanner) CheckReflection(ctx context.Context, targetID string, log
 		return err
 	}
 
+	// Method/ContentType/Location travel with each row so the probe below can
+	// inject at the parameter's REAL location (query/body/json/header/cookie/
+	// path) via checkInsertionReflection, instead of the query-only shape every
+	// row used to be flattened into regardless of where it actually lives.
 	type urlParam struct {
-		URL   string
-		Param string
+		URL, Param, Method, ContentType, Location string
 	}
 	// Skip stock WordPress/Joomla/Drupal hosts: reflected-parameter probing on a
 	// patched CMS core is noise (the reflection is almost always a harmless
@@ -892,7 +896,7 @@ func (s *ParamScanner) CheckReflection(ctx context.Context, targetID string, log
 	var items []urlParam
 	for rows.Next() {
 		var up urlParam
-		if err := rows.Scan(&up.URL, &up.Param); err == nil {
+		if err := rows.Scan(&up.URL, &up.Param, &up.Method, &up.ContentType, &up.Location); err == nil {
 			if hostSkippedByCMS(up.URL, cmsSkip) {
 				continue
 			}
@@ -929,20 +933,22 @@ func (s *ParamScanner) CheckReflection(ctx context.Context, targetID string, log
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(u, param string) {
+		go func(item urlParam) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r, htmlSink := checkParamReflection(u, param)
+			ip := insertionPoint{URL: item.URL, Param: item.Param, Method: item.Method, ContentType: item.ContentType, Location: item.Location}
+			ip.Siblings, ip.SiblingTypes = loadSiblingsForPoint(ctx, s.db, targetID, ip)
+			r, htmlSink := checkInsertionReflection(ctx, ip, nil)
 			if r {
-				markReflected(u, param)
+				markReflected(item.URL, item.Param)
 				reflected.Add(1)
 			} else if htmlSink {
 				domMu.Lock()
-				domCandidates = append(domCandidates, urlParam{u, param})
+				domCandidates = append(domCandidates, item)
 				domMu.Unlock()
 			}
-		}(item.URL, item.Param)
+		}(item)
 	}
 	wg.Wait()
 

@@ -803,22 +803,38 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 	patterns := generateNestedBackupCandidates(observedURLs)
 	// Brand words: the site's own domain/subdomain labels PLUS its highest-
 	// ranked adaptive vocabulary (product names, JS chunk names, API path
-	// segments — already mined by buildAdaptiveWordlist from exactly this
-	// target's own subdomains/JS/titles/parameters). Combined with real
+	// segments, parameter names — already mined by buildAdaptiveWordlist from
+	// exactly this target's own subdomains/JS/titles/parameters/directory
+	// findings, and RANKED by real recon signal — parameters alone score
+	// higher than anything else, so "invoiceExport"/"billingDump"-shaped real
+	// app vocabulary reliably lands near the top). Combined with real
 	// backup-naming patterns (generateBrandedBackupCandidates), this is what
 	// finds "acmecorp_backup.zip" — a bare wordlist never guesses the site's
 	// own name, and a bare domain-name guess never combines it with a backup
-	// word. Raised from the previous 24-word/4-extension adaptive-only budget.
+	// word.
+	//
+	// Widened from the previous top-10 slice to top-60: buildAdaptiveWordlist
+	// already ranks up to 1200 words by relevance, so 10 threw away the vast
+	// majority of exactly the "whatever this app's own vocabulary actually
+	// is" signal the ranking exists to surface — a real product/feature name
+	// ranked #15-50 (still clearly relevant, just not literally the single
+	// top hit) never got the brand-pattern treatment at all, only a bare
+	// name+extension guess via generateAdaptiveBackupCandidates below. The
+	// extra ~50 words cost a bounded, known increase here (generateBranded-
+	// BackupCandidates' own request count scales with word count) and are
+	// free downstream: generateDirectoryBackupCandidates already carried a
+	// 1200-candidate budget that this narrow 10-12-word input never came
+	// close to filling.
 	brandWords := domainBrandNames(domain)
 	if len(adaptiveWords) > 0 {
 		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 50)...)
 		top := adaptiveWords[0]
-		if len(top) > 10 {
-			top = top[:10]
+		if len(top) > 60 {
+			top = top[:60]
 		}
 		brandWords = append(brandWords, top...)
 	}
-	patterns = append(patterns, generateBrandedBackupCandidates(brandWords, 12)...)
+	patterns = append(patterns, generateBrandedBackupCandidates(brandWords, 60)...)
 	// Directory-prefixed brand/word archives (/backup/acme.zip, /db/db_2025.sql.gz)
 	// — the most common real layout, which every root-only generator misses. Pure
 	// recall win; still magic-byte confirmed, so no new false positives.

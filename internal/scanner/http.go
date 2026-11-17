@@ -295,6 +295,18 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		s.fingerprintHosts(ctx, targetID, logFn)
 	}
 
+	// A host whose probe landed on a CDN/bot-challenge page instead of the
+	// real site poisons every downstream module that reads http_services
+	// (JS analysis, params, directory discovery, nuclei, injection
+	// scanners…) with a challenge page's title/content instead of the
+	// target's own. Retry those specific hosts through a headless browser
+	// before anything else consumes this data.
+	// Deep scans only: a watch round must not start Chromium or open browser
+	// connections outside the watch rate limit.
+	if !watchMode {
+		s.rescueChallengedHosts(ctx, targetID, logFn)
+	}
+
 	// Opt-in HTTP catch-all pass (global config http_catchall_detection, default
 	// OFF, overridable per target): groups the 2xx fingerprints gathered above and
 	// marks wildcard catch-all fleets (redirect-to-apex / homepage clones) so they

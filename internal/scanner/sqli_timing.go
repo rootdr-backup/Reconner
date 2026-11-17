@@ -80,12 +80,17 @@ func timingPayloads() []timingPayload {
 	}
 }
 
-// serverTTFB sends one injected request and returns the server think-time (write-
-// complete → first response byte). ok=false on transport error.
-func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[string]string, deadline time.Duration) (time.Duration, bool) {
+// serverTTFB sends one request built by buildReq and returns the server
+// think-time (write-complete → first response byte). ok=false on transport
+// error. The request builder is a caller-supplied callback (rather than a
+// fixed insertionPoint+value+auth triple) so this statistical engine — median
+// sampling, linear-scaling proof, non-overlap with baseline — can be reused
+// for any time-based oracle, not just SQLi's own "inject this value" shape;
+// see nosqli.go's $where timing probe for the other caller.
+func serverTTFB(ctx context.Context, ip insertionPoint, deadline time.Duration, buildReq func(context.Context) (*http.Request, error)) (time.Duration, bool) {
 	rctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
-	req, err := buildInjectedRequest(rctx, ip, value, auth)
+	req, err := buildReq(rctx)
 	if err != nil {
 		return 0, false
 	}
@@ -131,15 +136,15 @@ func serverTTFB(ctx context.Context, ip insertionPoint, value string, auth map[s
 // verdict needs a two-thirds quorum: one successful request out of a requested
 // multi-sample distribution is not statistical evidence and previously let a
 // flaky transport decide the median by itself.
-func sampleTTFB(ctx context.Context, ip insertionPoint, value string, auth map[string]string, n int, deadline time.Duration) (median, min, max time.Duration, ok bool) {
-	return sampleTTFBSeeded(ctx, ip, value, auth, n, deadline, nil)
+func sampleTTFB(ctx context.Context, ip insertionPoint, n int, deadline time.Duration, buildReq func(context.Context) (*http.Request, error)) (median, min, max time.Duration, ok bool) {
+	return sampleTTFBSeeded(ctx, ip, n, deadline, nil, buildReq)
 }
 
 // sampleTTFBSeeded includes already-measured samples in a distribution and only
 // performs the missing requests. The cheap sleep(5) screen is a real TTFB sample;
 // reusing it saves one five-second request while i5min still requires every new
 // confirmation sample to be non-overlapping with baseline.
-func sampleTTFBSeeded(ctx context.Context, ip insertionPoint, value string, auth map[string]string, n int, deadline time.Duration, seed []time.Duration) (median, min, max time.Duration, ok bool) {
+func sampleTTFBSeeded(ctx context.Context, ip insertionPoint, n int, deadline time.Duration, seed []time.Duration, buildReq func(context.Context) (*http.Request, error)) (median, min, max time.Duration, ok bool) {
 	ds := append([]time.Duration(nil), seed...)
 	if len(ds) > n {
 		ds = ds[:n]
@@ -148,7 +153,7 @@ func sampleTTFBSeeded(ctx context.Context, ip insertionPoint, value string, auth
 		if ctx.Err() != nil {
 			break
 		}
-		d, good := serverTTFB(ctx, ip, value, auth, deadline)
+		d, good := serverTTFB(ctx, ip, deadline, buildReq)
 		if good {
 			ds = append(ds, d)
 		}
@@ -183,10 +188,13 @@ func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth
 		return "", "", "", false
 	}
 	baseValue := sqliBaseValue(ip)
+	reqFor := func(value string) func(context.Context) (*http.Request, error) {
+		return func(c context.Context) (*http.Request, error) { return buildInjectedRequest(c, ip, value, auth) }
+	}
 	// The trace begins only after the request is written, so TCP/TLS setup is not
 	// part of TTFB. quickProbe has also already warmed the shared transport in the
 	// normal pipeline; a dedicated warm-up request was pure duplicate work.
-	base, _, baseMax, ok := sampleTTFB(ctx, ip, baseValue, auth, 3, 8*time.Second)
+	base, _, baseMax, ok := sampleTTFB(ctx, ip, 3, 8*time.Second, reqFor(baseValue))
 	if !ok {
 		return "", "", "", false
 	}
@@ -204,23 +212,23 @@ func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth
 		dl := 12 * time.Second
 		// Cheap screen: one sleep(5) request eliminates a non-vulnerable DBMS
 		// vector. Only a delayed response pays for the full three-sample proof.
-		fast5, ok := serverTTFB(ctx, ip, p.build(val, 5), auth, dl)
+		fast5, ok := serverTTFB(ctx, ip, dl, reqFor(p.build(val, 5)))
 		if !ok || fast5-base < 3500*time.Millisecond {
 			continue
 		}
 		// Confirm: sleep(5) must add a clear, non-overlapping median delay.
-		i5, i5min, _, ok := sampleTTFBSeeded(ctx, ip, p.build(val, 5), auth, 3, dl, []time.Duration{fast5})
+		i5, i5min, _, ok := sampleTTFBSeeded(ctx, ip, 3, dl, []time.Duration{fast5}, reqFor(p.build(val, 5)))
 		if !ok || i5-base < 3500*time.Millisecond || i5min < baseMax+2*time.Second {
 			continue
 		}
 		// Control: sleep(0) of the SAME payload must stay ≈ baseline — proves the
 		// payload's structure (extra SQL, comments) isn't itself what's slow.
-		i0, _, _, ok := sampleTTFB(ctx, ip, p.build(val, 0), auth, 2, dl)
+		i0, _, _, ok := sampleTTFB(ctx, ip, 2, dl, reqFor(p.build(val, 0)))
 		if !ok || i0 > base+1500*time.Millisecond {
 			continue
 		}
 		// Linear scaling: sleep(2) must add ≈2s and sleep(5)−sleep(2) must be ≈3s.
-		i2, _, _, ok := sampleTTFB(ctx, ip, p.build(val, 2), auth, 3, dl)
+		i2, _, _, ok := sampleTTFB(ctx, ip, 3, dl, reqFor(p.build(val, 2)))
 		if !ok {
 			continue
 		}

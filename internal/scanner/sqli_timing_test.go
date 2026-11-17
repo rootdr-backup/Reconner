@@ -64,7 +64,8 @@ func TestTimingConfirmationReusesScreeningSample(t *testing.T) {
 
 	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET", Location: "query"}
 	seed := 5 * time.Second
-	median, min, max, ok := sampleTTFBSeeded(context.Background(), ip, "1", nil, 3, time.Second, []time.Duration{seed})
+	buildReq := func(c context.Context) (*http.Request, error) { return buildInjectedRequest(c, ip, "1", nil) }
+	median, min, max, ok := sampleTTFBSeeded(context.Background(), ip, 3, time.Second, []time.Duration{seed}, buildReq)
 	if !ok {
 		t.Fatal("seeded distribution did not reach quorum")
 	}

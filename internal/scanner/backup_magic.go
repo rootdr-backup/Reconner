@@ -291,14 +291,16 @@ var backupBrandPrefixes = []string{
 // the extension set tight is what keeps the per-word request cost bounded.
 var brandBackupExts = []string{".zip", ".sql", ".tar.gz", ".bak"}
 
-// generateBrandedBackupCandidates cross-products a small pool of site-
-// specific "brand" words — the domain's own name/subdomain labels and the
-// target's highest-signal adaptive vocabulary (product names, JS chunk
-// names, API path segments, all already mined by buildAdaptiveWordlist from
-// exactly the sources the caller passes in) — with the naming patterns real
-// backups actually use, plus a couple of dated variants. A generic wordlist
-// alone never guesses the site's OWN name; the bare domain-name candidates
-// never guess that it's combined with a backup word. This closes that gap.
+// generateBrandedBackupCandidates cross-products a pool of site-specific
+// "brand" words — the domain's own name/subdomain labels and the target's
+// highest-ranked adaptive vocabulary (product names, JS chunk names, API
+// path segments, parameter names — all already mined and SCORED by
+// buildAdaptiveWordlist from exactly the sources the caller passes in, so
+// the caller can afford to pass a genuinely wide slice of it, not just the
+// single top word) — with the naming patterns real backups actually use,
+// plus a couple of dated variants. A generic wordlist alone never guesses
+// the site's OWN name; the bare domain-name candidates never guess that
+// it's combined with a backup word. This closes that gap.
 func generateBrandedBackupCandidates(brandWords []string, limit int) []string {
 	if len(brandWords) > limit {
 		brandWords = brandWords[:limit]
