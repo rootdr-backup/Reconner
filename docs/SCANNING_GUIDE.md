@@ -30,6 +30,29 @@ references. A project that contains only store assets finishes a watch round
 with zero hosts. Exact hosts and store-specific paths are matched, so a scope of
 `apple.com` or `google.com` still scans normally.
 
+Existing store rows stay as they are; no migration rewrites scope decisions. The
+scan-time guard skips them even if they are still typed `url` or `domain`. To
+make the asset list and UI honest, you can retype them manually after a backup:
+
+```sql
+UPDATE assets
+SET asset_type = 'app_store'
+WHERE COALESCE(asset_type,'') IN ('domain','url','page','api','other')
+  AND (
+    lower(value) LIKE '%play.google.com%'
+    OR lower(value) LIKE '%apps.apple.com%'
+    OR lower(value) LIKE '%itunes.apple.com%'
+    OR lower(value) LIKE '%appstore.apple.com%'
+    OR lower(value) LIKE '%apps.microsoft.com%'
+    OR lower(value) LIKE '%appgallery.huawei.com%'
+    OR lower(value) LIKE '%store.steampowered.com%'
+  );
+```
+
+This SQL is optional. It is not run at startup. After it, a project that held
+only store assets will have no web roots; its next watch round finishes with
+zero hosts.
+
 ## Web scan planning
 
 Web profiles are module presets, not claims about coverage completeness.

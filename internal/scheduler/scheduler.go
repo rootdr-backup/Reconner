@@ -1983,7 +1983,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// A store-only project has no scannable DNS roots. Enumerating an empty
 	// root list is pure noise, so drop the module and log once. The rest of
 	// the round still probes any non-store seeds.
-	if len(subdomainRoots) == 0 && containsModule(modules, ModuleSubdomainEnum) {
+	if !networkTask && len(subdomainRoots) == 0 && containsModule(modules, ModuleSubdomainEnum) {
 		pruned := modules[:0]
 		for _, m := range modules {
 			if m == ModuleSubdomainEnum {

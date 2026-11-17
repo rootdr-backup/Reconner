@@ -199,11 +199,14 @@ export default function BountyPrograms() {
     const n = new Set(prev); if (visibleSelected) visibleAssets.forEach(a => n.delete(a.id)); else visibleAssets.forEach(a => n.add(a.id)); return n
   })
 
-  const nonScannableAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other', 'app_store'])
+  const nonScannableAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other'])
   const chosenAssets = (detail?.assets || []).filter(a => selected.has(a.id))
-  const skippedNonScannable = coverage === 'breadth'
+  // Store assets are dropped by the backend for both breadth and deep imports.
+  const skippedAppStore = chosenAssets.filter(a => (a.asset_type || '').toLowerCase() === 'app_store').length
+  const skippedNetwork = coverage === 'breadth'
     ? chosenAssets.filter(a => nonScannableAssetTypes.has((a.asset_type || '').toLowerCase())).length
     : 0
+  const skippedNonScannable = skippedNetwork + skippedAppStore
   const webAssetCount = chosenAssets.length - skippedNonScannable
 
   const createProject = async () => {

@@ -16,6 +16,11 @@ func TestIsAppStoreAsset(t *testing.T) {
 		"example.com":                   false,
 		"https://example.com/app/login": false,
 		"https://example.com/store/products/item": false,
+		"https://example.com/app/identity":        false,
+		"https://example.com/app/foo/identity":    false,
+		"https://example.com/app/someid123":       false,
+		"https://example.com/app/id123456789":     true,
+		"https://example.com/app/foo/id123456789": true,
 	}
 
 	for identifier, want := range cases {

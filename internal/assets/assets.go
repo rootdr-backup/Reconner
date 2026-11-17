@@ -52,15 +52,22 @@ func IsAppStoreAsset(identifier string) bool {
 		}
 	}
 
-	// Apple App Store IDs appear as /app/<name>/id<digits> or /id<digits>.
-	// Require an id segment so a normal /app/login path is not excluded.
+	// Apple App Store IDs appear as /app/<name>/id<digits>. Require actual
+	// digits after "id" so a normal path such as /app/identity is not excluded.
 	if index := strings.Index(raw, "/app/"); index >= 0 {
 		rest := raw[index+len("/app/"):]
-		if strings.HasPrefix(rest, "id") || strings.Contains(rest, "/id") {
+		if strings.HasPrefix(rest, "id") && startsWithDigit(strings.TrimPrefix(rest, "id")) {
+			return true
+		}
+		if pos := strings.Index(rest, "/id"); pos >= 0 && startsWithDigit(rest[pos+len("/id"):]) {
 			return true
 		}
 	}
 	return false
+}
+
+func startsWithDigit(s string) bool {
+	return len(s) > 0 && s[0] >= '0' && s[0] <= '9'
 }
 
 // IsScannableWebAsset reports whether an asset may enter watch or deep
