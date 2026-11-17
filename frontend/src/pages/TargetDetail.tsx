@@ -1115,7 +1115,7 @@ export default function TargetDetail() {
         </div>
 		<div className="flex flex-col sm:flex-row gap-2 mb-3">
 		  <select value={newAssetType} onChange={e => setNewAssetType(e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary sm:w-32">
-			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP / range'],['cidr','CIDR'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP / range'],['cidr','CIDR'],['app_store','App store'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
 		  </select>
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}

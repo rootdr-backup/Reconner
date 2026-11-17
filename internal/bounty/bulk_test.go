@@ -170,3 +170,37 @@ func TestBulkCreateProjectsValidation(t *testing.T) {
 		t.Fatal("oversized batch was accepted")
 	}
 }
+
+func TestBulkCreateDropsAppStoreAssets(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "bulk-store", Handle: "store-one", Name: "Store One",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "s1", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "s2", Identifier: "https://apps.apple.com/us/app/example/id123456789", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "s3", Identifier: "example.com", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+
+	results, err := svc.CreateProjectsBulk(context.Background(), 11, BulkCreateProjectsRequest{
+		ProgramIDs: []string{p.ID}, Coverage: "breadth", AssetPolicy: "all_eligible_web",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].OK {
+		t.Fatalf("got %+v, want one successful result", results)
+	}
+	if results[0].Assets != 1 || results[0].SkippedAppStore != 2 {
+		t.Fatalf("result assets=%d skipped_app_store=%d, want 1/2", results[0].Assets, results[0].SkippedAppStore)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE target_id=? AND value LIKE '%play.google.com%'`, results[0].TargetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("store URL was imported into target: count=%d", count)
+	}
+}

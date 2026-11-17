@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/recon-platform/internal/assets"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/pkg/logger"
 )
@@ -175,6 +176,9 @@ func normalizeAssetType(provider, typ, identifier string) string {
 	t := strings.ToLower(strings.TrimSpace(typ))
 	id := strings.ToLower(strings.TrimSpace(identifier))
 	plainID := strings.TrimSpace(strings.TrimPrefix(id, "*."))
+	if assets.IsAppStoreAsset(identifier) {
+		return "app_store"
+	}
 	if provider == "intigriti" && strings.HasPrefix(t, "intigriti:") {
 		switch strings.TrimPrefix(t, "intigriti:") {
 		case "1": // URL / domain

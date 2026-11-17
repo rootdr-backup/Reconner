@@ -513,3 +513,31 @@ func TestLivePublicCatalogContracts(t *testing.T) {
 		t.Logf("%s: %d programs, %d active declared assets", provider, programs, assets)
 	}
 }
+
+func TestCreateProjectWithOnlyAppStoreAssets(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "only-store", Handle: "only-store", Name: "Only Store",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "os1", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os2", Identifier: "https://apps.apple.com/us/app/example/id123456789", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	ids := []string{p.Assets[0].ID, p.Assets[1].ID}
+
+	if _, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{AssetIDs: ids, WatchOnly: true}); err == nil {
+		t.Fatal("breadth create with only store assets must fail")
+	} else if !strings.Contains(err.Error(), "no web assets") {
+		t.Fatalf("error=%q, want a no-web-assets error", err.Error())
+	}
+
+	var targets int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM targets`).Scan(&targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets != 0 {
+		t.Fatalf("failed create left %d targets, want 0", targets)
+	}
+}

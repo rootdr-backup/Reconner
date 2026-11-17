@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	assetutil "github.com/recon-platform/internal/assets"
 )
 
 type ListOptions struct {
@@ -231,6 +232,8 @@ func projectAssetKind(t string) string {
 		return "network"
 	case "domain", "wildcard", "url", "page", "js", "api":
 		return "web"
+	case "app_store", "android", "ios", "hardware", "source_code", "other", "reference":
+		return "reference"
 	default:
 		return "reference"
 	}
@@ -282,7 +285,12 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 	values := make([]string, 0, len(assets))
 	hasWeb, hasNet := false, false
 	skippedNetwork := []string{}
+	skippedAppStore := []string{}
 	for _, a := range assets {
+		if a.AssetType == "app_store" || assetutil.IsAppStoreAsset(a.Identifier) {
+			skippedAppStore = append(skippedAppStore, a.Identifier)
+			continue
+		}
 		if a.AssetType == "other" || a.AssetType == "android" || a.AssetType == "ios" || a.AssetType == "hardware" || a.AssetType == "source_code" {
 			continue
 		}
@@ -305,6 +313,9 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 	}
 	if len(skippedNetwork) > 0 && s.log != nil {
 		s.log.Info("Breadth project import dropped network assets", "count", len(skippedNetwork), "assets", strings.Join(skippedNetwork, ", "))
+	}
+	if len(skippedAppStore) > 0 && s.log != nil {
+		s.log.Info("Project import dropped app-store assets", "count", len(skippedAppStore), "assets", strings.Join(skippedAppStore, ", "))
 	}
 	if len(values) == 0 {
 		values = []string{p.Provider + ":" + p.Handle}
@@ -398,13 +409,14 @@ type BulkCreateProjectsRequest struct {
 }
 
 type BulkCreateProjectResult struct {
-	ProgramID      string `json:"program_id"`
-	ProgramName    string `json:"program_name,omitempty"`
-	OK             bool   `json:"ok"`
-	TargetID       string `json:"target_id,omitempty"`
-	Assets         int    `json:"assets,omitempty"`
-	SkippedNetwork int    `json:"skipped_network,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	ProgramID       string `json:"program_id"`
+	ProgramName     string `json:"program_name,omitempty"`
+	OK              bool   `json:"ok"`
+	TargetID        string `json:"target_id,omitempty"`
+	Assets          int    `json:"assets,omitempty"`
+	SkippedNetwork  int    `json:"skipped_network,omitempty"`
+	SkippedAppStore int    `json:"skipped_app_store,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // CreateProjectsBulk imports many bounty programs in one call. Each program is
@@ -480,8 +492,13 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 
 		assetIDs := []string{}
 		skippedNetwork := 0
+		skippedAppStore := 0
 		for _, a := range p.Assets {
 			if !a.Active || !a.InScope || !a.EligibleSubmission {
+				continue
+			}
+			if a.AssetType == "app_store" || assetutil.IsAppStoreAsset(a.Identifier) {
+				skippedAppStore++
 				continue
 			}
 			kind := projectAssetKind(a.AssetType)
@@ -544,6 +561,7 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 		result.TargetID = targetID
 		result.Assets = len(assetIDs)
 		result.SkippedNetwork = skippedNetwork
+		result.SkippedAppStore = skippedAppStore
 		results = append(results, result)
 	}
 	return results, nil

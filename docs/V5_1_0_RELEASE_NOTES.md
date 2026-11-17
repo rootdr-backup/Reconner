@@ -67,6 +67,12 @@ adaptive default does not apply.
   network/IP assets are dropped, and the result panel shows what was imported or
   skipped. The Projects page has coverage chips, a coverage badge per card, and
   a bulk "Set coverage" action.
+- **App-store scope is excluded.** Bounty import now excludes app-store listings
+  from breadth and deep projects. Google Play, Apple App Store, Microsoft Store,
+  Huawei AppGallery, and Steam URLs no longer become subdomain-enumeration roots
+  or HTTP probe targets. Bulk results report the skipped count as
+  `skipped_app_store`. Existing store rows stay visible as references. A
+  project with only store assets finishes a watch round with zero hosts.
 - **chaos discovery source.** The watch tier ships `subfinder`, `assetfinder`,
   `chaos`, and `findomain`. Set the projectdiscovery API key under System →
   Integrations → Passive intelligence providers. Per-source toggles and all watch

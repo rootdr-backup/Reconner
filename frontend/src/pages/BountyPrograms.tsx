@@ -199,12 +199,12 @@ export default function BountyPrograms() {
     const n = new Set(prev); if (visibleSelected) visibleAssets.forEach(a => n.delete(a.id)); else visibleAssets.forEach(a => n.add(a.id)); return n
   })
 
-  const networkAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other'])
+  const nonScannableAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other', 'app_store'])
   const chosenAssets = (detail?.assets || []).filter(a => selected.has(a.id))
-  const skippedNetwork = coverage === 'breadth'
-    ? chosenAssets.filter(a => networkAssetTypes.has((a.asset_type || '').toLowerCase())).length
+  const skippedNonScannable = coverage === 'breadth'
+    ? chosenAssets.filter(a => nonScannableAssetTypes.has((a.asset_type || '').toLowerCase())).length
     : 0
-  const webAssetCount = chosenAssets.length - skippedNetwork
+  const webAssetCount = chosenAssets.length - skippedNonScannable
 
   const createProject = async () => {
     if (!detail || selected.size === 0) return
@@ -218,8 +218,8 @@ export default function BountyPrograms() {
         monitor_interval_hours: monitorHours,
         watch_only: coverage === 'breadth',
       })
-      setImportResult({ name: projectName.trim() || detail.name, assets: webAssetCount, skipped: skippedNetwork })
-      addToast('success', `Project created with ${webAssetCount} web asset${webAssetCount === 1 ? '' : 's'}${skippedNetwork ? ` · ${skippedNetwork} network asset(s) dropped` : ''}`)
+      setImportResult({ name: projectName.trim() || detail.name, assets: webAssetCount, skipped: skippedNonScannable })
+      addToast('success', `Project created with ${webAssetCount} web asset${webAssetCount === 1 ? '' : 's'}${skippedNonScannable ? ` · ${skippedNonScannable} non-scannable asset(s) dropped` : ''}`)
       navigate(created.url)
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not create project') }
     finally { setCreating(false) }
@@ -275,7 +275,7 @@ export default function BountyPrograms() {
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5">
           <Select value={filters.bounties} onChange={v => setFilters(f => ({ ...f, bounties: v }))} options={[['','Bounty + VDP'],['true','Pays bounties'],['false','VDP / no bounty']]} />
           <Select value={filters.wildcard} onChange={v => setFilters(f => ({ ...f, wildcard: v }))} options={[['','Any scope'],['true','Has wildcard'],['false','No wildcard']]} />
-          <Select value={filters.assetType} onChange={v => setFilters(f => ({ ...f, assetType: v }))} options={[['','Any asset type'],['wildcard','Wildcard'],['domain','Domain'],['url','URL / page'],['api','API'],['js','JavaScript'],['cidr','CIDR'],['ip','IP'],['android','Android'],['ios','iOS'],['source_code','Source code'],['hardware','Hardware / IoT'],['ai_model','AI model']]} />
+          <Select value={filters.assetType} onChange={v => setFilters(f => ({ ...f, assetType: v }))} options={[['','Any asset type'],['wildcard','Wildcard'],['domain','Domain'],['url','URL / page'],['api','API'],['js','JavaScript'],['cidr','CIDR'],['ip','IP'],['android','Android'],['ios','iOS'],['app_store','App store'],['source_code','Source code'],['hardware','Hardware / IoT'],['ai_model','AI model']]} />
           <Select value={filters.programType} onChange={v => setFilters(f => ({ ...f, programType: v }))} options={[['','Any program'],['bug_bounty','Bug bounty'],['vdp','VDP']]} />
           <Select value={filters.safeHarbor} onChange={v => setFilters(f => ({ ...f, safeHarbor: v }))} options={[['','Any safe harbor'],['full','Full safe harbor'],['partial','Partial safe harbor'],['none','No declared safe harbor'],['declined','Declined']]} />
           <Select value={filters.status} onChange={v => setFilters(f => ({ ...f, status: v }))} options={[['live','Live only'],['','Any status'],['unavailable','Unavailable']]} />
@@ -371,7 +371,7 @@ export default function BountyPrograms() {
               <div className="rounded-lg border border-accent/20 bg-accent/[.06] p-3 text-[11px] text-text-secondary">
                 <p className="font-medium text-accent">Passive discovery + HTTP probe, no brute force.</p>
                 <p className="mt-1">Watch rounds start now and repeat automatically. Network/IP assets are dropped; monitoring is off because the watch round is the monitoring.</p>
-                {skippedNetwork > 0 && <p className="mt-1 text-severity-medium">{skippedNetwork} selected network/IP asset(s) will be dropped.</p>}
+                {skippedNonScannable > 0 && <p className="mt-1 text-severity-medium">{skippedNonScannable} selected network/IP/app-store asset(s) will be dropped.</p>}
               </div>
             ) : (
               <div className="space-y-1"><span className="text-[11px] text-text-muted">Scope monitoring</span><div className="h-9 flex items-center gap-3 rounded-lg border border-border bg-surface-alt px-3"><label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={monitor} onChange={e=>setMonitor(e.target.checked)} className="accent-accent"/>Enabled</label>{monitor && <select value={monitorHours} onChange={e=>setMonitorHours(Number(e.target.value))} className="ml-auto bg-transparent text-xs text-text-primary">{[3,6,12,24,48,168].map(h=><option key={h} value={h} className="bg-surface-3">every {h<24?`${h}h`:`${h/24}d`}</option>)}</select>}</div></div>
@@ -379,7 +379,7 @@ export default function BountyPrograms() {
             {importResult && (
               <div className="rounded-lg border border-severity-low/30 bg-severity-low/[.07] p-3 text-[11px] text-severity-low">
                 Imported <span className="font-semibold">{importResult.name}</span> · {importResult.assets} web asset{importResult.assets === 1 ? '' : 's'}
-                {importResult.skipped > 0 ? ` · ${importResult.skipped} network asset(s) skipped` : ''}
+                {importResult.skipped > 0 ? ` · ${importResult.skipped} non-scannable asset(s) skipped` : ''}
               </div>
             )}
             <div className="rounded-lg border border-accent/20 bg-accent/[.06] p-3 text-[11px] text-text-secondary">Upstream additions are never scanned automatically. Reconner creates a pending scope event for approval. Assets removed or made ineligible are suspended immediately and remain in history.</div>
@@ -440,7 +440,7 @@ export default function BountyPrograms() {
                     <span className="min-w-0 flex-1 truncate text-text-primary" title={r.program_name || r.program_id}>{r.program_name || r.program_id}</span>
                     <span className="max-w-[45%] truncate text-text-muted" title={r.reason}>
                       {r.ok
-                        ? `${r.assets} asset(s)${r.skipped_network ? ` · ${r.skipped_network} network skipped` : ''}`
+                        ? `${r.assets} asset(s)${r.skipped_network ? ` · ${r.skipped_network} network skipped` : ''}${r.skipped_app_store ? ` · ${r.skipped_app_store} app store(s) skipped` : ''}`
                         : (r.reason || 'failed')}
                     </span>
                   </div>

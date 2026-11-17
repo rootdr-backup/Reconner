@@ -303,6 +303,7 @@ export type BulkCreateProjectResult = {
   target_id?: string
   assets?: number
   skipped_network?: number
+  skipped_app_store?: number
   reason?: string
 }
 

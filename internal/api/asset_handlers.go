@@ -186,7 +186,7 @@ func (h *Handler) handleAddAsset(w http.ResponseWriter, r *http.Request) {
 
 func normalizeManualAssetType(explicit, value, kind string) string {
 	t := strings.ToLower(strings.TrimSpace(explicit))
-	allowed := map[string]bool{"domain": true, "url": true, "page": true, "js": true, "wildcard": true, "api": true, "cidr": true, "ip": true, "source_code": true, "android": true, "ios": true, "hardware": true, "other": true}
+	allowed := map[string]bool{"domain": true, "url": true, "page": true, "js": true, "wildcard": true, "api": true, "cidr": true, "ip": true, "source_code": true, "android": true, "ios": true, "hardware": true, "other": true, "app_store": true}
 	if allowed[t] {
 		return t
 	}

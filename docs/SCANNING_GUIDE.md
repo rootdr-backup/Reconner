@@ -23,6 +23,13 @@ Exact page and JavaScript assets preserve their path-level identity. Projects
 containing both web and network scope are scanned one asset at a time so the two
 pipelines cannot be combined accidentally.
 
+App-store and desktop-store listings (`app_store`; Google Play, Apple App Store,
+Microsoft Store, Huawei AppGallery, Steam) are excluded from subdomain
+enumeration and HTTP probing. They stay visible in the bounty catalog as
+references. A project that contains only store assets finishes a watch round
+with zero hosts. Exact hosts and store-specific paths are matched, so a scope of
+`apple.com` or `google.com` still scans normally.
+
 ## Web scan planning
 
 Web profiles are module presets, not claims about coverage completeness.

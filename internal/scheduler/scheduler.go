@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/recon-platform/internal/assets"
 	"github.com/recon-platform/internal/bounty"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
@@ -1979,6 +1980,20 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			"time":      time.Now().Format(time.RFC3339),
 		})
 	}
+	// A store-only project has no scannable DNS roots. Enumerating an empty
+	// root list is pure noise, so drop the module and log once. The rest of
+	// the round still probes any non-store seeds.
+	if len(subdomainRoots) == 0 && containsModule(modules, ModuleSubdomainEnum) {
+		pruned := modules[:0]
+		for _, m := range modules {
+			if m == ModuleSubdomainEnum {
+				continue
+			}
+			pruned = append(pruned, m)
+		}
+		modules = pruned
+		logFn("info", ModuleSubdomainEnum, "subdomain_enum skipped — no scannable web roots (store and app assets excluded)")
+	}
 	// The skipped-module report: a watch round runs two phases, so everything
 	// else in the deep pipeline is SKIPPED. The report is written when the
 	// worker starts the task (not at task creation), so the log always matches
@@ -2466,6 +2481,9 @@ func (s *Scheduler) loadProjectWebSeeds(ctx context.Context, targetID string) []
 		if v == "" || seen[v] {
 			continue
 		}
+		if !assets.IsScannableWebAsset("url", v) {
+			continue
+		}
 		seen[v] = true
 		out = append(out, v)
 	}
@@ -2490,13 +2508,13 @@ func (s *Scheduler) loadSubdomainRoots(ctx context.Context, targetID, fallbackSc
 	if err == nil {
 		for rows.Next() {
 			var value string
-			if rows.Scan(&value) == nil && strings.TrimSpace(value) != "" {
+			if rows.Scan(&value) == nil && strings.TrimSpace(value) != "" && assets.IsScannableWebAsset("domain", value) {
 				values = append(values, value)
 			}
 		}
 		rows.Close()
 	}
-	if len(values) == 0 {
+	if len(values) == 0 && assets.IsScannableWebAsset("domain", fallbackScope) {
 		values = []string{fallbackScope}
 	}
 	return normalizeSubdomainRoots(values)
@@ -2512,6 +2530,9 @@ func normalizeSubdomainRoots(values []string) []string {
 		for _, token := range tokens {
 			raw := strings.TrimSpace(token)
 			if raw == "" {
+				continue
+			}
+			if assets.IsAppStoreAsset(raw) {
 				continue
 			}
 			// Reject network scopes before URL parsing turns 10.0.0.0/24 into
