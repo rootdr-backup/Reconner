@@ -46,6 +46,27 @@ func TestNormalizeSubdomainRootsDropsStoreValues(t *testing.T) {
 	}
 }
 
+func TestWebScopeHostsDropsAppListings(t *testing.T) {
+	cases := []struct {
+		scope string
+		want  []string
+	}{
+		{"play.google.com", nil},
+		{"https://apps.apple.com/us/app/example/id123456789", nil},
+		{"example.com,play.google.com", []string{"example.com"}},
+		{"apple.com,example.com", []string{"apple.com", "example.com"}},
+	}
+	for _, tc := range cases {
+		got := webScopeHosts(tc.scope)
+		if len(got) == 0 && len(tc.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("webScopeHosts(%q)=%v, want %v", tc.scope, got, tc.want)
+		}
+	}
+}
+
 func TestStoreOnlyFallbackScopeReturnsNoRoots(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets (id,domain) VALUES ('sg2','play.google.com')`); err != nil {

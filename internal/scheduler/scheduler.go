@@ -1680,6 +1680,21 @@ func (s *Scheduler) currentCount(table, targetID string, previous int) int {
 	return current
 }
 
+// webScopeHosts splits a scope into hosts and drops every app-listing host.
+// It guards legacy rows whose targets.domain still names a store instead of a
+// web asset, so the web pipeline cannot probe them directly.
+func webScopeHosts(scope string) []string {
+	rawHosts, _ := scanner.SplitScope(scope)
+	hosts := make([]string, 0, len(rawHosts))
+	for _, host := range rawHosts {
+		if assets.IsAppStoreAsset(host) {
+			continue
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
 func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var targetID, modulesJSON, taskStatus, kind, taskType, scopeOverride string
 	var target struct{ Domain string }
@@ -1741,11 +1756,17 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// requiring subdomain enumeration (which runs only when explicitly selected).
 	var webHosts []string
 	if !networkTask {
-		webHosts, _ = scanner.SplitScope(effectiveScope)
+		webHosts = webScopeHosts(effectiveScope)
 	}
 	webPrimary := effectiveScope
-	if len(webHosts) > 0 {
-		webPrimary = webHosts[0]
+	if !networkTask {
+		if len(webHosts) > 0 {
+			webPrimary = webHosts[0]
+		} else {
+			// Every scope host was an app listing. Keep every derived seed empty
+			// so the web pipeline cannot fall back to a store host.
+			webPrimary = ""
+		}
 	}
 	seeded := webHosts
 	if !networkTask && scopeOverride == "" {
@@ -1804,6 +1825,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 	if len(scopeHosts) > 0 {
 		ctx = scanner.WithHostScope(ctx, scopeHosts)
+	} else if !networkTask {
+		// A store-only scope leaves no hosts to probe. An unset scope would let
+		// every DB-reading module fall back to the whole target, so confine the
+		// round to an empty host set instead.
+		ctx = scanner.WithNoHostScope(ctx)
 	}
 	// Parameter/archive collectors accept one root domain at a time. Keep an
 	// explicit root list so a project containing unrelated domains does not run

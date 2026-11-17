@@ -325,6 +325,13 @@ func WithHostScope(ctx context.Context, hosts []string) context.Context {
 	return context.WithValue(ctx, ctxHostScope, set)
 }
 
+// WithNoHostScope confines the scan to an empty host set. An unset scope means
+// "whole target", so an explicit empty map is the only way to make a round with
+// no scannable hosts a true no-op for every DB-reading module.
+func WithNoHostScope(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxHostScope, map[string]bool{})
+}
+
 func hostScopeSet(ctx context.Context) map[string]bool {
 	if v, ok := ctx.Value(ctxHostScope).(map[string]bool); ok {
 		return v
