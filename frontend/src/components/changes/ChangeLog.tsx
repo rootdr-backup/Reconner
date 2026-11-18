@@ -381,15 +381,15 @@ export default function ChangeLog({ targetId, compact }: Props) {
 
       {/* Slim watch round strip. Status word stays visible, not just the dot. */}
       {rounds.length > 0 && (
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-text-muted">Rounds</span>
+        <div className="flex items-center gap-1.5 overflow-x-auto py-1.5">
+          <span className="shrink-0 mr-1 text-[10px] uppercase tracking-wide text-text-muted">Rounds</span>
           {rounds.slice(0, 20).map(r => (
             <button
               key={r.id}
               type="button"
               onClick={() => setSelectedTaskId(prev => prev === r.id ? '' : r.id)}
               className={cn(
-                'shrink-0 rounded-full border px-2.5 py-1 text-[10px] transition',
+                'shrink-0 rounded-full border px-2.5 py-1 text-[11px] transition',
                 selectedTaskId === r.id
                   ? 'border-accent bg-accent/15 text-accent'
                   : 'border-border text-text-muted hover:text-text-primary',
