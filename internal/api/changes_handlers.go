@@ -45,14 +45,14 @@ type WatchRound struct {
 // order in the frontend.
 func changeCategoryExpr(col string) string {
 	return `CASE
-		WHEN ` + col + ` IN ('status_change','http_change','page_change') THEN 'http'
+		WHEN ` + col + ` IN ('status_change','http_change','http_service_removed','page_change') THEN 'http'
 		WHEN ` + col + ` IN ('js_change','css_change')
 		     OR ` + col + ` LIKE 'security:script_%'
 		     OR ` + col + ` LIKE 'security:stylesheet_%' THEN 'scripts'
 		WHEN ` + col + ` LIKE '%header%' THEN 'headers'
 		WHEN ` + col + ` LIKE 'security:%' THEN 'security'
 		WHEN ` + col + ` = 'tech_change' THEN 'tech'
-		WHEN ` + col + ` IN ('new_subdomain','subdomain_removed','scope_landed','scope_re_eligible') THEN 'assets'
+		WHEN ` + col + ` IN ('new_subdomain','subdomain_removed','host_status_change','scope_landed','scope_re_eligible') THEN 'assets'
 		WHEN ` + col + ` IN ('watch_failed','watch_kind_conflict','monitor_failed','monitor_escalation_started','scan_auto_paused') THEN 'alerts'
 		ELSE 'http' END`
 }

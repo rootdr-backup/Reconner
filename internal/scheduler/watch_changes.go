@@ -36,7 +36,7 @@ type watchChange struct {
 func snapshotWatchHTTP(ctx context.Context, db *database.DB, targetID string) (map[string]watchHTTPSnapshot, error) {
 	rows, err := db.QueryContext(ctx, `SELECT COALESCE(url,''), COALESCE(status_code,0),
 		COALESCE(title,''), COALESCE(server,''), COALESCE(technologies,'[]'), COALESCE(redirect_url,'')
-		FROM http_services WHERE target_id=? LIMIT ?`, targetID, watchSnapshotCap)
+		FROM http_services WHERE target_id=? ORDER BY url LIMIT ?`, targetID, watchSnapshotCap)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func snapshotWatchHTTP(ctx context.Context, db *database.DB, targetID string) (m
 
 func snapshotWatchHosts(ctx context.Context, db *database.DB, targetID string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT COALESCE(subdomain,''), COALESCE(is_alive,0)
-		FROM subdomains WHERE target_id=? LIMIT ?`, targetID, watchSnapshotCap)
+		FROM subdomains WHERE target_id=? ORDER BY subdomain LIMIT ?`, targetID, watchSnapshotCap)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 	for url := range before {
 		if _, ok := after[url]; !ok {
 			changes = append(changes, watchChange{
-				URL: url, ChangeType: "subdomain_removed", OldValue: url,
+				URL: url, ChangeType: "http_service_removed", OldValue: url,
 				NewValue: "", Severity: "medium", Metadata: "{}",
 			})
 		}
@@ -151,6 +151,13 @@ func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 	return changes
 }
 
+func watchAliveValue(alive bool) string {
+	if alive {
+		return "alive"
+	}
+	return "dead"
+}
+
 func diffWatchHosts(before, after map[string]bool) []watchChange {
 	changes := make([]watchChange, 0)
 	for host := range before {
@@ -161,11 +168,20 @@ func diffWatchHosts(before, after map[string]bool) []watchChange {
 			})
 		}
 	}
-	for host := range after {
-		if _, ok := before[host]; !ok {
+	for host, alive := range after {
+		wasAlive, existed := before[host]
+		if !existed {
 			changes = append(changes, watchChange{
 				URL: host, ChangeType: "new_subdomain", OldValue: "",
 				NewValue: host, Severity: "medium", Metadata: "{}",
+			})
+			continue
+		}
+		if wasAlive != alive {
+			changes = append(changes, watchChange{
+				URL: host, ChangeType: "host_status_change",
+				OldValue: watchAliveValue(wasAlive), NewValue: watchAliveValue(alive),
+				Severity: "medium", Metadata: "{}",
 			})
 		}
 	}

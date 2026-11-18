@@ -706,6 +706,13 @@ export default function TargetDetail() {
 
   const loadTab = async (t: string) => {
     if (!id) return
+    if (t === 'monitor') {
+      // ChangesExplorer owns its data and loading state. Never set the generic
+      // table's data or skeleton for this tab.
+      setTabLoading(false)
+      setData([])
+      return
+    }
     setTabLoading(true)
     try {
       let r: unknown[] = []
@@ -1255,10 +1262,12 @@ export default function TargetDetail() {
       <div className="card overflow-hidden" style={{ padding: 0 }}>
         {tabLoading
           ? <div className="py-2"><SkeletonRows rows={8} cols={5} /></div>
-          : data.length === 0
-            ? <Empty message={tab === 'cameras' ? 'No legacy camera/DVR results are stored for this project. Network execution is unavailable in this build.' : 'No data found'} />
-            : tab === 'cameras'
-            ? (
+          : tab === 'monitor'
+            ? <ChangesExplorer key={id} targetId={id!} compact />
+            : data.length === 0
+              ? <Empty message={tab === 'cameras' ? 'No legacy camera/DVR results are stored for this project. Network execution is unavailable in this build.' : 'No data found'} />
+              : tab === 'cameras'
+              ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 p-4">
                 {(pageData as IngramCamera[]).map(cam => (
                   <div key={cam.id} className="border border-border rounded-lg overflow-hidden bg-bg-secondary/40 flex flex-col">
@@ -1287,9 +1296,7 @@ export default function TargetDetail() {
                   </div>
                 ))}
               </div>
-            )
-            : (tab === 'monitor'
-              ? <ChangesExplorer targetId={id!} compact />
+              )
               : (
               <>
               <div className="overflow-x-auto">
@@ -1704,7 +1711,7 @@ export default function TargetDetail() {
                 </table>
               </div>
               </>
-              ))}
+              )}
         {!tabLoading && footerHasMore && (
           <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
             <span className="text-text-muted">

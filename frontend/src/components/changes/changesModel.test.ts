@@ -93,6 +93,10 @@ describe('parseStatusTransition', () => {
     expect(parseStatusTransition('301', '302')).toEqual({ oldCode: 301, newCode: 302 })
   })
 
+  it('prefers the explicit status code over an earlier bare number', () => {
+    expect(parseStatusTransition('2026-01-02 status=403', '2026-01-02 status=200')).toEqual({ oldCode: 403, newCode: 200 })
+  })
+
   it('returns undefined when no code is present', () => {
     expect(parseStatusTransition('title changed', 'new title')).toEqual({ oldCode: undefined, newCode: undefined })
   })

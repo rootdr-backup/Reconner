@@ -17,12 +17,14 @@ export const CHANGE_FILTERS: { id: ChangeFilter; label: string }[] = [
 export const CATEGORY_BY_TYPE: Record<string, ChangeCategory> = {
   status_change: 'http',
   http_change: 'http',
+  http_service_removed: 'http',
   page_change: 'http',
   js_change: 'scripts',
   css_change: 'scripts',
   tech_change: 'tech',
   new_subdomain: 'assets',
   subdomain_removed: 'assets',
+  host_status_change: 'assets',
   scope_landed: 'assets',
   scope_re_eligible: 'assets',
   security_header_removed: 'headers',
@@ -99,9 +101,10 @@ export function groupMonitorChanges<T extends ChangeLike>(rows: T[], identity: G
 }
 
 export function parseStatusTransition(oldValue: string, newValue: string): { oldCode?: number; newCode?: number } {
-  const re = /(?:status=)?([1-5]\d{2})/
   const pick = (value: string) => {
-    const match = re.exec(value || '')
+    const text = value || ''
+    const explicit = /(?:^|[\s,])status=(\d{3})(?!\d)/.exec(text)
+    const match = explicit || /\b([1-5]\d{2})\b/.exec(text)
     if (!match) return undefined
     const code = Number(match[1])
     return Number.isFinite(code) ? code : undefined

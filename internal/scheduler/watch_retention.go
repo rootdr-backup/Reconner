@@ -54,7 +54,7 @@ func (s *Scheduler) pruneWatchChangeRows() {
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		_, err := s.db.Exec(`DELETE FROM watch_round_changes
-			WHERE COALESCE(detected_at,CURRENT_TIMESTAMP) < datetime('now','-' || ? || ' days')`, days)
+			WHERE detected_at IS NULL OR detected_at < datetime('now','-' || ? || ' days')`, days)
 		if err == nil {
 			return
 		}

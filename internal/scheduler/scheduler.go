@@ -1695,6 +1695,14 @@ func webScopeHosts(scope string) []string {
 	return hosts
 }
 
+// shouldWriteWatchDiff gates the audit write for one watch phase. finishPhase
+// cancels the phase context, so callers must pass the error captured before
+// teardown in modCtxErr. Reading modCtx.Err() after finishPhase always sees
+// context.Canceled and silently drops every diff.
+func shouldWriteWatchDiff(taskType string, skipped, timedOut bool, phaseErr, modCtxErr error, ready bool) bool {
+	return taskType == watchScanType && !skipped && !timedOut && phaseErr == nil && modCtxErr == nil && ready
+}
+
 func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var targetID, modulesJSON, taskStatus, kind, taskType, scopeOverride string
 	var target struct{ Domain string }
@@ -2069,6 +2077,9 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					s.logger.Warn("watch changes: before HTTP snapshot failed", "error", err)
 				} else {
 					beforeHTTP = snap
+					if len(snap) == watchSnapshotCap {
+						s.logger.Warn("watch changes: HTTP snapshot capped; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+					}
 				}
 			case ModuleSubdomainEnum:
 				snap, err := snapshotWatchHosts(moduleCtx, s.db, targetID)
@@ -2076,6 +2087,9 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					s.logger.Warn("watch changes: before host snapshot failed", "error", err)
 				} else {
 					beforeHosts = snap
+					if len(snap) == watchSnapshotCap {
+						s.logger.Warn("watch changes: host snapshot capped; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+					}
 				}
 			}
 		}
@@ -2103,6 +2117,9 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				} else if beforeHTTP != nil {
 					afterHTTP = snap
 					watchDiffReady = true
+					if len(snap) == watchSnapshotCap {
+						s.logger.Warn("watch changes: HTTP snapshot capped after probe; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+					}
 				}
 			case ModuleSubdomainEnum:
 				snap, snapErr := snapshotWatchHosts(moduleCtx, s.db, targetID)
@@ -2111,6 +2128,9 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				} else if beforeHosts != nil {
 					afterHosts = snap
 					watchDiffReady = true
+					if len(snap) == watchSnapshotCap {
+						s.logger.Warn("watch changes: host snapshot capped after probe; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+					}
 				}
 			}
 		}
@@ -2366,9 +2386,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		if forced {
 			logFn("warn", "scheduler", fmt.Sprintf("Phase %q did not stop within %s after cancellation; force-released scheduler ownership.", module, phaseStopGrace))
 		}
+		// finishPhase cancels modCtx. Capture its state before teardown, or every
+		// clean phase looks cancelled and the diff hook never runs.
+		modCtxErr := modCtx.Err()
 		skipped, timedOut := finishPhase()
 		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
-		if taskType == watchScanType && !skipped && !timedOut && err == nil && modCtx.Err() == nil && watchDiffReady {
+		if shouldWriteWatchDiff(taskType, skipped, timedOut, err, modCtxErr, watchDiffReady) {
 			switch watchDiffModule {
 			case ModuleHTTPProbe:
 				s.insertWatchRoundChanges(ctx, taskID, targetID, diffWatchHTTP(beforeHTTP, afterHTTP))

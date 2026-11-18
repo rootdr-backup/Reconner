@@ -42,7 +42,9 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
 async function fetchAllPaged<T>(path: string, extra?: Record<string, string>): Promise<T[]> {
   const pageSize = 500
   let page = 1
+  let fetched = 0
   const all: T[] = []
+  const seen = new Set<string>()
   for (;;) {
     const qs = new URLSearchParams({ ...(extra || {}), page: String(page), limit: String(pageSize) })
     const res = await fetch(`${BASE}${path}?${qs.toString()}`, {
@@ -57,15 +59,27 @@ async function fetchAllPaged<T>(path: string, extra?: Record<string, string>): P
     }
     const json = text ? JSON.parse(text) : {}
     const data: T[] = (json && Array.isArray(json.data)) ? json.data : []
-    all.push(...data)
-    const total = (json && typeof json.total === 'number') ? json.total : all.length
-    if (data.length === 0 || all.length >= total) break
+    fetched += data.length
+    for (const row of data) {
+      const id = (row as { id?: unknown } | null)?.id
+      if (id === undefined || id === null) {
+        all.push(row)
+        continue
+      }
+      const key = String(id)
+      if (!seen.has(key)) {
+        seen.add(key)
+        all.push(row)
+      }
+    }
+    const total = (json && typeof json.total === 'number') ? json.total : fetched
+    if (data.length === 0 || fetched >= total) break
     page++
     if (page > 200) {
       // Hard safety stop: 200 * 500 = 100k rows. Never truncate silently — a
       // short Changes/URLs list must at least be visible in the console.
-      if (all.length < total) {
-        console.warn(`[api] ${path}: stopped at ${all.length}/${total} rows (200-page cap)`)
+      if (fetched < total) {
+        console.warn(`[api] ${path}: stopped at ${fetched}/${total} rows (200-page cap)`)
       }
       break
     }

@@ -33,7 +33,7 @@ const EMPTY_BY_TAB: Record<Subtab, string> = {
   http: 'No HTTP or status changes detected.',
   scripts: 'No script diffs. Watch rounds do not fetch JavaScript; run a deep scan to track script drift.',
   assets: 'No new hosts or scope landings.',
-  alerts: 'No notifications in this bucket.',
+  alerts: 'No alert-category changes detected.',
 }
 
 function SourceBadge({ source }: { source: string }) {
@@ -184,6 +184,7 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
   const [expanded, setExpanded] = useState<Map<string, number>>(new Map())
   const [diffView, setDiffView] = useState<DiffView | null>(null)
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const requestSeq = useRef(0)
 
   useEffect(() => {
     if (targetId) return
@@ -192,11 +193,14 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
     return () => { alive = false }
   }, [targetId])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (resetView = false) => {
+    const seq = ++requestSeq.current
     setLoading(true)
     setError('')
-    setVisibleCount(PAGE)
-    setExpanded(new Map())
+    if (resetView) {
+      setVisibleCount(PAGE)
+      setExpanded(new Map())
+    }
     const params: Record<string, string> = {}
     if (category !== 'all') params.category = category
     if (severity) params.severity = severity
@@ -210,16 +214,18 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
         targetId ? changes.forTarget(targetId, params) : changes.list(params),
         watchApi.rounds(globalTarget ? { target_id: globalTarget } : targetId ? { target_id: targetId } : {}),
       ])
+      if (seq !== requestSeq.current) return
       setRows(changeRows)
       setRounds(roundRows)
     } catch (e) {
+      if (seq !== requestSeq.current) return
       setError(e instanceof Error ? e.message : 'Failed to load changes')
     } finally {
-      setLoading(false)
+      if (seq === requestSeq.current) setLoading(false)
     }
   }, [targetId, category, severity, source, since, selectedTaskId, selectedTargetId])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { void load(true) }, [load])
 
   useEffect(() => {
     const schedule = () => {

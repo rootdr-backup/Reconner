@@ -39,6 +39,7 @@ export default function RoundTimeline({ rounds, selectedTaskId, onSelect, compac
           )}
         >
           <span className={cn(TASK_STATUS_DOT[round.status] || 'dot-offline')} />
+          <span className="shrink-0 text-[10px] uppercase text-text-muted">{round.status || 'unknown'}</span>
           <span className="min-w-0 flex-1">
             <span className="block truncate font-medium text-text-primary">{round.target_name || round.target_id}</span>
             <span className="block text-xs text-text-muted">{timeAgo(round.started_at)} · {duration(round)}</span>

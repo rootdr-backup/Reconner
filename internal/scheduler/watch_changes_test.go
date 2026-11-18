@@ -75,8 +75,8 @@ func TestDiffWatchHTTPOtherChanges(t *testing.T) {
 	}
 
 	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{})
-	if len(got) != 1 || got[0].ChangeType != "subdomain_removed" || got[0].Severity != "medium" {
-		t.Fatalf("removed url: got %+v, want medium subdomain_removed", got)
+	if len(got) != 1 || got[0].ChangeType != "http_service_removed" || got[0].Severity != "medium" {
+		t.Fatalf("removed url: got %+v, want medium http_service_removed", got)
 	}
 
 	got = diffWatchHTTP(map[string]watchHTTPSnapshot{}, map[string]watchHTTPSnapshot{base.URL: base})
@@ -203,5 +203,43 @@ func TestPruneWatchChangeRowsUsesGlobalWindow(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != "new" {
 		t.Fatalf("remaining ids = %v, want [new]", ids)
+	}
+}
+
+func TestFinishPhaseCancelsPhaseContext(t *testing.T) {
+	s := newTestScheduler(t)
+	modCtx, finish := s.beginPhase(context.Background(), "task-phase-cancel", time.Minute)
+	if err := modCtx.Err(); err != nil {
+		t.Fatalf("phase context already done before finish: %v", err)
+	}
+	_, _ = finish()
+	if err := modCtx.Err(); err == nil {
+		t.Fatal("finishPhase must cancel the phase context")
+	}
+}
+
+func TestShouldWriteWatchDiffGates(t *testing.T) {
+	if !shouldWriteWatchDiff(watchScanType, false, false, nil, nil, true) {
+		t.Fatal("clean watch phase must write a diff")
+	}
+	// Reading modCtx.Err() after finishPhase returns context.Canceled. The gate
+	// must reject that value so it never silently drops a clean diff.
+	if shouldWriteWatchDiff(watchScanType, false, false, nil, context.Canceled, true) {
+		t.Fatal("cancelled phase context must not write a diff")
+	}
+	if shouldWriteWatchDiff("monitor_watch", false, false, nil, nil, true) {
+		t.Fatal("monitor_watch must not write a watch diff")
+	}
+	if shouldWriteWatchDiff(watchScanType, true, false, nil, nil, true) {
+		t.Fatal("skipped phase must not write a diff")
+	}
+	if shouldWriteWatchDiff(watchScanType, false, true, nil, nil, true) {
+		t.Fatal("timed-out phase must not write a diff")
+	}
+	if shouldWriteWatchDiff(watchScanType, false, false, context.Canceled, nil, true) {
+		t.Fatal("failed phase must not write a diff")
+	}
+	if shouldWriteWatchDiff(watchScanType, false, false, nil, nil, false) {
+		t.Fatal("missing snapshots must not write a diff")
 	}
 }

@@ -133,6 +133,16 @@ type scanConfigPayload struct {
 // and which nuclei templates run (extra repos to clone + template IDs to
 // exclude). This is the "how is nuclei running / how do I change the templates
 // and resolvers" surface.
+// pruneWatchChangeRows falls back to 180 for a missing or invalid value. Report
+// the same effective value in the System panel so the UI never shows 0 while the
+// retention job keeps 180 days.
+func effectiveWatchChangesRetentionDays(days int) int {
+	if days <= 0 {
+		return 180
+	}
+	return days
+}
+
 func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 	h.writeSuccess(w, scanConfigPayload{
 		DNSResolvers:                  h.cfg.DNSResolvers,
@@ -152,7 +162,7 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		WatchEnumerationSources:       h.cfg.WatchEnumerationSources,
 		WatchRowsRetentionDays:        h.cfg.WatchRowsRetentionDays,
 		WatchScopeEventsRetentionDays: h.cfg.WatchScopeEventsRetentionDays,
-		WatchChangesRetentionDays:     h.cfg.WatchChangesRetentionDays,
+		WatchChangesRetentionDays:     effectiveWatchChangesRetentionDays(h.cfg.WatchChangesRetentionDays),
 		WatchNotifyHostCap:            h.cfg.WatchNotifyHostCap,
 		WatchFailLimit:                h.cfg.WatchFailLimit,
 		WatchModuleSet:                []string{"subdomain_enum", "http_probe"},

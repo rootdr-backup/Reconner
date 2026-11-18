@@ -17,6 +17,7 @@ export default function ScopeEventsPanel({ targetId }: Props) {
 
   const load = useCallback(async () => {
     if (!targetId) return
+    setError('')
     try {
       const [landed, scope] = await Promise.all([
         targetsApi.watchScopeEvents(targetId),
@@ -62,7 +63,12 @@ export default function ScopeEventsPanel({ targetId }: Props) {
     return <p className="px-3 py-6 text-center text-sm text-text-muted">Select a target to see its scope events.</p>
   }
   if (error) {
-    return <p className="px-3 py-6 text-center text-sm text-severity-medium">{error}</p>
+    return (
+      <div className="flex flex-col items-center gap-2 px-3 py-6 text-center">
+        <p className="text-sm text-severity-medium">{error}</p>
+        <Button size="sm" variant="ghost" onClick={() => void load()}>Retry</Button>
+      </div>
+    )
   }
 
   return (
