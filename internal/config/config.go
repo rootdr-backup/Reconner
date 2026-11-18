@@ -322,6 +322,9 @@ type Config struct {
 	// WatchScopeEventsRetentionDays is how long the watch_scope_events audit
 	// trail (one row per landed host) is kept. Default 180 days.
 	WatchScopeEventsRetentionDays int `json:"watch_scope_events_retention_days"`
+	// WatchChangesRetentionDays is how long the watch_round_changes audit trail
+	// is kept. It survives finished-task pruning. Default 180 days.
+	WatchChangesRetentionDays int `json:"watch_changes_retention_days"`
 	// WatchNotifyHostCap caps how many host names ONE grouped scope-landed
 	// message lists. The total count is always shown. Default 20.
 	WatchNotifyHostCap int `json:"watch_notify_host_cap"`
@@ -643,6 +646,7 @@ func defaultConfig() *Config {
 		WatchEnumerationSources:       []string{"subfinder", "assetfinder", "chaos", "findomain"},
 		WatchRowsRetentionDays:        30,  // raw watch rows survive this long
 		WatchScopeEventsRetentionDays: 180, // the landing audit trail survives this long
+		WatchChangesRetentionDays:     180, // the per-round change audit trail survives task pruning
 		WatchNotifyHostCap:            20,  // host names listed in one grouped message
 		WatchFailLimit:                3,   // consecutive failed rounds stop the chain
 		ChaosAPIKey:                   "",  // projectdiscovery key for chaos/subfinder; empty ⇒ chaos skipped

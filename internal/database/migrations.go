@@ -173,6 +173,7 @@ func RunMigrations(db *DB) error {
 		alterTargetsAddWatchRootIndex,
 		alterTargetsAddWatchPaused,
 		createWatchScopeEventsTable,
+		createWatchRoundChangesTable,
 		createWatchTierIndexes,
 		alterTelegramChatsAddWatchPrefs,
 	}
@@ -1900,6 +1901,29 @@ CREATE TABLE IF NOT EXISTS watch_scope_events (
 );
 CREATE INDEX IF NOT EXISTS idx_watch_scope_events_target ON watch_scope_events(target_id, detected_at);
 CREATE INDEX IF NOT EXISTS idx_watch_scope_events_announced ON watch_scope_events(announced);`
+
+// createWatchRoundChangesTable is the long-lived audit trail for watch breadth
+// rounds. A watch round writes before/after snapshots here because the cheap
+// watch module set never runs the monitor diff engine. task_id has no foreign
+// key: finished watch tasks are pruned after 90 days, but this trail stays for
+// 180 days.
+const createWatchRoundChangesTable = `
+CREATE TABLE IF NOT EXISTS watch_round_changes (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	url TEXT NOT NULL DEFAULT '',
+	change_type TEXT NOT NULL,
+	old_value TEXT NOT NULL DEFAULT '',
+	new_value TEXT NOT NULL DEFAULT '',
+	severity TEXT NOT NULL DEFAULT 'info',
+	metadata TEXT NOT NULL DEFAULT '{}',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_target_time ON watch_round_changes(target_id, detected_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_task ON watch_round_changes(task_id, detected_at);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_type_time ON watch_round_changes(change_type, detected_at DESC);`
 
 // createWatchTierIndexes serves the watch workload: the scheduler lists tasks
 // by type and status, the task list pages per target, and the Projects filter

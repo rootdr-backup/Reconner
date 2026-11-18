@@ -325,6 +325,36 @@ export interface MonitoringChange {
   detected_at: string
 }
 
+export type ChangeCategory =
+  | 'http' | 'scripts' | 'security' | 'tech' | 'headers' | 'assets' | 'alerts'
+
+export interface ChangeEntry {
+  id: string
+  source: 'monitor' | 'watch' | 'scope' | 'notification'
+  target_id: string
+  target_name: string
+  task_id?: string
+  url: string
+  change_type: string
+  category: ChangeCategory
+  severity: string
+  old_value: string
+  new_value: string
+  metadata?: Record<string, unknown>
+  detected_at: string
+}
+
+export interface WatchRound {
+  id: string
+  target_id: string
+  target_name: string
+  status: string
+  error: string
+  started_at: string
+  finished_at: string
+  change_count: number
+}
+
 // Body of a monitored file (css_files / js_files) as captured by the monitor
 // pass when the change was detected — see GET /targets/{id}/css-files/body.
 export interface FileBodyResponse {

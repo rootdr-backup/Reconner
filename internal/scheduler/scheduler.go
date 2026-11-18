@@ -2035,6 +2035,14 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		}
 	}
 
+	// Watch rounds write a cheap before/after diff for their two modules. The
+	// closure only captures snapshots; the outer loop inserts rows after
+	// finishPhase() confirms the phase really ran.
+	var beforeHTTP, afterHTTP map[string]watchHTTPSnapshot
+	var beforeHosts, afterHosts map[string]bool
+	var watchDiffModule string
+	var watchDiffReady bool
+
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
 		moduleCtx = scanner.WithCoverageReporter(moduleCtx, func(metric scanner.CoverageMetric, delta int64) {
 			column := map[scanner.CoverageMetric]string{
@@ -2050,17 +2058,63 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			// parameterized. SQLite serializes the small atomic phase-ledger updates.
 			_, _ = s.db.Exec(`UPDATE task_phases SET `+column+`=`+column+`+?,updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=?`, delta, taskID, module)
 		})
+
+		if taskType == watchScanType {
+			watchDiffModule = module
+			watchDiffReady = false
+			switch module {
+			case ModuleHTTPProbe:
+				snap, err := snapshotWatchHTTP(moduleCtx, s.db, targetID)
+				if err != nil {
+					s.logger.Warn("watch changes: before HTTP snapshot failed", "error", err)
+				} else {
+					beforeHTTP = snap
+				}
+			case ModuleSubdomainEnum:
+				snap, err := snapshotWatchHosts(moduleCtx, s.db, targetID)
+				if err != nil {
+					s.logger.Warn("watch changes: before host snapshot failed", "error", err)
+				} else {
+					beforeHosts = snap
+				}
+			}
+		}
+
+		var err error
 		switch module {
 		case ModuleSubdomainEnum:
-			return runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
+			err = runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
 				return s.runModule(moduleCtx, module, targetID, root, logFn)
 			})
 		case ModuleParamDiscovery, ModuleTimeMachine:
-			return runWebRootFanout(moduleCtx, module, webRoots, logFn, func(rootCtx context.Context, root string) error {
+			err = runWebRootFanout(moduleCtx, module, webRoots, logFn, func(rootCtx context.Context, root string) error {
 				return s.runModule(rootCtx, module, targetID, root, logFn)
 			})
+		default:
+			err = s.runModule(moduleCtx, module, targetID, domainFor(module), logFn)
 		}
-		return s.runModule(moduleCtx, module, targetID, domainFor(module), logFn)
+
+		if taskType == watchScanType && err == nil {
+			switch module {
+			case ModuleHTTPProbe:
+				snap, snapErr := snapshotWatchHTTP(moduleCtx, s.db, targetID)
+				if snapErr != nil {
+					s.logger.Warn("watch changes: after HTTP snapshot failed", "error", snapErr)
+				} else if beforeHTTP != nil {
+					afterHTTP = snap
+					watchDiffReady = true
+				}
+			case ModuleSubdomainEnum:
+				snap, snapErr := snapshotWatchHosts(moduleCtx, s.db, targetID)
+				if snapErr != nil {
+					s.logger.Warn("watch changes: after host snapshot failed", "error", snapErr)
+				} else if beforeHosts != nil {
+					afterHosts = snap
+					watchDiffReady = true
+				}
+			}
+		}
+		return err
 	}
 
 	// Tool availability audit: log exactly which external tools are present vs
@@ -2314,6 +2368,15 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		}
 		skipped, timedOut := finishPhase()
 		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
+		if taskType == watchScanType && !skipped && !timedOut && err == nil && modCtx.Err() == nil && watchDiffReady {
+			switch watchDiffModule {
+			case ModuleHTTPProbe:
+				s.insertWatchRoundChanges(ctx, taskID, targetID, diffWatchHTTP(beforeHTTP, afterHTTP))
+			case ModuleSubdomainEnum:
+				s.insertWatchRoundChanges(ctx, taskID, targetID, diffWatchHosts(beforeHosts, afterHosts))
+			}
+			beforeHTTP, afterHTTP, beforeHosts, afterHosts, watchDiffModule, watchDiffReady = nil, nil, nil, nil, "", false
+		}
 		s.finishTaskPhase(taskID, module, phaseStatus, phaseReason, time.Since(phaseStartedAt))
 		if s.notifier != nil && taskType != watchScanType {
 			s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, module, phaseStatus, time.Since(phaseStartedAt), s.terminalTaskPhaseCount(taskID), len(modules))

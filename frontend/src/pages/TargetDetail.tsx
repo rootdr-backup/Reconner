@@ -1,100 +1,27 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi } from '../lib/api'
-import type { WatchScopeEvent } from '../lib/api'
 import { useUIStore } from '../store/ui'
 import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows, Modal } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { EvidenceViewer } from '../components/targets/EvidenceViewer'
-import { ChangeDiffViewer } from '../components/targets/ChangeDiffViewer'
 import { LiveResults } from '../components/targets/LiveResults'
+import ChangesExplorer from '../components/changes/ChangesExplorer'
 import { ws } from '../lib/websocket'
 import { timeAgo, timeUntil, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
-  DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent, NetworkService
+  DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent, NetworkService
 } from '../types'
 
 const isScannableProjectAsset = (asset: Asset) =>
 	(asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')) ||
 	(asset.kind === 'network' && ['ip', 'cidr'].includes(asset.asset_type || 'ip'))
 
-// Changes(/monitor) tab: filter buckets for the noise chips. The stylesheet
-// content tracker (css_change + security:stylesheet_*) turned this tab into a
-// steady stream; the chips let an operator pull one signal back out of it.
-type ChangeFilter = 'all' | 'security' | 'scripts' | 'css' | 'http' | 'tech' | 'headers'
-const CHANGE_FILTERS: { id: ChangeFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'security', label: 'Security' },
-  { id: 'scripts', label: 'Scripts' },
-  { id: 'css', label: 'Stylesheets' },
-  { id: 'http', label: 'HTTP' },
-  { id: 'tech', label: 'Tech' },
-  { id: 'headers', label: 'Headers' },
-]
-
-// Bucket order matters: the stylesheet/script markers win before the generic
-// "security:" prefix, so a security:stylesheet_* row lands in Stylesheets (not
-// Security), a security:script_* row in Scripts, and header removals in Headers.
-export const monitorRowKind = (c: MonitoringChange): ChangeFilter => {
-  // One render can hold rows from the PREVIOUS tab while the next tab's fetch
-  // is in flight (data is replaced only after the request resolves). Never
-  // assume the row really is a monitoring_changes row.
-  const ct = typeof c?.change_type === 'string' ? c.change_type : ''
-  if (ct === 'css_change' || ct.includes('stylesheet')) return 'css'
-  if (ct === 'js_change' || ct.includes('script')) return 'scripts'
-  if (ct.includes('header')) return 'headers'
-  if (ct.startsWith('security')) return 'security'
-  if (ct === 'tech_change') return 'tech'
-  return 'http'
-}
-
-// Badge color follows the stored severity (rows written since the severity
-// column carry one); older rows without it keep the old type-based estimate.
-export const changeBadgeVariant = (c: { severity?: string; change_type?: string }): 'high' | 'medium' | 'low' | 'info' => {
-  const sev = (c.severity || '').toLowerCase()
-  if (sev === 'high' || sev === 'medium' || sev === 'low' || sev === 'info') return sev
-  // Same stale-row hazard as monitorRowKind: the badge must render even when a
-  // previous tab's row is briefly shown under the Changes tab.
-  const ct = typeof c.change_type === 'string' ? c.change_type : ''
-  return ct === 'js_change' ? 'medium'
-    : ct.startsWith('security') || ct.includes('header') ? 'high'
-    : ct === 'tech_change' ? 'low'
-    : 'info'
-}
-
-// Changes-tab grouping: one row per (change_type, old_value, new_value), with
-// every occurrence kept for the expandable detail list. The key is stable
-// across refreshes, so an expanded group stays open when a live update makes a
-// newer row the representative.
-export interface MonitorChangeGroup {
-  key: string
-  rep: MonitoringChange
-  items: MonitoringChange[]
-  urls: string[]
-}
-
-// Bounds how many occurrence rows mount at once. A noisy target can repeat the
-// same change thousands of times; expanding all of them in one render freezes
-// the tab. The expansion footer pages through the rest.
-const OCCURRENCE_PAGE_SIZE = 200
-
-export function groupMonitorChanges(rows: MonitoringChange[]): MonitorChangeGroup[] {
-  const groups = new Map<string, MonitorChangeGroup>()
-  for (const c of rows) {
-    const key = `${c.change_type}\u0000${c.old_value}\u0000${c.new_value}`
-    const g = groups.get(key)
-    // Keep every occurrence, not just distinct URLs: the same URL can emit the
-    // same change more than once, and the old "+N more URLs" label hid those
-    // repeats entirely.
-    if (g) g.items.push(c)
-    else groups.set(key, { key, rep: c, items: [c], urls: [] })
-  }
-  for (const g of groups.values()) {
-    g.urls = [...new Set(g.items.map(i => i.url))]
-  }
-  return [...groups.values()]
-}
+// Changes helpers moved to a shared module. Re-export the names the legacy
+// tests import from this page.
+export { monitorRowKind, changeBadgeVariant, groupMonitorChanges } from '../components/changes/changesModel'
+export type { MonitorChangeGroup } from '../components/changes/changesModel'
 
 // Projects created from the WP Scanner page carry this tag (see WPScanner.tsx) —
 // the same signal used there to decide this is a WordPress project, reused here
@@ -555,12 +482,6 @@ export default function TargetDetail() {
   const [scopeTab, setScopeTab] = useState<'pending' | 'approved' | 'rejected'>('pending')
   const [eventBusy, setEventBusy] = useState<string | null>(null)
   const [evidence, setEvidence] = useState<{ id: string; url: string; type: string } | null>(null)
-  // Changes-tab noise filter + the open content-diff drawer (css/js rows).
-  const [changeFilter, setChangeFilter] = useState<ChangeFilter>('all')
-  // Changes tab: group key -> how many occurrence rows are currently mounted.
-  // Presence in the map means the group is expanded.
-  const [expandedOccurrences, setExpandedOccurrences] = useState<Map<string, number>>(new Map())
-  const [diffView, setDiffView] = useState<{ url: string; kind: 'css' | 'js' } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
   const [catchallSaving, setCatchallSaving] = useState(false)
@@ -568,7 +489,6 @@ export default function TargetDetail() {
   const [coverageDialogOpen, setCoverageDialogOpen] = useState(false)
   const [coverageChoice, setCoverageChoice] = useState<'deep' | 'breadth'>('breadth')
   const [coverageBusy, setCoverageBusy] = useState(false)
-  const [watchScopeEvents, setWatchScopeEvents] = useState<WatchScopeEvent[]>([])
   const [paths, setPaths] = useState<AttackPath[]>([])
   const [lastFailedTask, setLastFailedTask] = useState<Task | null>(null)
   const [resuming, setResuming] = useState(false)
@@ -587,7 +507,6 @@ export default function TargetDetail() {
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
-    loadWatchScope()
     bountyApi.events(id).then(e => setScopeEvents(e || [])).catch(() => {})
   }, [id])
 
@@ -760,8 +679,6 @@ export default function TargetDetail() {
         const code = Number((row as { status_code?: number })?.status_code || 0)
         return Math.floor(code / 100) === Number(statusClass)
       })
-    : (tab === 'monitor' && changeFilter !== 'all')
-    ? (data as MonitoringChange[]).filter(row => monitorRowKind(row) === changeFilter)
     : data
   // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
   const pageData = filteredData.slice(0, visibleCount)
@@ -778,46 +695,14 @@ export default function TargetDetail() {
   // more hooks than during the previous render" invariant (crashed the whole
   // page in production the moment the target finished loading).
   const isVulnTab = tab === 'vulns' || tab === 'candidates'
-  const isMonitorTab = tab === 'monitor'
   const vulnGroups = useMemo(
     () => (isVulnTab ? groupVulnFindings(filteredData as VulnFinding[]) : []),
     [isVulnTab, filteredData]
   )
-  // Changes tab: dedupe the FULL dataset once, not just the windowed rows.
-  // Grouping inside the table meant the chip counts, the "+N more URLs" labels
-  // and the footer disagreed, and they changed as you loaded more rows.
-  const monitorGroups = useMemo(() => {
-    if (!isMonitorTab) return [] as MonitorChangeGroup[]
-    return groupMonitorChanges(data as MonitoringChange[])
-  }, [isMonitorTab, data])
-  // Chip counts: distinct groups (what the table shows) plus raw row counts
-  // (tooltip), so "HTTP 18" and "58 changes" are both visible and explained.
-  const monitorCounts = useMemo(() => {
-    const groups: Record<string, number> = { all: monitorGroups.length }
-    const raw: Record<string, number> = { all: isMonitorTab ? (data as MonitoringChange[]).length : 0 }
-    if (isMonitorTab) {
-      for (const g of monitorGroups) {
-        const k = monitorRowKind(g.rep)
-        groups[k] = (groups[k] || 0) + 1
-      }
-      for (const row of (data as MonitoringChange[])) {
-        const k = monitorRowKind(row)
-        raw[k] = (raw[k] || 0) + 1
-      }
-    }
-    return { groups, raw }
-  }, [isMonitorTab, monitorGroups, data])
-  const monitorFilteredGroups = useMemo(
-    () => (isMonitorTab && changeFilter !== 'all'
-      ? monitorGroups.filter(g => monitorRowKind(g.rep) === changeFilter)
-      : monitorGroups),
-    [isMonitorTab, monitorGroups, changeFilter]
-  )
   const vulnGroupPage = vulnGroups.slice(0, visibleCount)
-  const monitorGroupPage = monitorFilteredGroups.slice(0, visibleCount)
-  const footerShownCount = isVulnTab ? vulnGroupPage.length : isMonitorTab ? monitorGroupPage.length : pageData.length
-  const footerTotalCount = isVulnTab ? vulnGroups.length : isMonitorTab ? monitorFilteredGroups.length : filteredData.length
-  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : isMonitorTab ? monitorFilteredGroups.length > visibleCount : hasMore
+  const footerShownCount = isVulnTab ? vulnGroupPage.length : pageData.length
+  const footerTotalCount = isVulnTab ? vulnGroups.length : filteredData.length
+  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : hasMore
 
   const loadTab = async (t: string) => {
     if (!id) return
@@ -854,7 +739,6 @@ export default function TargetDetail() {
         r = all.filter(f => want.has(f.type))
       }
       else if (t === 'cameras') r = await findingsApi.ingram(id)
-      else if (t === 'monitor') r = await findingsApi.monitoringChanges(id)
       setData(r || [])
       setVisibleCount(PAGE)
     } catch { setData([]) }
@@ -928,7 +812,6 @@ export default function TargetDetail() {
       } : prev)
       addToast('success', toBreadth ? 'Project switched to breadth watch' : 'Project switched to deep scan')
       setCoverageDialogOpen(false)
-      if (toBreadth) loadWatchScope()
     } catch (e) {
       addToast('error', e instanceof Error ? e.message : 'Could not change coverage')
     } finally { setCoverageBusy(false) }
@@ -942,26 +825,6 @@ export default function TargetDetail() {
       addToast('success', paused ? 'Watching paused' : 'Watching resumed')
     } catch (e) {
       addToast('error', e instanceof Error ? e.message : 'Could not change the watch state')
-    }
-  }
-
-  // Function declaration (hoisted): the mount effect at :586 calls this, so it
-  // must exist even on the first render that early-returns at the loading guard.
-  // A const arrow here stays in TDZ on that render -> "Cannot access before
-  // initialization" -> blank page for every target.
-  function loadWatchScope() {
-    if (!id) return
-    targetsApi.watchScopeEvents(id).then(r => setWatchScopeEvents(r.events || [])).catch(() => {})
-  }
-
-  const promoteWatchHosts = async (values: string[]) => {
-    if (!id || values.length === 0) return
-    try {
-      const res = await targetsApi.promoteWatchScope(id, values)
-      addToast('success', `${res.promoted} host${res.promoted === 1 ? '' : 's'} promoted to deep seed`)
-      loadAssets()
-    } catch (e) {
-      addToast('error', e instanceof Error ? e.message : 'Could not promote hosts')
     }
   }
 
@@ -1247,7 +1110,7 @@ export default function TargetDetail() {
         )}
         {target.watch_only && (
           <p className="w-full text-[11px] text-text-muted mt-1">
-            Breadth watch rounds monitor this project. Each round re-enumerates one asset root and lands new bounty-eligible hosts into scope. No deep monitor task runs for breadth projects.
+            Breadth watch rounds monitor this project. Each round re-enumerates one asset root and lands new bounty-eligible hosts into scope. Status and host changes now appear in the Changes tab automatically.
           </p>
         )}
         {target.monitor_enabled && !target.watch_only && (
@@ -1257,34 +1120,6 @@ export default function TargetDetail() {
           </p>
         )}
       </div>
-
-      {/* Watch scope: hosts landed by breadth rounds from bounty-eligible scope */}
-      {target.watch_only && (
-        <div className="card p-4">
-          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Watch scope</p>
-              <p className="mt-0.5 text-[10px] text-text-muted">Bounty-eligible hosts landed automatically by breadth watch rounds.</p>
-            </div>
-            <Button size="sm" variant="ghost" onClick={loadWatchScope}>Refresh</Button>
-          </div>
-          {watchScopeEvents.length === 0 ? (
-            <p className="text-xs text-text-muted py-2">No hosts landed yet. Eligible hosts appear after a watch round finds them alive.</p>
-          ) : (
-            <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-              {watchScopeEvents.map(ev => (
-                <div key={ev.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05] flex-wrap">
-                  <code className="text-[11px] font-mono text-text-primary min-w-0 flex-1 break-all">{ev.identifier}</code>
-                  <span className="text-[10px] text-text-muted">{timeAgo(ev.detected_at)}</span>
-                  <Button size="sm" variant="ghost" onClick={() => promoteWatchHosts([ev.identifier].map(v => v.toLowerCase()))}>
-                    Promote to Deep seed
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* HTTP catch-all detection override */}
       <div className="card p-4 flex flex-wrap items-center gap-4">
@@ -1453,27 +1288,10 @@ export default function TargetDetail() {
                 ))}
               </div>
             )
-            : (
+            : (tab === 'monitor'
+              ? <ChangesExplorer targetId={id!} compact />
+              : (
               <>
-              {tab === 'monitor' && (
-                <div className="flex items-center gap-1.5 flex-wrap mb-3">
-                  {CHANGE_FILTERS.map(f => {
-                    const n = monitorCounts.groups[f.id] || 0
-                    const rawN = monitorCounts.raw[f.id] || 0
-                    return (
-                      <button key={f.id}
-                        title={`${rawN.toLocaleString()} raw change(s)`}
-                        onClick={() => { setChangeFilter(f.id); setVisibleCount(PAGE) }}
-                        className={cn('px-2.5 py-1 rounded-full border text-[11px] transition-colors',
-                          changeFilter === f.id
-                            ? 'bg-accent/15 border-accent text-accent'
-                            : 'border-border text-text-muted hover:text-text-primary hover:border-text-muted')}>
-                        {f.label} <span className="opacity-60">{n.toLocaleString()}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -1492,7 +1310,6 @@ export default function TargetDetail() {
                       {tab === 'redirects' && ['URL', 'Redirects To', 'Verified', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'nuclei' && ['Severity', 'Template', 'URL', 'Description', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {(tab === 'vulns' || tab === 'candidates') && ['Severity', 'Type', 'URL', 'Parameter', 'Evidence / Provenance', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
-                      {tab === 'monitor' && ['URL', 'Change Type', 'Old Value', 'New Value', 'Detected'].map(h => <th key={h} className="table-header">{h}</th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -1883,110 +1700,16 @@ export default function TargetDetail() {
                       </tr>
                       )
                     })}
-                    {tab === 'monitor' && monitorGroupPage.map(g => {
-                      const c = g.rep
-                      const occurrences = g.items.length - 1
-                      const shownCount = expandedOccurrences.get(g.key) ?? 0
-                      const expanded = expandedOccurrences.has(g.key)
-                      return (
-                        <Fragment key={c.id}>
-                          <tr className="table-row align-top">
-                            <td className="table-cell max-w-xs">
-                              <div className="flex items-center gap-1.5">
-                                <a href={c.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono truncate">{truncate(c.url, 50)}</a>
-                                <CopyButton text={c.url} />
-                                {/* Content-capture diff for monitored stylesheets/scripts.
-                                    Legacy rows (recorded before capture) open too, but
-                                    show the not-captured note + hashes only. */}
-                                {(c.change_type === 'css_change' || c.change_type === 'js_change') && (
-                                  <button onClick={() => setDiffView({ url: c.url, kind: c.change_type === 'css_change' ? 'css' : 'js' })}
-                                    className="btn-secondary text-[10px] px-1.5 py-0.5 shrink-0">Diff</button>
-                                )}
-                              </div>
-                              {occurrences > 0 && (
-                                <button
-                                  onClick={() => setExpandedOccurrences(prev => {
-                                    const next = new Map(prev)
-                                    if (next.has(g.key)) next.delete(g.key)
-                                    else next.set(g.key, OCCURRENCE_PAGE_SIZE)
-                                    return next
-                                  })}
-                                  title={g.urls.join('\n')}
-                                  className="mt-0.5 inline-block text-[10px] text-accent hover:underline"
-                                >
-                                  {expanded ? 'Hide occurrences' : `+${occurrences} more change${occurrences === 1 ? '' : 's'} · ${g.urls.length} URL${g.urls.length === 1 ? '' : 's'}`}
-                                </button>
-                              )}
-                            </td>
-                            <td className="table-cell">
-                              <Badge variant={changeBadgeVariant(c)}>{c.change_type}</Badge>
-                            </td>
-                            {/* Old/new values were truncated to 50 chars with no way to read the
-                                rest. Now each value wraps, shows the full text on hover, and has a
-                                copy button, so a full diff is actually inspectable. */}
-                            <td className="table-cell text-xs text-text-muted font-mono break-all whitespace-pre-wrap max-w-sm">
-                              <div className="flex items-start gap-1">
-                                <span title={c.old_value} className="flex-1">{c.old_value || '—'}</span>
-                                {c.old_value && <CopyButton text={c.old_value} />}
-                              </div>
-                            </td>
-                            <td className="table-cell text-xs text-severity-medium font-mono break-all whitespace-pre-wrap max-w-sm">
-                              <div className="flex items-start gap-1">
-                                <span title={c.new_value} className="flex-1">{c.new_value || '—'}</span>
-                                {c.new_value && <CopyButton text={c.new_value} />}
-                              </div>
-                            </td>
-                            <td className="table-cell text-xs whitespace-nowrap">{timeAgo(c.detected_at)}</td>
-                          </tr>
-                          {expanded && g.items.slice(1, 1 + shownCount).map(it => (
-                            <tr key={it.id} className="table-row bg-bg-secondary/30 align-top">
-                              <td colSpan={5} className="table-cell text-[11px]">
-                                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 pl-3 text-text-muted">
-                                  <span className="text-accent">↳</span>
-                                  <a href={it.url} target="_blank" rel="noreferrer" className="text-accent hover:underline font-mono break-all">{truncate(it.url, 80)}</a>
-                                  <CopyButton text={it.url} />
-                                  <span className="font-mono break-all">{it.old_value || '—'} → {it.new_value || '—'}</span>
-                                  <span className="whitespace-nowrap">{timeAgo(it.detected_at)}</span>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                          {expanded && occurrences > shownCount && (
-                            <tr key={`more-${g.key}`} className="table-row bg-bg-secondary/30">
-                              <td colSpan={5} className="table-cell text-[11px]">
-                                <div className="flex flex-wrap items-center gap-3 pl-3 text-text-muted">
-                                  <span>Showing {shownCount.toLocaleString()} of {occurrences.toLocaleString()} occurrence{occurrences === 1 ? '' : 's'}</span>
-                                  <button
-                                    onClick={() => setExpandedOccurrences(prev => {
-                                      const next = new Map(prev)
-                                      next.set(g.key, (next.get(g.key) ?? 0) + OCCURRENCE_PAGE_SIZE)
-                                      return next
-                                    })}
-                                    className="text-accent hover:underline"
-                                  >
-                                    Show {Math.min(OCCURRENCE_PAGE_SIZE, occurrences - shownCount).toLocaleString()} more
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      )
-                    })}
                   </tbody>
                 </table>
               </div>
               </>
-            )}
+              ))}
         {!tabLoading && footerHasMore && (
           <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
             <span className="text-text-muted">
               Showing {footerShownCount.toLocaleString()} of {footerTotalCount.toLocaleString()}
-              {isVulnTab
-                ? ' distinct issue(s)'
-                : isMonitorTab
-                ? ` distinct change group(s) · ${filteredData.length.toLocaleString()} change(s)`
-                : ''}
+              {isVulnTab ? ' distinct issue(s)' : ''}
             </span>
             <button onClick={() => setVisibleCount(c => c + PAGE)} className="btn-secondary text-xs">
               Load {Math.min(PAGE, footerTotalCount - visibleCount).toLocaleString()} more
@@ -2027,10 +1750,6 @@ export default function TargetDetail() {
           onClose={() => setEvidence(null)}
         />
       )}
-      {diffView && (
-        <ChangeDiffViewer targetId={id!} url={diffView.url} kind={diffView.kind} onClose={() => setDiffView(null)} />
-      )}
-
       {/* Coverage change confirmation */}
       <Modal open={coverageDialogOpen} onClose={() => !coverageBusy && setCoverageDialogOpen(false)} title="Change scan coverage" width="sm">
         <div className="space-y-4">

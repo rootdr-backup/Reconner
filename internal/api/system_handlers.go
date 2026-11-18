@@ -118,6 +118,7 @@ type scanConfigPayload struct {
 	WatchEnumerationSources       []string `json:"watch_enumeration_sources"`
 	WatchRowsRetentionDays        int      `json:"watch_rows_retention_days"`
 	WatchScopeEventsRetentionDays int      `json:"watch_scope_events_retention_days"`
+	WatchChangesRetentionDays     int      `json:"watch_changes_retention_days"`
 	WatchNotifyHostCap            int      `json:"watch_notify_host_cap"`
 	WatchFailLimit                int      `json:"watch_fail_limit"`
 	WatchModuleSet                []string `json:"watch_module_set"`
@@ -151,6 +152,7 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		WatchEnumerationSources:       h.cfg.WatchEnumerationSources,
 		WatchRowsRetentionDays:        h.cfg.WatchRowsRetentionDays,
 		WatchScopeEventsRetentionDays: h.cfg.WatchScopeEventsRetentionDays,
+		WatchChangesRetentionDays:     h.cfg.WatchChangesRetentionDays,
 		WatchNotifyHostCap:            h.cfg.WatchNotifyHostCap,
 		WatchFailLimit:                h.cfg.WatchFailLimit,
 		WatchModuleSet:                []string{"subdomain_enum", "http_probe"},
@@ -184,6 +186,7 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		WatchEnumerationSources       *[]string `json:"watch_enumeration_sources"`
 		WatchRowsRetentionDays        *int      `json:"watch_rows_retention_days"`
 		WatchScopeEventsRetentionDays *int      `json:"watch_scope_events_retention_days"`
+		WatchChangesRetentionDays     *int      `json:"watch_changes_retention_days"`
 		WatchNotifyHostCap            *int      `json:"watch_notify_host_cap"`
 		WatchFailLimit                *int      `json:"watch_fail_limit"`
 	}
@@ -285,6 +288,9 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 	}
 	if body.WatchScopeEventsRetentionDays != nil {
 		h.cfg.WatchScopeEventsRetentionDays = clamp(*body.WatchScopeEventsRetentionDays, 1, 3650)
+	}
+	if body.WatchChangesRetentionDays != nil {
+		h.cfg.WatchChangesRetentionDays = clamp(*body.WatchChangesRetentionDays, 1, 3650)
 	}
 	if body.WatchNotifyHostCap != nil {
 		h.cfg.WatchNotifyHostCap = clamp(*body.WatchNotifyHostCap, 1, 100)

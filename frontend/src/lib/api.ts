@@ -2,7 +2,7 @@ import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding,
   Parameter, DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding,
   NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, TaskPhase, DashboardStats, AttackPath,
-  NetworkService, IngramCamera, Asset, FileBodyResponse,
+  NetworkService, IngramCamera, Asset, FileBodyResponse, ChangeEntry, WatchRound,
   BountyProgram, BountySyncState, BountyScopeEvent,
 } from '../types'
 
@@ -372,6 +372,18 @@ export const findings = {
     const q = params ? '?' + new URLSearchParams(params).toString() : ''
     return req<AllFinding[]>(`/findings${q}`)
   },
+}
+
+// Unified Changes feed. load every page so the global view and the per-target
+// tab show the same complete history; the API still supports page/limit.
+export const changes = {
+  list: (params?: Record<string, string>) => fetchAllPaged<ChangeEntry>('/changes', params),
+  forTarget: (id: string, params?: Record<string, string>) =>
+    fetchAllPaged<ChangeEntry>(`/targets/${id}/changes`, params),
+}
+
+export const watchApi = {
+  rounds: (params?: Record<string, string>) => fetchAllPaged<WatchRound>('/watch/rounds', params),
 }
 
 export interface AllFinding {

@@ -28,6 +28,7 @@ const watchLogKeepCount = 100
 // …) are therefore NEVER pruned by this job.
 func (s *Scheduler) retentionScheduler() {
 	defer s.wg.Done()
+	s.pruneWatchChangeRows()
 	s.pruneWatchRows()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -36,8 +37,33 @@ func (s *Scheduler) retentionScheduler() {
 		case <-s.stopCh:
 			return
 		case <-ticker.C:
+			s.pruneWatchChangeRows()
 			s.pruneWatchRows()
 		}
+	}
+}
+
+// pruneWatchChangeRows ages the watch audit trail globally. It must not use
+// watchOnlyTargets(): mixed projects write changes too, and pruneWatchRows()
+// returns early when there are no watch-only targets at all. Finished tasks are
+// deleted after 90 days, but these rows have no task foreign key on purpose.
+func (s *Scheduler) pruneWatchChangeRows() {
+	days := 180
+	if s.cfg != nil && s.cfg.WatchChangesRetentionDays > 0 {
+		days = s.cfg.WatchChangesRetentionDays
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err := s.db.Exec(`DELETE FROM watch_round_changes
+			WHERE COALESCE(detected_at,CURRENT_TIMESTAMP) < datetime('now','-' || ? || ' days')`, days)
+		if err == nil {
+			return
+		}
+		if attempt == 0 && strings.Contains(strings.ToLower(err.Error()), "busy") {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		s.logger.Warn("Watch change retention prune failed", "error", err)
+		return
 	}
 }
 

@@ -5,21 +5,14 @@ import { useUIStore } from '../../store/ui'
 import { notifications as notifApi, targets as targetsApi, type Notification } from '../../lib/api'
 import type { Target } from '../../types'
 import { cn, timeAgo, useDebouncedValue } from '../../lib/utils'
+import { sevDot, openNotification } from '../../lib/notifications'
 import { useUpdateCenter } from './UpdateCenter'
-
-const sevDot: Record<string, string> = {
-  critical: 'bg-severity-critical',
-  high: 'bg-severity-high',
-  medium: 'bg-severity-medium',
-  low: 'bg-severity-low',
-  info: 'bg-accent',
-}
 
 // Static labels for top-level route segments; `/targets/:id` resolves to the
 // target name via a tiny in-memory cache so breadcrumbs read like
 // "Targets › example.com" instead of a raw UUID.
 const SEGMENT_LABEL: Record<string, string> = {
-  targets: 'Targets', analyze: 'Guided Analyze', findings: 'Findings', tasks: 'Scan activity', system: 'System & updates',
+  targets: 'Targets', analyze: 'Guided Analyze', findings: 'Findings', changes: 'Changes', tasks: 'Scan activity', system: 'System & updates',
 }
 
 function useBreadcrumbs(): { label: string; to: string }[] {
@@ -180,11 +173,8 @@ export const TopBar = () => {
     if (!n.is_read) {
       setItems(current => current.map(item => item.id === n.id ? { ...item, is_read: true } : item))
       setUnread(current => Math.max(0, current - 1))
-      void notifApi.markRead([n.id]).catch(() => {})
     }
-    if (n.target_id) navigate(`/targets/${n.target_id}`)
-    else if (n.url.startsWith('/') && !n.url.startsWith('//')) navigate(n.url)
-    else if (/^https?:\/\//i.test(n.url)) window.open(n.url, '_blank', 'noopener,noreferrer')
+    openNotification(n, navigate, notifApi.markRead)
   }
 
   return (
