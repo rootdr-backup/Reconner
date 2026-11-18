@@ -177,6 +177,7 @@ func RunMigrations(db *DB) error {
 		createChangeSeenTable,
 		createWatchTierIndexes,
 		alterTelegramChatsAddWatchPrefs,
+		alterNotificationsAddMetadata,
 	}
 
 	for i, m := range migrations {
@@ -1493,6 +1494,11 @@ CREATE TABLE IF NOT EXISTS notifications (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at DESC);`
+
+// alterNotificationsAddMetadata stores structured details for a notification.
+// The new_subdomain bell row uses it to keep the full list of host names found
+// during a re-scan. The body text stays a short count so the bell stays readable.
+const alterNotificationsAddMetadata = `ALTER TABLE notifications ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';`
 
 // Notification read state is user-specific. The legacy notifications.is_read
 // column remains as a compatibility fallback for rows created before this table.

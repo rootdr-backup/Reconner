@@ -139,7 +139,7 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 		COALESCE(n.url,'') AS url, COALESCE(n.type,'') AS change_type,
 		` + changeCategoryExpr("n.type") + ` AS category,
 		COALESCE(n.severity,'info') AS severity, '' AS old_value, COALESCE(n.body,'') AS new_value,
-		'{}' AS metadata, COALESCE(n.created_at,'') AS detected_at
+		COALESCE(n.metadata,'{}') AS metadata, COALESCE(n.created_at,'') AS detected_at
 		FROM notifications n LEFT JOIN targets t ON t.id=n.target_id
 		WHERE COALESCE(n.type,'') <> 'scope_landed'`
 	if !isAdmin {

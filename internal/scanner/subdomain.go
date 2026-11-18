@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,12 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// target (startSubCount > 0) raises a "new subdomain" notification — the first
 	// enumeration is all-new and would just spam the bell.
 	startSubCount := s.countSubdomains(targetID)
+	// Snapshot the NAMES present before this run, not just the count. The count
+	// alone cannot tell us which hosts were added: subdomains can be added by the
+	// apex pass, recursive enumeration, and vhost probing, and removed by the
+	// pruning pass. A name set diff covers every path and gives us the true list
+	// of new hosts to store on the notification.
+	beforeNames := s.existingSubdomainSet(ctx, targetID)
 	// Revalidate previously stored DNS names as well. Older Reconner releases
 	// eagerly inserted every passive-source string before DNS proof, which could
 	// leave tens of thousands of dead/wildcard names feeding later modules. A scan
@@ -302,10 +309,12 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// SCOPE instead (the grouped scope_landed message), which is the signal the
 	// operator actually acts on.
 	if startSubCount > 0 && !watchMode {
-		if end := s.countSubdomains(targetID); end > startSubCount {
-			n := end - startSubCount
-			notify(s.db, targetID, "new_subdomain", notificationTitle("new_subdomain"),
-				fmt.Sprintf("%d new subdomain(s) found on %s", n, domain), domain, "medium")
+		afterNames := s.existingSubdomainSet(ctx, targetID)
+		newNames := newSubdomainNames(beforeNames, afterNames)
+		if n := len(newNames); n > 0 {
+			notifyWithMetadata(s.db, targetID, "new_subdomain", notificationTitle("new_subdomain"),
+				fmt.Sprintf("%d new subdomain(s) found on %s", n, domain), domain, "medium",
+				newSubdomainMetadata(newNames, n))
 		}
 	}
 
@@ -324,6 +333,52 @@ func (s *SubdomainScanner) countSubdomains(targetID string) int {
 	var n int
 	_ = s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ?", targetID).Scan(&n)
 	return n
+}
+
+// newSubdomainMetadataCap bounds how many host names we persist on a single
+// notification. A wide wildcard can resolve thousands of names; storing all of
+// them would bloat the bell row and the changes feed.
+const newSubdomainMetadataCap = 500
+
+// newSubdomainNames returns the sorted names that appear in after but not in
+// before. Both maps are sets of stored subdomain names. Deriving the list this
+// way covers every write path (apex resolution, recursion, vhost, pruning)
+// instead of relying on a single in-memory admit closure.
+func newSubdomainNames(before, after map[string]bool) []string {
+	out := make([]string, 0)
+	for name := range after {
+		if !before[name] {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// newSubdomainMetadata builds the metadata JSON stored with a new_subdomain
+// notification. hosts is the full sorted list; total is the true count. The
+// stored list is capped, with truncated and total telling the UI how much was
+// kept. A malformed-free compact JSON string is always returned.
+func newSubdomainMetadata(hosts []string, total int) string {
+	truncated := total > len(hosts)
+	stored := hosts
+	if stored == nil {
+		stored = []string{}
+	}
+	if len(stored) > newSubdomainMetadataCap {
+		stored = stored[:newSubdomainMetadataCap]
+		truncated = true
+	}
+	payload := struct {
+		Hosts     []string `json:"hosts"`
+		Truncated bool     `json:"truncated"`
+		Total     int      `json:"total"`
+	}{Hosts: stored, Truncated: truncated, Total: total}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // vhostWordlist — common internal/forgotten virtual-host prefixes worth probing

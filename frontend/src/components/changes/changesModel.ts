@@ -1,5 +1,5 @@
 import { diffWordsWithSpace } from 'diff'
-import type { ChangeCategory, MonitoringChange } from '../../types'
+import type { ChangeCategory, ChangeEntry, MonitoringChange } from '../../types'
 
 export type ChangeFilter = ChangeCategory | 'all'
 
@@ -44,6 +44,17 @@ export function categoryForChangeType(changeType: string): ChangeCategory {
   if (changeType.includes('header')) return 'headers'
   if (changeType.startsWith('security')) return 'security'
   return 'http'
+}
+
+// changeHosts returns the new-host names stored on a new_subdomain ChangeEntry.
+// Returns null for any other change type, missing metadata, or a non-string
+// hosts value so callers can keep the prior count-only rendering.
+export function changeHosts(item: Pick<ChangeEntry, 'change_type' | 'metadata'>): string[] | null {
+  if (item.change_type !== 'new_subdomain') return null
+  const hosts = item.metadata?.hosts
+  if (!Array.isArray(hosts)) return null
+  const out = hosts.filter((h): h is string => typeof h === 'string' && h.length > 0)
+  return out.length > 0 ? out : null
 }
 
 // Bucket order follows the API taxonomy: stylesheet/script markers win before

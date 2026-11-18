@@ -6,7 +6,7 @@ import { Badge, Button, CopyButton, Empty, SkeletonRows } from '../ui'
 import { cn, timeAgo } from '../../lib/utils'
 import { ws } from '../../lib/websocket'
 import {
-  CHANGE_FILTERS, changeBadgeVariant, type ChangeFilter,
+  CHANGE_FILTERS, changeBadgeVariant, changeHosts, type ChangeFilter,
 } from './changesModel'
 import InlineChangeDiff from './InlineChangeDiff'
 import { ChangeDiffViewer } from '../targets/ChangeDiffViewer'
@@ -116,6 +116,37 @@ function groupIntoCards(rows: ChangeEntry[]): ChangeCard[] {
   }
   for (const card of map.values()) card.seen = card.items.every(i => i.seen)
   return [...map.values()].sort((a, b) => b.detected_at.localeCompare(a.detected_at))
+}
+
+function NewHostsSection({ items }: { items: ChangeEntry[] }) {
+  const sections = items
+    .map(item => ({ hosts: changeHosts(item), meta: item.metadata }))
+    .filter(g => Array.isArray(g.hosts) && g.hosts.length > 0)
+  if (sections.length === 0) return null
+  const shown: string[] = []
+  let total = 0
+  let truncated = false
+  for (const g of sections) {
+    const hosts = g.hosts as string[]
+    shown.push(...hosts)
+    total += typeof g.meta?.total === 'number' ? g.meta.total : hosts.length
+    if (g.meta?.truncated === true) truncated = true
+  }
+  return (
+    <div className="mt-4 rounded-lg border border-accent/25 bg-accent/[.06] p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+        {total} new subdomain(s)
+      </p>
+      <div className="mt-2 max-h-64 space-y-1 overflow-y-auto font-mono text-xs text-text-primary">
+        {shown.map((h, i) => <div key={`${h}-${i}`} className="break-all">{h}</div>)}
+      </div>
+      {truncated && (
+        <p className="mt-2 text-[10px] text-text-muted">
+          Showing first {shown.length} of {total} stored host names.
+        </p>
+      )}
+    </div>
+  )
 }
 
 function SourceBadge({ source }: { source: string }) {
@@ -456,15 +487,25 @@ export default function ChangeLog({ targetId, compact }: Props) {
                 </div>
 
                 <div className="mt-2 space-y-1.5 pl-1">
-                  {card.items.map((item, i) => (
-                    <div key={`${item.id}-${i}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
-                      <span className="w-32 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-                        {fieldLabel(item.change_type)}
-                      </span>
-                      <InlineChangeDiff oldValue={item.old_value} newValue={item.new_value} changeType={item.change_type} />
-                      <Badge variant={changeBadgeVariant(item)}>{item.severity}</Badge>
-                    </div>
-                  ))}
+                  {card.items.map((item, i) => {
+                    const hosts = changeHosts(item)
+                    const singleHost = hosts?.length === 1 ? hosts[0] : null
+                    return (
+                      <div key={`${item.id}-${i}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+                        <span className="w-32 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                          {fieldLabel(item.change_type)}
+                        </span>
+                        {singleHost ? (
+                          <span className="max-w-[420px] break-all font-mono text-xs text-text-primary" title={singleHost}>
+                            {singleHost}
+                          </span>
+                        ) : (
+                          <InlineChangeDiff oldValue={item.old_value} newValue={item.new_value} changeType={item.change_type} />
+                        )}
+                        <Badge variant={changeBadgeVariant(item)}>{item.severity}</Badge>
+                      </div>
+                    )
+                  })}
                 </div>
 
                 <div className="mt-2 flex items-center gap-3 pl-1 text-[10px] text-text-muted">
@@ -536,6 +577,8 @@ export default function ChangeLog({ targetId, compact }: Props) {
                 <dd className="font-mono text-[10px]">{detail.task_id ? detail.task_id.slice(0, 12) : '—'}</dd>
               </div>
             </dl>
+
+            <NewHostsSection items={detail.items} />
 
             <div className="mt-4 space-y-3">
               {detail.items.map((item, i) => (

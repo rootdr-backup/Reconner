@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   categoryForChangeType,
   changeBadgeVariant,
+  changeHosts,
   groupMonitorChanges,
   inlineDiffPieces,
   monitorRowKind,
@@ -48,6 +49,32 @@ describe('changeBadgeVariant', () => {
     expect(changeBadgeVariant({ change_type: 'security:script_added' })).toBe('high')
     expect(changeBadgeVariant({ change_type: 'tech_change' })).toBe('low')
     expect(changeBadgeVariant({ change_type: 'status_change' })).toBe('info')
+  })
+})
+
+describe('changeHosts', () => {
+  it('returns host names for a new_subdomain entry with metadata', () => {
+    expect(changeHosts({
+      change_type: 'new_subdomain',
+      metadata: { hosts: ['a.example', 'b.example'], total: 2 },
+    })).toEqual(['a.example', 'b.example'])
+  })
+
+  it('keeps only string host names', () => {
+    expect(changeHosts({
+      change_type: 'new_subdomain',
+      metadata: { hosts: ['a.example', 42, null, 'b.example'] },
+    })).toEqual(['a.example', 'b.example'])
+  })
+
+  it('returns null for other change types', () => {
+    expect(changeHosts({ change_type: 'status_change', metadata: { hosts: ['a.example'] } })).toBeNull()
+  })
+
+  it('returns null for missing or malformed metadata', () => {
+    expect(changeHosts({ change_type: 'new_subdomain' })).toBeNull()
+    expect(changeHosts({ change_type: 'new_subdomain', metadata: { hosts: 'a.example' } })).toBeNull()
+    expect(changeHosts({ change_type: 'new_subdomain', metadata: { hosts: [] } })).toBeNull()
   })
 })
 

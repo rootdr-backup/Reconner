@@ -82,6 +82,40 @@ func TestListChangesScopedToOwner(t *testing.T) {
 	}
 }
 
+func TestListChangesNotificationMetadataRoundTrip(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,metadata,created_at)
+		VALUES ('n-new-hosts','t1','new_subdomain','New host','2 new subdomain(s) found on one.example','medium',
+		'{"hosts":["a.example","b.example"],"truncated":false,"total":2}','2026-03-01 00:00:00')`)
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := serveChanges(t, h, sid, "/api/changes?source=notification&target_id=t1", nil, h.handleListChanges)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var env changesEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Data) != 1 {
+		t.Fatalf("rows = %d, want 1", len(env.Data))
+	}
+	row := env.Data[0]
+	hosts, ok := row.Metadata["hosts"].([]any)
+	if !ok || len(hosts) != 2 {
+		t.Fatalf("metadata hosts = %v, want two entries", row.Metadata["hosts"])
+	}
+	if hosts[0] != "a.example" || hosts[1] != "b.example" {
+		t.Fatalf("hosts = %v, want [a.example b.example]", hosts)
+	}
+	if row.Metadata["total"] != float64(2) {
+		t.Fatalf("total = %v, want 2", row.Metadata["total"])
+	}
+}
+
 func TestListTargetChangesForcesRoutedTarget(t *testing.T) {
 	h, adminID := newIsoHandler(t)
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
