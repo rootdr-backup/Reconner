@@ -522,10 +522,12 @@ func TestCreateProjectWithOnlyAppStoreAssets(t *testing.T) {
 		Assets: []Asset{
 			{ExternalID: "os1", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
 			{ExternalID: "os2", Identifier: "https://apps.apple.com/us/app/example/id123456789", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os3", Identifier: "https://marketplace.atlassian.com/apps/1212096/x", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os4", Identifier: "Third Party Marketplace Apps", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
 		},
 	}
 	storeTestProgram(t, svc, &p)
-	ids := []string{p.Assets[0].ID, p.Assets[1].ID}
+	ids := []string{p.Assets[0].ID, p.Assets[1].ID, p.Assets[2].ID, p.Assets[3].ID}
 
 	if _, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{AssetIDs: ids, WatchOnly: true}); err == nil {
 		t.Fatal("breadth create with only store assets must fail")

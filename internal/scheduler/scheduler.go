@@ -1687,7 +1687,7 @@ func webScopeHosts(scope string) []string {
 	rawHosts, _ := scanner.SplitScope(scope)
 	hosts := make([]string, 0, len(rawHosts))
 	for _, host := range rawHosts {
-		if assets.IsAppStoreAsset(host) {
+		if !assets.IsScannableWebAsset("domain", host) {
 			continue
 		}
 		hosts = append(hosts, host)
@@ -2558,7 +2558,7 @@ func normalizeSubdomainRoots(values []string) []string {
 			if raw == "" {
 				continue
 			}
-			if assets.IsAppStoreAsset(raw) {
+			if !assets.IsScannableWebAsset("domain", raw) {
 				continue
 			}
 			// Reject network scopes before URL parsing turns 10.0.0.0/24 into

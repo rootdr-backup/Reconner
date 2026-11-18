@@ -179,10 +179,16 @@ func TestBulkCreateDropsAppStoreAssets(t *testing.T) {
 		Assets: []Asset{
 			{ExternalID: "s1", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
 			{ExternalID: "s2", Identifier: "https://apps.apple.com/us/app/example/id123456789", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "s4", Identifier: "https://marketplace.atlassian.com/apps/1212096/x", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "s5", Identifier: "Third Party Marketplace Apps", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
 			{ExternalID: "s3", Identifier: "example.com", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
 		},
 	}
 	storeTestProgram(t, svc, &p)
+	// Simulate a legacy row that still carries a web type with a prose note.
+	if _, err := db.Exec(`UPDATE bounty_program_assets SET asset_type='domain' WHERE external_id='s5'`); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := svc.CreateProjectsBulk(context.Background(), 11, BulkCreateProjectsRequest{
 		ProgramIDs: []string{p.ID}, Coverage: "breadth", AssetPolicy: "all_eligible_web",
@@ -193,8 +199,8 @@ func TestBulkCreateDropsAppStoreAssets(t *testing.T) {
 	if len(results) != 1 || !results[0].OK {
 		t.Fatalf("got %+v, want one successful result", results)
 	}
-	if results[0].Assets != 1 || results[0].SkippedAppStore != 2 {
-		t.Fatalf("result assets=%d skipped_app_store=%d, want 1/2", results[0].Assets, results[0].SkippedAppStore)
+	if results[0].Assets != 1 || results[0].SkippedAppStore != 3 || results[0].SkippedInvalid != 1 {
+		t.Fatalf("result assets=%d skipped_app_store=%d skipped_invalid=%d, want 1/3/1", results[0].Assets, results[0].SkippedAppStore, results[0].SkippedInvalid)
 	}
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE target_id=? AND value LIKE '%play.google.com%'`, results[0].TargetID).Scan(&count); err != nil {

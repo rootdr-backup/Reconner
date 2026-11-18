@@ -14,6 +14,9 @@ func TestStoreAssetsAreNotScannableRoots(t *testing.T) {
 	assets := []struct{ id, value string }{
 		{"g1", "https://play.google.com/store/apps/details?id=com.example"},
 		{"g2", "https://apps.apple.com/us/app/example/id123456789"},
+		{"g4", "https://chromewebstore.google.com/detail/loom/abc"},
+		{"g5", "https://marketplace.atlassian.com/apps/1212096/x"},
+		{"g6", "Third Party Marketplace Apps"},
 		{"g3", "example.com"},
 	}
 	for _, a := range assets {
@@ -36,8 +39,11 @@ func TestStoreAssetsAreNotScannableRoots(t *testing.T) {
 func TestNormalizeSubdomainRootsDropsStoreValues(t *testing.T) {
 	got := normalizeSubdomainRoots([]string{
 		"https://play.google.com/store/apps/details?id=com.example",
+		"https://marketplace.atlassian.com/apps/1212096/x",
 		"apps.apple.com",
+		"Third Party Marketplace Apps",
 		"apple.com",
+		"example.com:8080",
 		"example.com",
 	})
 	want := []string{"apple.com", "example.com"}
@@ -53,6 +59,9 @@ func TestWebScopeHostsDropsAppListings(t *testing.T) {
 	}{
 		{"play.google.com", nil},
 		{"https://apps.apple.com/us/app/example/id123456789", nil},
+		{"https://chromewebstore.google.com/detail/loom/abc", nil},
+		{"https://marketplace.atlassian.com/apps/1212096/x", nil},
+		{"Any internal or development services.", nil},
 		{"example.com,play.google.com", []string{"example.com"}},
 		{"apple.com,example.com", []string{"apple.com", "example.com"}},
 	}

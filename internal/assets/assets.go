@@ -12,13 +12,14 @@ import (
 // Matching an exact host avoids excluding a legitimate apex scope such as
 // apple.com or google.com.
 var AppStoreHosts = map[string]bool{
-	"play.google.com":        true,
-	"apps.apple.com":         true,
-	"itunes.apple.com":       true,
-	"appstore.apple.com":     true,
-	"apps.microsoft.com":     true,
-	"appgallery.huawei.com":  true,
-	"store.steampowered.com": true,
+	"play.google.com":           true,
+	"apps.apple.com":            true,
+	"itunes.apple.com":          true,
+	"appstore.apple.com":        true,
+	"apps.microsoft.com":        true,
+	"appgallery.huawei.com":     true,
+	"store.steampowered.com":    true,
+	"chromewebstore.google.com": true,
 }
 
 var appStorePaths = []string{
@@ -46,6 +47,12 @@ func IsAppStoreAsset(identifier string) bool {
 		return true
 	}
 
+	// Marketplace app pages are listings too. Match the store host together
+	// with its app path so an unrelated /apps/ route on another host is safe.
+	if strings.Contains(raw, "marketplace.atlassian.com/apps/") || strings.Contains(raw, "chrome.google.com/webstore/") {
+		return true
+	}
+
 	for _, path := range appStorePaths {
 		if strings.Contains(raw, path) {
 			return true
@@ -70,6 +77,63 @@ func startsWithDigit(s string) bool {
 	return len(s) > 0 && s[0] >= '0' && s[0] <= '9'
 }
 
+// IsWebShapedIdentifier reports whether raw can work as a DNS root or an HTTP
+// seed. Providers sometimes put a prose note in an asset whose declared type
+// is "domain" or "url". Those notes are not hosts and must not become scan
+// roots. A host may carry a path suffix, as in example.com/app/login.
+func IsWebShapedIdentifier(raw string) bool {
+	v := strings.TrimSpace(raw)
+	if v == "" || strings.ContainsAny(v, " \t\r\n()[]<>\"'|") {
+		return false
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		u, err := url.Parse(v)
+		return err == nil && u.Host != "" && validHostname(u.Hostname())
+	}
+	host := v
+	if i := strings.IndexAny(host, "/?#"); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimPrefix(host, "*.")
+	if h, port, ok := strings.Cut(host, ":"); ok && port != "" && allDigits(port) {
+		host = h // host:port is a valid HTTP seed
+	}
+	return validHostname(host)
+}
+
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validHostname(host string) bool {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" || len(host) > 253 || !strings.Contains(host, ".") {
+		return false
+	}
+	if strings.ContainsAny(host, " /:@?#,;\\") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for _, r := range label {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '*':
+			case r == '-' || r == '_':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // IsScannableWebAsset reports whether an asset may enter watch or deep
 // enumeration and HTTP probing.
 func IsScannableWebAsset(assetType, identifier string) bool {
@@ -80,6 +144,9 @@ func IsScannableWebAsset(assetType, identifier string) bool {
 		return false
 	}
 	if IsAppStoreAsset(identifier) {
+		return false
+	}
+	if !IsWebShapedIdentifier(identifier) {
 		return false
 	}
 	switch t {

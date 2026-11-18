@@ -24,11 +24,14 @@ containing both web and network scope are scanned one asset at a time so the two
 pipelines cannot be combined accidentally.
 
 App-store and desktop-store listings (`app_store`; Google Play, Apple App Store,
-Microsoft Store, Huawei AppGallery, Steam) are excluded from subdomain
-enumeration and HTTP probing. They stay visible in the bounty catalog as
-references. A project that contains only store assets finishes a watch round
-with zero hosts. Exact hosts and store-specific paths are matched, so a scope of
-`apple.com` or `google.com` still scans normally.
+Microsoft Store, Huawei AppGallery, Steam), Chrome Web Store listings, and
+Atlassian Marketplace app pages are excluded from subdomain enumeration and HTTP
+probing. They stay visible in the bounty catalog as references. A project that
+contains only store assets finishes a watch round with zero hosts. Exact hosts
+and store-specific paths are matched, so a scope of `apple.com` or `google.com`
+still scans normally. The importer also rejects prose scope notes that carry a
+`domain` or `url` type but are not hosts, for example "Third Party Marketplace
+Apps". Those notes become non-scannable references.
 
 Existing store rows stay as they are; no migration rewrites scope decisions. The
 scan-time guard skips them even if they are still typed `url` or `domain`. To
@@ -46,6 +49,8 @@ WHERE COALESCE(asset_type,'') IN ('domain','url','page','api','other')
     OR lower(value) LIKE '%apps.microsoft.com%'
     OR lower(value) LIKE '%appgallery.huawei.com%'
     OR lower(value) LIKE '%store.steampowered.com%'
+    OR lower(value) LIKE '%chromewebstore.google.com%'
+    OR lower(value) LIKE '%marketplace.atlassian.com/apps/%'
   );
 ```
 

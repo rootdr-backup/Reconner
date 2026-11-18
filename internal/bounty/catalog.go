@@ -239,6 +239,20 @@ func projectAssetKind(t string) string {
 	}
 }
 
+// managedAssetKind also demotes web-typed assets whose identifier is not a
+// host or URL. Old catalog rows can carry a prose note with type "domain";
+// those values must never become project roots.
+func managedAssetKind(a Asset) string {
+	kind := projectAssetKind(a.AssetType)
+	if kind != "web" {
+		return kind
+	}
+	if !assetutil.IsScannableWebAsset(a.AssetType, a.Identifier) {
+		return "reference"
+	}
+	return "web"
+}
+
 func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID string, req CreateProjectRequest) (string, error) {
 	p, err := s.GetProgram(ctx, programID)
 	if err != nil {
@@ -291,18 +305,19 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 			skippedAppStore = append(skippedAppStore, a.Identifier)
 			continue
 		}
-		if a.AssetType == "other" || a.AssetType == "android" || a.AssetType == "ios" || a.AssetType == "hardware" || a.AssetType == "source_code" {
+		kind := managedAssetKind(a)
+		if kind == "reference" {
 			continue
 		}
 		// A breadth project runs WEB modules only. Network assets (CIDR/IP) have
 		// no place in a watch round, and a mixed project cannot run one at all —
 		// so the backend drops them here instead of creating a broken project.
-		if req.WatchOnly && projectAssetKind(a.AssetType) == "network" {
+		if req.WatchOnly && kind == "network" {
 			skippedNetwork = append(skippedNetwork, a.Identifier)
 			continue
 		}
 		values = append(values, a.Identifier)
-		if projectAssetKind(a.AssetType) == "network" {
+		if kind == "network" {
 			hasNet = true
 		} else {
 			hasWeb = true
@@ -370,8 +385,11 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 		return "", err
 	}
 	for _, a := range assets {
-		if req.WatchOnly && projectAssetKind(a.AssetType) == "network" {
+		if req.WatchOnly && managedAssetKind(a) == "network" {
 			continue // network assets are not part of a breadth project
+		}
+		if managedAssetKind(a) == "reference" {
+			continue // prose notes and app listings are not project assets
 		}
 		meta, _ := json.Marshal(map[string]any{"provider": p.Provider, "program": p.Handle, "raw_hash": a.RawHash, "eligible_bounty": a.EligibleBounty, "max_severity": a.MaxSeverity, "instruction": a.Instruction})
 		assetMonitor := 1
@@ -379,7 +397,7 @@ func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p
 			assetMonitor = 0 // the old monitor tier is off for breadth projects
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at)
-		VALUES(?,?,?,?,?,?,?,?, 'approved',?,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, "bounty:"+p.Provider, a.ID, assetMonitor, string(meta))
+		VALUES(?,?,?,?,?,?,?,?, 'approved',?,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, managedAssetKind(a), a.AssetType, "bounty:"+p.Provider, a.ID, assetMonitor, string(meta))
 		if err != nil {
 			return "", err
 		}
@@ -416,6 +434,7 @@ type BulkCreateProjectResult struct {
 	Assets          int    `json:"assets,omitempty"`
 	SkippedNetwork  int    `json:"skipped_network,omitempty"`
 	SkippedAppStore int    `json:"skipped_app_store,omitempty"`
+	SkippedInvalid  int    `json:"skipped_invalid,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 }
 
@@ -493,6 +512,7 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 		assetIDs := []string{}
 		skippedNetwork := 0
 		skippedAppStore := 0
+		skippedInvalid := 0
 		for _, a := range p.Assets {
 			if !a.Active || !a.InScope || !a.EligibleSubmission {
 				continue
@@ -501,8 +521,11 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 				skippedAppStore++
 				continue
 			}
-			kind := projectAssetKind(a.AssetType)
+			kind := managedAssetKind(a)
 			if kind == "reference" {
+				if projectAssetKind(a.AssetType) == "web" {
+					skippedInvalid++
+				}
 				continue
 			}
 			if kind == "network" {
@@ -562,6 +585,7 @@ func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req Bul
 		result.Assets = len(assetIDs)
 		result.SkippedNetwork = skippedNetwork
 		result.SkippedAppStore = skippedAppStore
+		result.SkippedInvalid = skippedInvalid
 		results = append(results, result)
 	}
 	return results, nil
@@ -757,7 +781,7 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 			// (source='watch:scope'): that row is the operator's landed scope
 			// and keeps its own source, asset_type and metadata. The WHERE on
 			// the conflict clause leaves the landed row untouched.
-			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP WHERE assets.source <> 'watch:scope'`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, a.ID, string(metaJSON))
+			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP WHERE assets.source <> 'watch:scope'`, uuid.New().String(), targetID, a.Identifier, a.Identifier, managedAssetKind(a), a.AssetType, a.ID, string(metaJSON))
 			if err != nil {
 				return err
 			}

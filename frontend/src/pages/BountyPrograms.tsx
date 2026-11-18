@@ -199,15 +199,39 @@ export default function BountyPrograms() {
     const n = new Set(prev); if (visibleSelected) visibleAssets.forEach(a => n.delete(a.id)); else visibleAssets.forEach(a => n.add(a.id)); return n
   })
 
-  const nonScannableAssetTypes = new Set(['cidr', 'ip', 'ip_address', 'network', 'android', 'ios', 'hardware', 'source_code', 'other'])
+  // Keep the preview aligned with backend import rules. Stores and prose scope
+  // notes are dropped for both breadth and deep; network assets only for breadth.
+  const isBountyAppStore = (identifier: string) => {
+    const id = (identifier || '').trim().toLowerCase()
+    if (!id) return false
+    const host = id.replace(/^[a-z]+:\/\//, '').split(/[/?#]/)[0].replace(/^\*\./, '').replace(/\.$/, '')
+    const storeHosts = ['play.google.com', 'apps.apple.com', 'itunes.apple.com', 'appstore.apple.com', 'apps.microsoft.com', 'appgallery.huawei.com', 'store.steampowered.com', 'chromewebstore.google.com']
+    return storeHosts.includes(host)
+      || /\/store\/apps\/|\/us\/app\/|\/store\/app\/|\/app\/id\d|\/app\/[^/]+\/id\d/.test(id)
+      || id.includes('marketplace.atlassian.com/apps/') || id.includes('chrome.google.com/webstore/')
+  }
+  const isBountyWebShaped = (identifier: string) => {
+    const id = (identifier || '').trim().toLowerCase()
+    if (!id || /[\s()\[\]<>"'|]/.test(id)) return false
+    const hostPattern = /^[a-z0-9*_-]+(\.[a-z0-9*_-]+)+$/
+    if (/^https?:\/\//.test(id)) {
+      try { return hostPattern.test(new URL(id).hostname.replace(/^\*\./, '')) } catch { return false }
+    }
+    const host = id.split(/[/?#]/)[0].replace(/^\*\./, '').replace(/:\d+$/, '').replace(/\.$/, '')
+    return hostPattern.test(host)
+  }
+  const isScannableBountyAsset = (a: { asset_type?: string; identifier?: string }) => {
+    const t = (a.asset_type || '').toLowerCase()
+    if (['app_store', 'android', 'ios', 'hardware', 'source_code', 'other', 'reference'].includes(t)) return false
+    if (['cidr', 'ip', 'ip_address', 'network'].includes(t)) return coverage !== 'breadth'
+    return !isBountyAppStore(a.identifier || '') && isBountyWebShaped(a.identifier || '')
+  }
   const chosenAssets = (detail?.assets || []).filter(a => selected.has(a.id))
   // Store assets are dropped by the backend for both breadth and deep imports.
-  const skippedAppStore = chosenAssets.filter(a => (a.asset_type || '').toLowerCase() === 'app_store').length
-  const skippedNetwork = coverage === 'breadth'
-    ? chosenAssets.filter(a => nonScannableAssetTypes.has((a.asset_type || '').toLowerCase())).length
-    : 0
-  const skippedNonScannable = skippedNetwork + skippedAppStore
-  const webAssetCount = chosenAssets.length - skippedNonScannable
+  const skippedAppStore = chosenAssets.filter(a => (a.asset_type || '').toLowerCase() === 'app_store' || isBountyAppStore(a.identifier || '')).length
+  const webAssetCount = chosenAssets.filter(a => isScannableBountyAsset(a)).length
+  const skippedNonScannable = chosenAssets.length - webAssetCount
+  const skippedOtherNonScannable = Math.max(0, skippedNonScannable - skippedAppStore)
 
   const createProject = async () => {
     if (!detail || selected.size === 0) return
@@ -222,7 +246,7 @@ export default function BountyPrograms() {
         watch_only: coverage === 'breadth',
       })
       setImportResult({ name: projectName.trim() || detail.name, assets: webAssetCount, skipped: skippedNonScannable })
-      addToast('success', `Project created with ${webAssetCount} web asset${webAssetCount === 1 ? '' : 's'}${skippedNonScannable ? ` · ${skippedNonScannable} non-scannable asset(s) dropped` : ''}`)
+      addToast('success', `Project created with ${webAssetCount} web asset${webAssetCount === 1 ? '' : 's'}${skippedAppStore ? ` · ${skippedAppStore} app listing(s) dropped` : ''}${skippedOtherNonScannable ? ` · ${skippedOtherNonScannable} other non-scannable asset(s) dropped` : ''}`)
       navigate(created.url)
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not create project') }
     finally { setCreating(false) }
@@ -443,7 +467,7 @@ export default function BountyPrograms() {
                     <span className="min-w-0 flex-1 truncate text-text-primary" title={r.program_name || r.program_id}>{r.program_name || r.program_id}</span>
                     <span className="max-w-[45%] truncate text-text-muted" title={r.reason}>
                       {r.ok
-                        ? `${r.assets} asset(s)${r.skipped_network ? ` · ${r.skipped_network} network skipped` : ''}${r.skipped_app_store ? ` · ${r.skipped_app_store} app store(s) skipped` : ''}`
+                        ? `${r.assets} asset(s)${r.skipped_network ? ` · ${r.skipped_network} network skipped` : ''}${r.skipped_app_store ? ` · ${r.skipped_app_store} app listing(s) skipped` : ''}${r.skipped_invalid ? ` · ${r.skipped_invalid} invalid scope(s) skipped` : ''}`
                         : (r.reason || 'failed')}
                     </span>
                   </div>
