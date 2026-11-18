@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	assetutil "github.com/recon-platform/internal/assets"
 	"github.com/recon-platform/internal/database"
 	"golang.org/x/net/idna"
 )
@@ -56,7 +57,7 @@ func LoadWatchEligibleScope(ctx context.Context, db *database.DB, targetID strin
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT DISTINCT pp.program_id, a.id, a.identifier, COALESCE(a.is_wildcard,0)
+		SELECT DISTINCT pp.program_id, a.id, a.identifier, COALESCE(a.is_wildcard,0), COALESCE(a.asset_type,'')
 		FROM project_programs pp
 		JOIN bounty_program_assets a ON a.program_id = pp.program_id
 		WHERE pp.target_id = ?
@@ -72,7 +73,13 @@ func LoadWatchEligibleScope(ctx context.Context, db *database.DB, targetID strin
 	for rows.Next() {
 		var e WatchScopeEntry
 		var wildcard int
-		if err := rows.Scan(&e.ProgramID, &e.AssetID, &e.Identifier, &wildcard); err != nil {
+		var assetType string
+		if err := rows.Scan(&e.ProgramID, &e.AssetID, &e.Identifier, &wildcard, &assetType); err != nil {
+			continue
+		}
+		if !assetutil.IsScannableWebAsset(assetType, e.Identifier) {
+			// App listings, app packages, prose notes, and network assets
+			// cannot become watch-landed hosts.
 			continue
 		}
 		e.IsWildcard = wildcard == 1

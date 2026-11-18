@@ -606,7 +606,11 @@ type ScopeEvent struct {
 }
 
 func (s *Service) ListScopeEvents(ctx context.Context, targetID string) ([]ScopeEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,target_id,program_id,COALESCE(program_asset_id,''),event_type,identifier,old_json,new_json,status,detected_at,resolved_at FROM bounty_scope_events WHERE target_id=? ORDER BY detected_at DESC`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.target_id,e.program_id,COALESCE(e.program_asset_id,''),e.event_type,e.identifier,e.old_json,e.new_json,e.status,e.detected_at,e.resolved_at,
+		COALESCE(b.asset_type,''),COALESCE(b.identifier,'')
+		FROM bounty_scope_events e
+		LEFT JOIN bounty_program_assets b ON b.id = e.program_asset_id
+		WHERE e.target_id=? ORDER BY e.detected_at DESC`, targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -615,8 +619,14 @@ func (s *Service) ListScopeEvents(ctx context.Context, targetID string) ([]Scope
 	for rows.Next() {
 		var e ScopeEvent
 		var resolved sql.NullTime
-		if err := rows.Scan(&e.ID, &e.TargetID, &e.ProgramID, &e.ProgramAssetID, &e.EventType, &e.Identifier, &e.OldJSON, &e.NewJSON, &e.Status, &e.DetectedAt, &resolved); err != nil {
+		var assetType, assetIdentifier string
+		if err := rows.Scan(&e.ID, &e.TargetID, &e.ProgramID, &e.ProgramAssetID, &e.EventType, &e.Identifier, &e.OldJSON, &e.NewJSON, &e.Status, &e.DetectedAt, &resolved, &assetType, &assetIdentifier); err != nil {
 			return nil, err
+		}
+		// Hide old events for app listings and prose notes. Keep events whose
+		// program asset no longer exists; those are genuine history.
+		if e.ProgramAssetID != "" && !assetutil.IsTrackableScopeAsset(assetType, assetIdentifier) {
+			continue
 		}
 		if resolved.Valid {
 			e.ResolvedAt = &resolved.Time
@@ -662,15 +672,25 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 		return err
 	}
 	existing := map[string]struct{ ID, Value, Status, Raw string }{}
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.source_id,a.value,a.approval_status,a.metadata
+	staleNonWeb := []string{}
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.source_id,a.value,a.approval_status,a.metadata,
+		COALESCE(b.asset_type,''),COALESCE(b.identifier,'')
 		FROM assets a JOIN bounty_program_assets b ON b.id=a.source_id
 		WHERE a.target_id=? AND b.program_id=? AND a.source LIKE 'bounty:%'`, targetID, programID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var id, sid, value, status, meta string
-		if rows.Scan(&id, &sid, &value, &status, &meta) == nil {
+		var id, sid, value, status, meta, bType, bIdentifier string
+		if rows.Scan(&id, &sid, &value, &status, &meta, &bType, &bIdentifier) == nil {
+			if !assetutil.IsTrackableScopeAsset(bType, bIdentifier) {
+				// Old imports may have approved an app listing or a prose note.
+				// Suspend it silently. No event and no bell row for this cleanup.
+				if status == "approved" {
+					staleNonWeb = append(staleNonWeb, id)
+				}
+				continue
+			}
 			var m map[string]any
 			_ = json.Unmarshal([]byte(meta), &m)
 			raw, _ := m["raw_hash"].(string)
@@ -678,9 +698,15 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 		}
 	}
 	rows.Close()
+	for _, id := range staleNonWeb {
+		_, _ = s.db.ExecContext(ctx, `UPDATE assets SET approval_status='suspended',monitor_enabled=0,updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	}
 	current := map[string]Asset{}
 	added, removed, modified := 0, 0, 0
 	for _, a := range p.Assets {
+		if !assetutil.IsTrackableScopeAsset(a.AssetType, a.Identifier) {
+			continue
+		}
 		if a.Active && a.InScope && a.EligibleSubmission {
 			current[a.ID] = a
 			if old, ok := existing[a.ID]; !ok {

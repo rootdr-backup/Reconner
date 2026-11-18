@@ -4,6 +4,7 @@
 package assets
 
 import (
+	"net"
 	"net/url"
 	"strings"
 )
@@ -189,4 +190,47 @@ func IsScannableWebAsset(assetType, identifier string) bool {
 	default:
 		return false
 	}
+}
+
+// IsTrackableScopeAsset reports whether an asset should take part in bounty
+// scope-change notifications. It keeps web scope and network scope. It drops
+// app listings, app packages, and prose notes that providers put in scope
+// entries. Network assets stay in scope here because deep projects import and
+// notify on them, even though they never enter web enumeration.
+func IsTrackableScopeAsset(assetType, identifier string) bool {
+	t := strings.ToLower(strings.TrimSpace(assetType))
+	switch t {
+	case "app_store", "android", "ios", "hardware", "source_code", "other", "reference":
+		return false
+	case "cidr", "ip", "network", "ip_address":
+		// Provider labels such as "Description" and "script" contain "ip",
+		// so normalizeAssetType can assign a network type to a prose note.
+		// Validate the identifier before letting it create a scope event.
+		return isNetworkIdentifier(identifier)
+	}
+	if IsAppStoreAsset(identifier) {
+		return false
+	}
+	if !IsWebShapedIdentifier(identifier) {
+		return false
+	}
+	switch t {
+	case "domain", "wildcard", "url", "page", "js", "api":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNetworkIdentifier(identifier string) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(identifier), "*.")
+	if h, _, err := net.SplitHostPort(v); err == nil {
+		v = h
+	}
+	v = strings.TrimSuffix(strings.TrimSpace(v), ".")
+	if net.ParseIP(v) != nil {
+		return true
+	}
+	_, _, err := net.ParseCIDR(v)
+	return err == nil
 }

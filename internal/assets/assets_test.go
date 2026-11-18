@@ -109,3 +109,45 @@ func TestIsScannableWebAsset(t *testing.T) {
 		}
 	}
 }
+
+func TestIsTrackableScopeAsset(t *testing.T) {
+	cases := []struct {
+		assetType  string
+		identifier string
+		want       bool
+	}{
+		{"domain", "example.com", true},
+		{"wildcard", "*.example.com", true},
+		{"url", "https://example.com/app/login", true},
+		{"domain", "cvrstreaming*.arlo.com", true},
+		{"ip", "192.0.2.10", true},
+		{"cidr", "10.0.0.0/24", true},
+		{"network", "2001:db8::/32", true},
+		{"ip_address", "198.51.100.7", true},
+		{"ip", "2001:db8::1", true},
+		{"ip", "192.0.2.10:8443", true},
+		{"ip", "All IPs owned by Acme", false},
+		{"cidr", "internal network range", false},
+		{"network", "our corporate network", false},
+		{"ip_address", "not an address", false},
+		{"app_store", "https://play.google.com/store/apps/details?id=x", false},
+		{"url", "https://play.google.com/store/apps/details?id=x", false},
+		{"url", "play.google.com:443", false},
+		{"url", "https://marketplace.atlassian.com/apps/1212096/x", false},
+		{"domain", "apps.apple.com", false},
+		{"domain", "Third Party Marketplace Apps", false},
+		{"url", "Trustwallet Chrome Extension", false},
+		{"android", "com.example.app", false},
+		{"ios", "com.example.app", false},
+		{"hardware", "Some device", false},
+		{"source_code", "https://github.com/acme/repo", false},
+		{"other", "reference", false},
+		{"reference", "not a host", false},
+	}
+
+	for _, tc := range cases {
+		if got := IsTrackableScopeAsset(tc.assetType, tc.identifier); got != tc.want {
+			t.Errorf("IsTrackableScopeAsset(%q,%q)=%v, want %v", tc.assetType, tc.identifier, got, tc.want)
+		}
+	}
+}
