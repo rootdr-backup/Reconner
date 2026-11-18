@@ -204,11 +204,41 @@ export default function BountyPrograms() {
   const isBountyAppStore = (identifier: string) => {
     const id = (identifier || '').trim().toLowerCase()
     if (!id) return false
-    const host = id.replace(/^[a-z]+:\/\//, '').split(/[/?#]/)[0].replace(/^\*\./, '').replace(/\.$/, '')
+    const normalizeHost = (value: string) => {
+      const stripped = value.replace(/^\*\./, '').replace(/\.$/, '')
+      const port = stripped.lastIndexOf(':')
+      return port >= 0 && /^\d+$/.test(stripped.slice(port + 1)) ? stripped.slice(0, port) : stripped
+    }
+    let host: string
+    let path: string
+    if (/^https?:\/\//.test(id)) {
+      try {
+        const parsed = new URL(id)
+        host = normalizeHost(parsed.hostname)
+        path = parsed.pathname
+      } catch { return false }
+    } else {
+      const cut = id.search(/[/?#]/)
+      host = normalizeHost(cut >= 0 ? id.slice(0, cut) : id)
+      const rest = cut >= 0 ? id.slice(cut) : ''
+      const slash = rest.indexOf('/')
+      path = slash >= 0 ? rest.slice(slash) : ''
+    }
     const storeHosts = ['play.google.com', 'apps.apple.com', 'itunes.apple.com', 'appstore.apple.com', 'apps.microsoft.com', 'appgallery.huawei.com', 'store.steampowered.com', 'chromewebstore.google.com']
-    return storeHosts.includes(host)
-      || /\/store\/apps\/|\/us\/app\/|\/store\/app\/|\/app\/id\d|\/app\/[^/]+\/id\d/.test(id)
-      || id.includes('marketplace.atlassian.com/apps/') || id.includes('chrome.google.com/webstore/')
+    if (storeHosts.includes(host)) return true
+    if (host === 'marketplace.atlassian.com' && path.startsWith('/apps/')) return true
+    if (host === 'chrome.google.com' && path.startsWith('/webstore/')) return true
+    if (!storeHosts.includes(host)) return false
+    const storePaths = ['/store/apps/details', '/store/apps/', '/us/app/', '/store/app/']
+    if (storePaths.some(p => path.includes(p))) return true
+    const index = path.indexOf('/app/')
+    if (index >= 0) {
+      const rest = path.slice(index + 5)
+      if (/^id\d/.test(rest)) return true
+      const at = rest.indexOf('/id')
+      if (at >= 0 && /^\/id\d/.test(rest.slice(at))) return true
+    }
+    return false
   }
   const isBountyWebShaped = (identifier: string) => {
     const id = (identifier || '').trim().toLowerCase()

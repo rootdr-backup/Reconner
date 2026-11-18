@@ -37,32 +37,32 @@ func IsAppStoreAsset(identifier string) bool {
 		return false
 	}
 
-	host := raw
-	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
-		host = parsed.Hostname()
-	}
-	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
-	host = strings.TrimPrefix(host, "*.")
+	host, path := storeHostAndPath(raw)
 	if AppStoreHosts[host] {
 		return true
 	}
-
 	// Marketplace app pages are listings too. Match the store host together
-	// with its app path so an unrelated /apps/ route on another host is safe.
-	if strings.Contains(raw, "marketplace.atlassian.com/apps/") || strings.Contains(raw, "chrome.google.com/webstore/") {
+	// with its path so an unrelated /apps/ route on another host is safe.
+	if host == "marketplace.atlassian.com" && strings.HasPrefix(path, "/apps/") {
 		return true
 	}
+	if host == "chrome.google.com" && strings.HasPrefix(path, "/webstore/") {
+		return true
+	}
+	if !AppStoreHosts[host] {
+		return false
+	}
 
-	for _, path := range appStorePaths {
-		if strings.Contains(raw, path) {
+	for _, p := range appStorePaths {
+		if strings.Contains(path, p) {
 			return true
 		}
 	}
 
 	// Apple App Store IDs appear as /app/<name>/id<digits>. Require actual
 	// digits after "id" so a normal path such as /app/identity is not excluded.
-	if index := strings.Index(raw, "/app/"); index >= 0 {
-		rest := raw[index+len("/app/"):]
+	if index := strings.Index(path, "/app/"); index >= 0 {
+		rest := path[index+len("/app/"):]
 		if strings.HasPrefix(rest, "id") && startsWithDigit(strings.TrimPrefix(rest, "id")) {
 			return true
 		}
@@ -71,6 +71,40 @@ func IsAppStoreAsset(identifier string) bool {
 		}
 	}
 	return false
+}
+
+// storeHostAndPath splits an identifier into the host and path portions that
+// the store checks use. It handles full URLs, bare hosts with a numeric port,
+// and bare host/path forms. Without this split, a path fragment such as
+// /store/app/ on any host would be mistaken for an app listing.
+func storeHostAndPath(raw string) (host, path string) {
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" {
+			return "", ""
+		}
+		return normalizeStoreHost(parsed.Hostname()), parsed.Path
+	}
+
+	host = raw
+	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
+		host, path = raw[:i], raw[i:]
+		if slash := strings.Index(path, "/"); slash >= 0 {
+			path = path[slash:]
+		} else {
+			path = ""
+		}
+	}
+	return normalizeStoreHost(host), path
+}
+
+func normalizeStoreHost(host string) string {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	host = strings.TrimPrefix(host, "*.")
+	if i := strings.LastIndex(host, ":"); i >= 0 && allDigits(host[i+1:]) {
+		host = host[:i]
+	}
+	return host
 }
 
 func startsWithDigit(s string) bool {

@@ -31,7 +31,10 @@ contains only store assets finishes a watch round with zero hosts. Exact hosts
 and store-specific paths are matched, so a scope of `apple.com` or `google.com`
 still scans normally. The importer also rejects prose scope notes that carry a
 `domain` or `url` type but are not hosts, for example "Third Party Marketplace
-Apps". Those notes become non-scannable references.
+Apps". Those notes become non-scannable references. Store paths such as
+`/store/apps/` count only on a store host, so a normal API path like
+`/api/store/app/v1/users` stays scannable. A numeric port on a store host, as
+in `play.google.com:443`, is still excluded.
 
 Existing store rows stay as they are; no migration rewrites scope decisions. The
 scan-time guard skips them even if they are still typed `url` or `domain`. To
@@ -42,15 +45,33 @@ UPDATE assets
 SET asset_type = 'app_store'
 WHERE COALESCE(asset_type,'') IN ('domain','url','page','api','other')
   AND (
-    lower(value) LIKE '%play.google.com%'
-    OR lower(value) LIKE '%apps.apple.com%'
-    OR lower(value) LIKE '%itunes.apple.com%'
-    OR lower(value) LIKE '%appstore.apple.com%'
-    OR lower(value) LIKE '%apps.microsoft.com%'
-    OR lower(value) LIKE '%appgallery.huawei.com%'
-    OR lower(value) LIKE '%store.steampowered.com%'
-    OR lower(value) LIKE '%chromewebstore.google.com%'
-    OR lower(value) LIKE '%marketplace.atlassian.com/apps/%'
+    lower(value) LIKE 'play.google.com%'
+    OR lower(value) LIKE 'http://play.google.com%'
+    OR lower(value) LIKE 'https://play.google.com%'
+    OR lower(value) LIKE 'apps.apple.com%'
+    OR lower(value) LIKE 'http://apps.apple.com%'
+    OR lower(value) LIKE 'https://apps.apple.com%'
+    OR lower(value) LIKE 'itunes.apple.com%'
+    OR lower(value) LIKE 'http://itunes.apple.com%'
+    OR lower(value) LIKE 'https://itunes.apple.com%'
+    OR lower(value) LIKE 'appstore.apple.com%'
+    OR lower(value) LIKE 'http://appstore.apple.com%'
+    OR lower(value) LIKE 'https://appstore.apple.com%'
+    OR lower(value) LIKE 'apps.microsoft.com%'
+    OR lower(value) LIKE 'http://apps.microsoft.com%'
+    OR lower(value) LIKE 'https://apps.microsoft.com%'
+    OR lower(value) LIKE 'appgallery.huawei.com%'
+    OR lower(value) LIKE 'http://appgallery.huawei.com%'
+    OR lower(value) LIKE 'https://appgallery.huawei.com%'
+    OR lower(value) LIKE 'store.steampowered.com%'
+    OR lower(value) LIKE 'http://store.steampowered.com%'
+    OR lower(value) LIKE 'https://store.steampowered.com%'
+    OR lower(value) LIKE 'chromewebstore.google.com%'
+    OR lower(value) LIKE 'http://chromewebstore.google.com%'
+    OR lower(value) LIKE 'https://chromewebstore.google.com%'
+    OR lower(value) LIKE 'marketplace.atlassian.com/apps/%'
+    OR lower(value) LIKE 'http://marketplace.atlassian.com/apps/%'
+    OR lower(value) LIKE 'https://marketplace.atlassian.com/apps/%'
   );
 ```
 
