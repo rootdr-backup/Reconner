@@ -710,19 +710,22 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 		if a.Active && a.InScope && a.EligibleSubmission {
 			current[a.ID] = a
 			if old, ok := existing[a.ID]; !ok {
-				s.createScopeEvent(ctx, targetID, p.ID, a.ID, "added", a.Identifier, "{}", mustJSON(a))
-				added++
+				if s.createScopeEvent(ctx, targetID, p.ID, a.ID, "added", a.Identifier, "{}", mustJSON(a)) {
+					added++
+				}
 			} else if old.Raw != "" && old.Raw != a.RawHash {
-				s.createScopeEvent(ctx, targetID, p.ID, a.ID, "modified", a.Identifier, mustJSON(old), mustJSON(a))
-				modified++
+				if s.createScopeEvent(ctx, targetID, p.ID, a.ID, "modified", a.Identifier, mustJSON(old), mustJSON(a)) {
+					modified++
+				}
 			}
 		}
 	}
 	for sid, old := range existing {
 		if _, ok := current[sid]; !ok && old.Status != "suspended" {
 			_, _ = s.db.ExecContext(ctx, `UPDATE assets SET approval_status='suspended',monitor_enabled=0,updated_at=CURRENT_TIMESTAMP WHERE id=?`, old.ID)
-			s.createScopeEvent(ctx, targetID, p.ID, sid, "removed", old.Value, mustJSON(old), "{}")
-			removed++
+			if s.createScopeEvent(ctx, targetID, p.ID, sid, "removed", old.Value, mustJSON(old), "{}") {
+				removed++
+			}
 		}
 	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE project_programs SET last_scope_hash=?,last_checked_at=CURRENT_TIMESTAMP WHERE target_id=? AND program_id=?`, p.ScopeHash, targetID, p.ID)
@@ -749,23 +752,30 @@ func scopeEventFingerprint(eventType, identifier, oldJSON, newJSON string) strin
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON string) {
+// createScopeEvent inserts a pending review event unless the fingerprint was
+// already decided or a pending event exists. It reports whether a row was
+// inserted so callers count and notify only for genuinely new changes.
+func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON string) bool {
 	fingerprint := scopeEventFingerprint(eventType, identifier, oldJSON, newJSON)
 	var decided int
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_decisions WHERE target_id=? AND program_id=? AND program_asset_id=? AND event_type=? AND fingerprint=?`, targetID, programID, assetID, eventType, fingerprint).Scan(&decided)
 	if decided > 0 {
-		return
+		return false
 	}
 	var n int
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND program_asset_id=? AND event_type=? AND status='pending'`, targetID, assetID, eventType).Scan(&n)
 	if n > 0 {
-		return
+		return false
 	}
 	eventID := uuid.New().String()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO bounty_scope_events(id,target_id,program_id,program_asset_id,event_type,identifier,old_json,new_json,status) VALUES(?,?,?,?,?,?,?,?, 'pending')`, eventID, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON)
-	if err == nil && s.onScopeEvent != nil {
+	if err != nil {
+		return false
+	}
+	if s.onScopeEvent != nil {
 		s.onScopeEvent(ctx, targetID, programID, eventID, eventType, identifier)
 	}
+	return true
 }
 
 func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, decision string) error {

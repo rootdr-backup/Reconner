@@ -99,6 +99,12 @@ func TestIsScannableWebAsset(t *testing.T) {
 		{"android", "com.example.app", false},
 		{"ios", "com.example.app", false},
 		{"cidr", "10.0.0.0/24", false},
+		// Mislabeled network assets must not enter web enumeration.
+		{"domain", "10.0.0.0/24", false},
+		{"domain", "192.0.2.10", false},
+		{"url", "10.0.0.0/24", false},
+		{"url", "192.0.2.10", false},
+		{"domain", "https://10.0.0.0/24", false},
 		{"other", "reference", false},
 		{"", "example.com", false},
 	}

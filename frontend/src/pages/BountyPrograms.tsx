@@ -10,6 +10,9 @@ import type { BountyFavorite, BountyProgramList, BulkCreateProjectResult } from 
 
 const policyLabel: Record<string, string> = { notify: 'Notify only', light_recon: 'Notify + light recon', full_scan: 'Notify + full scan' }
 
+// The backend bulk endpoint caps one request at 100 programs.
+const BULK_SELECT_LIMIT = 100
+
 type Filters = {
   search: string; provider: string; bounties: string; wildcard: string; assetType: string
   minAssets: string; maxAssets: string; minReward: string; programType: string
@@ -109,7 +112,10 @@ export default function BountyPrograms() {
     const timer = setInterval(() => load(true), 2500)
     return () => clearInterval(timer)
   }, [detailIndex?.running, query])
-  useEffect(() => { setPage(1) }, [filters])
+  useEffect(() => { setPage(1); setProgramSelected(new Set()) }, [filters])
+  // Selection is page-scoped. Clearing it on page change prevents creating
+  // projects for programs the user can no longer see.
+  useEffect(() => { setProgramSelected(new Set()) }, [page])
 
   const openProgram = async (p: BountyProgram) => {
     setDetailLoading(true); setDetail(p); setAssetSearch(''); setPaidOnly(false); setAssetLimit(100); setSelected(new Set()); setProjectName(p.name)
@@ -250,11 +256,32 @@ export default function BountyPrograms() {
     const host = id.split(/[/?#]/)[0].replace(/^\*\./, '').replace(/:\d+$/, '').replace(/\.$/, '')
     return hostPattern.test(host)
   }
+  const isBountyNetworkIdentifier = (identifier: string) => {
+    let v = (identifier || '').trim().toLowerCase()
+    if (v.startsWith('*.')) v = v.slice(2)
+    if (/^https?:\/\//.test(v)) {
+      try { v = new URL(v).hostname } catch { return false }
+    }
+    v = v.replace(/:\d+$/, '').replace(/\.$/, '')
+    if (/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(v)) {
+      const base = v.split('/')[0]
+      return base.split('.').every(octet => Number(octet) <= 255)
+    }
+    // IPv6 or IPv6 CIDR.
+    if (v.includes(':') && /^[0-9a-f:./]+$/.test(v)) return true
+    return false
+  }
+  // Mirror the importer: only domain/wildcard/url/page/js/api become web
+  // assets; network types are imported for deep only; everything else
+  // (ai_model, notes, store listings) becomes a reference and is skipped.
   const isScannableBountyAsset = (a: { asset_type?: string; identifier?: string }) => {
     const t = (a.asset_type || '').toLowerCase()
-    if (['app_store', 'android', 'ios', 'hardware', 'source_code', 'other', 'reference'].includes(t)) return false
-    if (['cidr', 'ip', 'ip_address', 'network'].includes(t)) return coverage !== 'breadth'
-    return !isBountyAppStore(a.identifier || '') && isBountyWebShaped(a.identifier || '')
+    const ident = a.identifier || ''
+    if (['cidr', 'ip'].includes(t)) return coverage !== 'breadth'
+    if (!['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(t)) return false
+    if (isBountyAppStore(ident)) return false
+    if (isBountyNetworkIdentifier(ident)) return false
+    return isBountyWebShaped(ident)
   }
   const chosenAssets = (detail?.assets || []).filter(a => selected.has(a.id))
   // Store assets are dropped by the backend for both breadth and deep imports.
@@ -349,12 +376,19 @@ export default function BountyPrograms() {
 
       {programSelected.size > 0 && (
         <div className="card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <p className="text-xs text-text-secondary">
-            <span className="font-semibold text-text-primary">{programSelected.size}</span> program(s) selected for bulk import
-          </p>
+          <div>
+            <p className="text-xs text-text-secondary">
+              <span className="font-semibold text-text-primary">{programSelected.size}</span> program(s) selected for bulk import
+            </p>
+            {programSelected.size > BULK_SELECT_LIMIT && (
+              <p className="mt-1 text-xs text-severity-medium">
+                Bulk import allows at most {BULK_SELECT_LIMIT} programs. Deselect {programSelected.size - BULK_SELECT_LIMIT} to continue.
+              </p>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="secondary" onClick={() => setProgramSelected(new Set())}>Clear selection</Button>
-            <Button size="sm" onClick={() => { setBulkResults(null); setBulkOpen(true) }}>Create projects</Button>
+            <Button size="sm" disabled={programSelected.size > BULK_SELECT_LIMIT} onClick={() => { setBulkResults(null); setBulkOpen(true) }}>Create projects</Button>
           </div>
         </div>
       )}
@@ -514,7 +548,7 @@ export default function BountyPrograms() {
             ) : (
               <>
                 <Button variant="secondary" disabled={bulkBusy} onClick={() => setBulkOpen(false)}>Cancel</Button>
-                <Button loading={bulkBusy} disabled={programSelected.size === 0} onClick={submitBulk}>Create {programSelected.size} project(s)</Button>
+                <Button loading={bulkBusy} disabled={programSelected.size === 0 || programSelected.size > BULK_SELECT_LIMIT} onClick={submitBulk}>Create {programSelected.size} project(s)</Button>
               </>
             )}
           </div>

@@ -183,6 +183,7 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
   const [visibleCount, setVisibleCount] = useState(PAGE)
   const [expanded, setExpanded] = useState<Map<string, number>>(new Map())
   const [diffView, setDiffView] = useState<DiffView | null>(null)
+  const [serverTotal, setServerTotal] = useState(0)
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const requestSeq = useRef(0)
 
@@ -210,8 +211,16 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
     const globalTarget = !targetId ? selectedTargetId : ''
     if (globalTarget) params.target_id = globalTarget
     try {
+      // Per-target keeps the full history for one target. Global fetches only
+      // server page 1; "Load more" appends later pages on demand.
+      const changesRequest = targetId
+        ? changes.forTarget(targetId, params)
+        : changes.listPage({ ...params, page: '1', limit: String(PAGE) }).then(res => {
+          if (seq === requestSeq.current) setServerTotal(res.total)
+          return res.data
+        })
       const [changeRows, roundRows] = await Promise.all([
-        targetId ? changes.forTarget(targetId, params) : changes.list(params),
+        changesRequest,
         watchApi.rounds(globalTarget ? { target_id: globalTarget } : targetId ? { target_id: targetId } : {}),
       ])
       if (seq !== requestSeq.current) return
@@ -224,6 +233,40 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
       if (seq === requestSeq.current) setLoading(false)
     }
   }, [targetId, category, severity, source, since, selectedTaskId, selectedTargetId])
+
+  // Global view appends the next server page. Per-target view just grows the
+  // client window over the full history it already loaded.
+  const loadMore = async () => {
+    if (targetId) {
+      setVisibleCount(v => v + PAGE)
+      return
+    }
+    const seq = ++requestSeq.current
+    setLoading(true)
+    const params: Record<string, string> = {}
+    if (category !== 'all') params.category = category
+    if (severity) params.severity = severity
+    if (source) params.source = source
+    if (since) params.since = since
+    if (selectedTaskId) params.task_id = selectedTaskId
+    if (selectedTargetId) params.target_id = selectedTargetId
+    const nextPage = Math.floor(rows.length / PAGE) + 1
+    try {
+      const res = await changes.listPage({ ...params, page: String(nextPage), limit: String(PAGE) })
+      if (seq !== requestSeq.current) return
+      setServerTotal(res.total)
+      setRows(prev => {
+        const seen = new Set(prev.map(r => r.id))
+        const added = res.data.filter(r => !seen.has(r.id))
+        return added.length ? [...prev, ...added] : prev
+      })
+      setVisibleCount(v => v + PAGE)
+    } catch (e) {
+      if (seq === requestSeq.current) setError(e instanceof Error ? e.message : 'Failed to load more changes')
+    } finally {
+      if (seq === requestSeq.current) setLoading(false)
+    }
+  }
 
   useEffect(() => { void load(true) }, [load])
 
@@ -320,17 +363,15 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
         <Kpi label="Last detection" value={lastSeen} />
       </div>
 
-      {!compact && (
-        <section className="rounded-xl border border-white/[.06] bg-white/[.02]">
-          <h3 className="panel-heading">Watch rounds</h3>
-          <RoundTimeline
-            rounds={rounds}
-            selectedTaskId={selectedTaskId}
-            onSelect={id => { setSelectedTaskId(id); setVisibleCount(PAGE) }}
-            compact={compact}
-          />
-        </section>
-      )}
+      <section className="rounded-xl border border-white/[.06] bg-white/[.02]">
+        <h3 className="panel-heading">Watch rounds</h3>
+        <RoundTimeline
+          rounds={rounds}
+          selectedTaskId={selectedTaskId}
+          onSelect={id => { setSelectedTaskId(id); setVisibleCount(PAGE) }}
+          compact={compact}
+        />
+      </section>
 
       <section className="rounded-xl border border-white/[.06] bg-white/[.02]">
         <div className="border-b border-white/[.06] px-3 py-2">
@@ -443,9 +484,9 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
             <span className="tabular-nums">
               {groups.length} distinct change group(s) · {visibleRows.length} change(s)
             </span>
-            {visibleCount < groups.length && (
-              <Button size="sm" variant="ghost" onClick={() => setVisibleCount(v => v + PAGE)}>
-                Load {Math.min(PAGE, groups.length - visibleCount)} more
+            {(targetId ? visibleCount < groups.length : rows.length < serverTotal) && (
+              <Button size="sm" variant="ghost" onClick={() => void loadMore()} disabled={loading}>
+                Load {Math.min(PAGE, targetId ? groups.length - visibleCount : serverTotal - rows.length)} more
               </Button>
             )}
           </div>

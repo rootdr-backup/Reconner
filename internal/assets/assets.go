@@ -23,13 +23,6 @@ var AppStoreHosts = map[string]bool{
 	"chromewebstore.google.com": true,
 }
 
-var appStorePaths = []string{
-	"/store/apps/details",
-	"/store/apps/",
-	"/us/app/",
-	"/store/app/",
-}
-
 // IsAppStoreAsset reports whether an identifier points to a mobile or desktop
 // app listing instead of a web origin that Reconner can enumerate.
 func IsAppStoreAsset(identifier string) bool {
@@ -49,27 +42,6 @@ func IsAppStoreAsset(identifier string) bool {
 	}
 	if host == "chrome.google.com" && strings.HasPrefix(path, "/webstore/") {
 		return true
-	}
-	if !AppStoreHosts[host] {
-		return false
-	}
-
-	for _, p := range appStorePaths {
-		if strings.Contains(path, p) {
-			return true
-		}
-	}
-
-	// Apple App Store IDs appear as /app/<name>/id<digits>. Require actual
-	// digits after "id" so a normal path such as /app/identity is not excluded.
-	if index := strings.Index(path, "/app/"); index >= 0 {
-		rest := path[index+len("/app/"):]
-		if strings.HasPrefix(rest, "id") && startsWithDigit(strings.TrimPrefix(rest, "id")) {
-			return true
-		}
-		if pos := strings.Index(rest, "/id"); pos >= 0 && startsWithDigit(rest[pos+len("/id"):]) {
-			return true
-		}
 	}
 	return false
 }
@@ -106,10 +78,6 @@ func normalizeStoreHost(host string) string {
 		host = host[:i]
 	}
 	return host
-}
-
-func startsWithDigit(s string) bool {
-	return len(s) > 0 && s[0] >= '0' && s[0] <= '9'
 }
 
 // IsWebShapedIdentifier reports whether raw can work as a DNS root or an HTTP
@@ -181,6 +149,12 @@ func IsScannableWebAsset(assetType, identifier string) bool {
 	if IsAppStoreAsset(identifier) {
 		return false
 	}
+	// A mislabeled row may carry a CIDR or bare IP under a web type such as
+	// "domain". validHostname accepts all-numeric labels, so the web-shape
+	// check alone would let a network range into web enumeration.
+	if isNetworkIdentifier(identifier) {
+		return false
+	}
 	if !IsWebShapedIdentifier(identifier) {
 		return false
 	}
@@ -224,6 +198,11 @@ func IsTrackableScopeAsset(assetType, identifier string) bool {
 
 func isNetworkIdentifier(identifier string) bool {
 	v := strings.TrimPrefix(strings.TrimSpace(identifier), "*.")
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		if parsed, err := url.Parse(v); err == nil && parsed.Hostname() != "" {
+			v = parsed.Hostname()
+		}
+	}
 	if h, _, err := net.SplitHostPort(v); err == nil {
 		v = h
 	}

@@ -388,9 +388,41 @@ export const findings = {
   },
 }
 
-// Unified Changes feed. load every page so the global view and the per-target
-// tab show the same complete history; the API still supports page/limit.
+export interface PagedResult<T> {
+  data: T[]
+  total: number
+  page: number
+  limit: number
+}
+
+// fetchPage returns one server page with its total. The global Changes view
+// uses this so a filter change or WS event costs one request, not a full walk
+// of every page. The per-target view still uses fetchAllPaged.
+async function fetchPage<T>(path: string, extra?: Record<string, string>): Promise<PagedResult<T>> {
+  const qs = new URLSearchParams({ ...(extra || {}) })
+  const res = await fetch(`${BASE}${path}?${qs.toString()}`, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    let msg = text
+    try { msg = JSON.parse(text).error || text } catch { /**/ }
+    throw new APIError(res.status, msg)
+  }
+  const json = text ? JSON.parse(text) : {}
+  return {
+    data: Array.isArray(json?.data) ? json.data : [],
+    total: typeof json?.total === 'number' ? json.total : 0,
+    page: typeof json?.page === 'number' ? json.page : 1,
+    limit: typeof json?.limit === 'number' ? json.limit : 0,
+  }
+}
+
+// Unified Changes feed. The per-target tab loads all pages for one target;
+// the global page fetches one server page at a time and appends on "Load more".
 export const changes = {
+  listPage: (params?: Record<string, string>) => fetchPage<ChangeEntry>('/changes', params),
   list: (params?: Record<string, string>) => fetchAllPaged<ChangeEntry>('/changes', params),
   forTarget: (id: string, params?: Record<string, string>) =>
     fetchAllPaged<ChangeEntry>(`/targets/${id}/changes`, params),

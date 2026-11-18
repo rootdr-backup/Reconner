@@ -114,6 +114,7 @@ type scanConfigPayload struct {
 	WatchHTTPThreads              int      `json:"watch_http_threads"`
 	WatchHTTPRateLimit            int      `json:"watch_http_rate_limit"`
 	WatchRoundsMinGap             int      `json:"watch_rounds_min_gap"`
+	WatchRoundIntervalHours       int      `json:"watch_round_interval_hours"`
 	WatchSourceTimeoutMinutes     int      `json:"watch_source_timeout_minutes"`
 	WatchEnumerationSources       []string `json:"watch_enumeration_sources"`
 	WatchRowsRetentionDays        int      `json:"watch_rows_retention_days"`
@@ -158,6 +159,7 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		WatchHTTPThreads:              h.cfg.Limits.WatchHTTPThreads,
 		WatchHTTPRateLimit:            h.cfg.Limits.WatchHTTPRateLimit,
 		WatchRoundsMinGap:             h.cfg.WatchRoundsMinGap,
+		WatchRoundIntervalHours:       h.cfg.WatchRoundIntervalHours,
 		WatchSourceTimeoutMinutes:     h.cfg.WatchSourceTimeoutMinutes,
 		WatchEnumerationSources:       h.cfg.WatchEnumerationSources,
 		WatchRowsRetentionDays:        h.cfg.WatchRowsRetentionDays,
@@ -192,6 +194,7 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		WatchHTTPThreads              *int      `json:"watch_http_threads"`
 		WatchHTTPRateLimit            *int      `json:"watch_http_rate_limit"`
 		WatchRoundsMinGap             *int      `json:"watch_rounds_min_gap"`
+		WatchRoundIntervalHours       *int      `json:"watch_round_interval_hours"`
 		WatchSourceTimeoutMinutes     *int      `json:"watch_source_timeout_minutes"`
 		WatchEnumerationSources       *[]string `json:"watch_enumeration_sources"`
 		WatchRowsRetentionDays        *int      `json:"watch_rows_retention_days"`
@@ -289,6 +292,9 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 	}
 	if body.WatchRoundsMinGap != nil {
 		h.cfg.WatchRoundsMinGap = clamp(*body.WatchRoundsMinGap, 5, 1440)
+	}
+	if body.WatchRoundIntervalHours != nil {
+		h.cfg.WatchRoundIntervalHours = clamp(*body.WatchRoundIntervalHours, 1, 168)
 	}
 	if body.WatchSourceTimeoutMinutes != nil {
 		h.cfg.WatchSourceTimeoutMinutes = clamp(*body.WatchSourceTimeoutMinutes, 1, 30)

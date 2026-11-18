@@ -2050,6 +2050,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var beforeHosts, afterHosts map[string]bool
 	var watchDiffModule string
 	var watchDiffReady bool
+	var watchDiffCapped bool
 
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
 		moduleCtx = scanner.WithCoverageReporter(moduleCtx, func(metric scanner.CoverageMetric, delta int64) {
@@ -2070,6 +2071,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		if taskType == watchScanType {
 			watchDiffModule = module
 			watchDiffReady = false
+			watchDiffCapped = false
 			switch module {
 			case ModuleHTTPProbe:
 				snap, err := snapshotWatchHTTP(moduleCtx, s.db, targetID)
@@ -2078,7 +2080,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				} else {
 					beforeHTTP = snap
 					if len(snap) == watchSnapshotCap {
-						s.logger.Warn("watch changes: HTTP snapshot capped; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+						watchDiffCapped = true
+						s.logger.Warn("watch changes: HTTP snapshot capped; skipping diff", "target_id", targetID, "cap", watchSnapshotCap)
 					}
 				}
 			case ModuleSubdomainEnum:
@@ -2088,7 +2091,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				} else {
 					beforeHosts = snap
 					if len(snap) == watchSnapshotCap {
-						s.logger.Warn("watch changes: host snapshot capped; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+						watchDiffCapped = true
+						s.logger.Warn("watch changes: host snapshot capped; skipping diff", "target_id", targetID, "cap", watchSnapshotCap)
 					}
 				}
 			}
@@ -2116,10 +2120,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					s.logger.Warn("watch changes: after HTTP snapshot failed", "error", snapErr)
 				} else if beforeHTTP != nil {
 					afterHTTP = snap
-					watchDiffReady = true
 					if len(snap) == watchSnapshotCap {
-						s.logger.Warn("watch changes: HTTP snapshot capped after probe; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+						watchDiffCapped = true
+						s.logger.Warn("watch changes: HTTP snapshot capped after probe; skipping diff", "target_id", targetID, "cap", watchSnapshotCap)
 					}
+					watchDiffReady = !watchDiffCapped
 				}
 			case ModuleSubdomainEnum:
 				snap, snapErr := snapshotWatchHosts(moduleCtx, s.db, targetID)
@@ -2127,10 +2132,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					s.logger.Warn("watch changes: after host snapshot failed", "error", snapErr)
 				} else if beforeHosts != nil {
 					afterHosts = snap
-					watchDiffReady = true
 					if len(snap) == watchSnapshotCap {
-						s.logger.Warn("watch changes: host snapshot capped after probe; diff may be incomplete", "target_id", targetID, "cap", watchSnapshotCap)
+						watchDiffCapped = true
+						s.logger.Warn("watch changes: host snapshot capped after probe; skipping diff", "target_id", targetID, "cap", watchSnapshotCap)
 					}
+					watchDiffReady = !watchDiffCapped
 				}
 			}
 		}
@@ -2391,14 +2397,19 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		modCtxErr := modCtx.Err()
 		skipped, timedOut := finishPhase()
 		phaseStatus, phaseReason := phaseOutcome(err, skipped, timedOut, ctx.Err())
-		if shouldWriteWatchDiff(taskType, skipped, timedOut, err, modCtxErr, watchDiffReady) {
+		// On force-release the worker may still be writing the snapshot vars.
+		// Do not read them; a forced phase never produces a diff anyway.
+		writeDiff := !forced && shouldWriteWatchDiff(taskType, skipped, timedOut, err, modCtxErr, watchDiffReady)
+		if writeDiff {
 			switch watchDiffModule {
 			case ModuleHTTPProbe:
 				s.insertWatchRoundChanges(ctx, taskID, targetID, diffWatchHTTP(beforeHTTP, afterHTTP))
 			case ModuleSubdomainEnum:
 				s.insertWatchRoundChanges(ctx, taskID, targetID, diffWatchHosts(beforeHosts, afterHosts))
 			}
-			beforeHTTP, afterHTTP, beforeHosts, afterHosts, watchDiffModule, watchDiffReady = nil, nil, nil, nil, "", false
+		}
+		if !forced {
+			beforeHTTP, afterHTTP, beforeHosts, afterHosts, watchDiffModule, watchDiffReady, watchDiffCapped = nil, nil, nil, nil, "", false, false
 		}
 		s.finishTaskPhase(taskID, module, phaseStatus, phaseReason, time.Since(phaseStartedAt))
 		if s.notifier != nil && taskType != watchScanType {
