@@ -1113,7 +1113,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	// are announced live.
 	preexisting := s.existingSubdomainSet(ctx, targetID)
 
-	var resolved, cnameOnly, wildcardHits, unresolved, transient int
+	var resolved, cnameWithIP, cnameOnly, wildcardHits, unresolved, transient int
 	var cmu sync.Mutex
 	rejected := make(map[string]bool)
 	// Admission writes are COLLECTED and flushed in a single transaction after the
@@ -1124,6 +1124,30 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	type resolvedRow struct{ name, ip, source string }
 	var rows []resolvedRow
 	cnameCandidates, cnameTargets, cnamePrefilter := s.dnsxCNAMECandidates(ctx, targetID, names)
+	cnameTargetIPs := s.cnameTargetIPSet(ctx, targetID, cnameTargets)
+
+	// ipsForCNAME is the single lookup used by classify. It prefers the batched
+	// dnsx answers and falls back to the in-process resolver for targets found
+	// by lookupExplicitCNAME. Shared CDN targets are resolved once.
+	cnameIPCache := make(map[string][]string, len(cnameTargetIPs))
+	for k, v := range cnameTargetIPs {
+		cnameIPCache[k] = v
+	}
+	var cipMu sync.Mutex
+	ipsForCNAME := func(target string) []string {
+		key := normalizeSubdomainName(target)
+		if key == "" {
+			return nil
+		}
+		cipMu.Lock()
+		defer cipMu.Unlock()
+		if ips, ok := cnameIPCache[key]; ok {
+			return ips
+		}
+		ips, _ := lookupIPs(ctx, key, s.resolver)
+		cnameIPCache[key] = ips
+		return ips
+	}
 
 	// admit appends one classified name to the batched write set. Only names
 	// absent from `preexisting` stream the live "new_subdomain" event, and only
@@ -1173,9 +1197,18 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 				cmu.Unlock()
 				return
 			}
-			// A dangling but explicit CNAME is a real DNS asset and must remain
-			// available to takeover checks, but it is not sent to the web pipeline.
+			// An explicit CNAME is a real DNS asset. Copy the target's A/AAAA
+			// onto the alias so a live alias reaches the web pipeline. dnsx
+			// returns those addresses under the target name, not the alias.
+			// A dangling target keeps an empty IP and stays in takeover checks.
 			if cname := cnameFor(name); cname != "" && !wildcardProfile.isWildcardCNAME(name, cname) {
+				if aliasIP, live := classifyCNAMEAlias(name, cname, ipsForCNAME, wildcardProfile); live {
+					cmu.Lock()
+					cnameWithIP++
+					cmu.Unlock()
+					admit(name, aliasIP, "dns-cname")
+					return
+				}
 				cmu.Lock()
 				cnameOnly++
 				cmu.Unlock()
@@ -1257,7 +1290,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 					return
 				case <-ticker.C:
 					cmu.Lock()
-					logFn("info", "subdomain_enum", fmt.Sprintf("Resolution progress: %d/%d checked — %d verified, %d wildcard, %d CNAME-only, %d unresolved", checked.Load(), len(names), resolved, cnameOnly, wildcardHits, unresolved))
+					logFn("info", "subdomain_enum", fmt.Sprintf("Resolution progress: %d/%d checked — %d verified, %d CNAME+IP, %d wildcard, %d dangling CNAME, %d unresolved", checked.Load(), len(names), resolved, cnameWithIP, wildcardHits, cnameOnly, unresolved))
 					cmu.Unlock()
 				}
 			}
@@ -1302,7 +1335,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 		}
 	}
 
-	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d explicit CNAME, %d wildcard-only, %d unresolved (NXDOMAIN), %d transient-miss kept (from %d candidates)", resolved, cnameOnly, wildcardHits, unresolved, transient, len(names)))
+	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d CNAME aliases with target IP, %d dangling CNAME, %d wildcard-only, %d unresolved (NXDOMAIN), %d transient-miss kept (from %d candidates)", resolved, cnameWithIP, cnameOnly, wildcardHits, unresolved, transient, len(names)))
 	return rejected
 }
 
@@ -1519,6 +1552,49 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 		return nil, nil, false
 	}
 	return out, targets, true
+}
+
+// distinctCNAMETargets returns the deduplicated, normalized CNAME target
+// names. dnsx may emit one response line per record type, and many aliases
+// share one CDN target, so the extra A/AAAA pass runs once per target.
+func distinctCNAMETargets(targets map[string]string) []string {
+	seen := make(map[string]bool, len(targets))
+	out := make([]string, 0, len(targets))
+	for _, target := range targets {
+		name := normalizeSubdomainName(target)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cnameTargetIPSet resolves the A/AAAA record sets of the CNAME targets that
+// dnsx captured. dnsx reports the target's addresses under the target name,
+// not under the alias, so the alias needs this pass to get an IP.
+func (s *SubdomainScanner) cnameTargetIPSet(ctx context.Context, targetID string, targets map[string]string) map[string][]string {
+	names := distinctCNAMETargets(targets)
+	if len(names) == 0 {
+		return nil
+	}
+	return s.dnsxResolveIPs(ctx, targetID, names)
+}
+
+// classifyCNAMEAlias returns the IP to store on a CNAME-only alias and true
+// when the target resolved. A dangling target returns ("", false) and keeps
+// the alias in takeover only. A wildcard answer pool rejects the target set.
+func classifyCNAMEAlias(alias, target string, resolve func(string) []string, profile *wildcardProfile) (string, bool) {
+	if target == "" || resolve == nil || profile.isWildcardCNAME(alias, target) {
+		return "", false
+	}
+	ip := profile.firstNonWildcardIP(alias, resolve(target))
+	if ip == "" {
+		return "", false
+	}
+	return ip, true
 }
 
 // detectWildcard in subdomain.go has been replaced by the zone-aware engine

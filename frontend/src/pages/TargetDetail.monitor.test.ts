@@ -20,9 +20,9 @@ describe('Changes tab row helpers tolerate foreign rows', () => {
     const js = { change_type: 'js_change', severity: 'medium' } as MonitoringChange
     const sheet = { change_type: 'security:stylesheet_added', severity: 'info' } as MonitoringChange
     const header = { change_type: 'security:header_removed', severity: 'high' } as MonitoringChange
-    expect(monitorRowKind(css)).toBe('scripts')
+    expect(monitorRowKind(css)).toBe('css')
     expect(monitorRowKind(js)).toBe('scripts')
-    expect(monitorRowKind(sheet)).toBe('scripts')
+    expect(monitorRowKind(sheet)).toBe('css')
     expect(monitorRowKind(header)).toBe('headers')
     expect(changeBadgeVariant(css)).toBe('info')
     expect(changeBadgeVariant(js)).toBe('medium')

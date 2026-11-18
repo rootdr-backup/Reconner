@@ -90,6 +90,65 @@ func TestRejectedAdmissionPrunesOnlyUnverifiedDNSRows(t *testing.T) {
 	}
 }
 
+// TestDistinctCNAMETargetsDeduplicates proves the extra A/AAAA pass runs once
+// per target. Many aliases share one CDN name, and dnsx can emit several
+// response lines for the same target.
+func TestDistinctCNAMETargetsDeduplicates(t *testing.T) {
+	got := distinctCNAMETargets(map[string]string{
+		"a.example.com": "D27QWT9HEEZ1ET.CloudFront.Net.",
+		"b.example.com": "d27qwt9heez1et.cloudfront.net",
+		"c.example.com": "other.example.net",
+		"d.example.com": "",
+	})
+	want := []string{"d27qwt9heez1et.cloudfront.net", "other.example.net"}
+	if len(got) != len(want) {
+		t.Fatalf("distinct targets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("distinct targets = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestClassifyCNAMEAliasCopiesTargetIP covers the Merck case. dnsx reports the
+// CloudFront A records under the CNAME target, so the alias has no A/AAAA of
+// its own. The target IP must be copied onto the alias for the HTTP probe.
+func TestClassifyCNAMEAliasCopiesTargetIP(t *testing.T) {
+	const target = "d27qwt9heez1et.cloudfront.net"
+	targetIPs := map[string][]string{
+		target: {"108.157.60.59", "108.157.60.86"},
+	}
+	resolve := func(name string) []string {
+		return targetIPs[normalizeSubdomainName(name)]
+	}
+
+	ip, live := classifyCNAMEAlias("account.merck.com", target+".", resolve, nil)
+	if !live || ip != "108.157.60.59" {
+		t.Fatalf("live CNAME alias = (%q, %v), want (108.157.60.59, true)", ip, live)
+	}
+
+	// A dangling target keeps an empty IP and stays in takeover only.
+	ip, live = classifyCNAMEAlias("dangling.example.com", "missing.example.net", resolve, nil)
+	if live || ip != "" {
+		t.Fatalf("dangling CNAME alias = (%q, %v), want (\"\", false)", ip, live)
+	}
+
+	// A wildcard answer pool is never copied onto an alias.
+	profile := &wildcardProfile{apex: wildcardZone{ips: map[string]bool{"108.157.60.59": true}}}
+	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	if live || ip != "" {
+		t.Fatalf("wildcard CNAME target = (%q, %v), want (\"\", false)", ip, live)
+	}
+
+	// A wildcard CNAME target is rejected before the IP lookup.
+	profile = &wildcardProfile{apex: wildcardZone{cnames: map[string]bool{target: true}}}
+	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	if live || ip != "" {
+		t.Fatalf("wildcard CNAME record = (%q, %v), want (\"\", false)", ip, live)
+	}
+}
+
 // TestResolvingSubdomainsUnderScoping proves the recursive-enum frontier picks
 // only RESOLVING (has an IP) names strictly under the apex, excludes the apex
 // itself and anything already visited, and rejects out-of-scope rows.
