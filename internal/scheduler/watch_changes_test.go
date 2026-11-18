@@ -15,7 +15,7 @@ func TestDiffWatchHTTPStatusAndTitleChange(t *testing.T) {
 		"https://a.example": {URL: "https://a.example", StatusCode: 200, Title: "OK"},
 	}
 
-	changes := diffWatchHTTP(before, after)
+	changes := diffWatchHTTP(before, after, true, false)
 	if len(changes) != 2 {
 		t.Fatalf("got %d changes, want status_change + page_change", len(changes))
 	}
@@ -55,31 +55,31 @@ func TestDiffWatchHTTPOtherChanges(t *testing.T) {
 
 	title := base
 	title.Title = "Welcome"
-	got := diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: title})
+	got := diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: title}, true, false)
 	if len(got) != 1 || got[0].ChangeType != "page_change" {
 		t.Fatalf("title change: got %+v, want one page_change", got)
 	}
 
 	tech := base
 	tech.Server = "apache"
-	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: tech})
+	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: tech}, true, false)
 	if len(got) != 1 || got[0].ChangeType != "tech_change" {
 		t.Fatalf("server change: got %+v, want one tech_change", got)
 	}
 
 	redirect := base
 	redirect.RedirectURL = "https://b.example"
-	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: redirect})
+	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{base.URL: redirect}, true, false)
 	if len(got) != 1 || got[0].ChangeType != "http_change" {
 		t.Fatalf("redirect change: got %+v, want one http_change", got)
 	}
 
-	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{})
+	got = diffWatchHTTP(map[string]watchHTTPSnapshot{base.URL: base}, map[string]watchHTTPSnapshot{}, true, false)
 	if len(got) != 1 || got[0].ChangeType != "http_service_removed" || got[0].Severity != "medium" {
 		t.Fatalf("removed url: got %+v, want medium http_service_removed", got)
 	}
 
-	got = diffWatchHTTP(map[string]watchHTTPSnapshot{}, map[string]watchHTTPSnapshot{base.URL: base})
+	got = diffWatchHTTP(map[string]watchHTTPSnapshot{}, map[string]watchHTTPSnapshot{base.URL: base}, true, false)
 	if len(got) != 0 {
 		t.Fatalf("new url on brand-new host: got %+v, want no rows", got)
 	}
@@ -92,7 +92,7 @@ func TestDiffWatchHTTPNewServiceOnKnownHost(t *testing.T) {
 	before := map[string]watchHTTPSnapshot{base.URL: base}
 	after := map[string]watchHTTPSnapshot{base.URL: base, newPort.URL: newPort}
 
-	got := diffWatchHTTP(before, after)
+	got := diffWatchHTTP(before, after, true, false)
 	if len(got) != 1 || got[0].ChangeType != "new_http_service" || got[0].Severity != "medium" {
 		t.Fatalf("new service on known host: got %+v, want one medium new_http_service", got)
 	}
@@ -105,7 +105,7 @@ func TestDiffWatchHosts(t *testing.T) {
 	before := map[string]bool{"a.example": true, "gone.example": true}
 	after := map[string]bool{"a.example": true, "new.example": true}
 
-	got := diffWatchHosts(before, after)
+	got := diffWatchHosts(before, after, false)
 	if len(got) != 2 {
 		t.Fatalf("got %d changes, want 2", len(got))
 	}
@@ -219,6 +219,112 @@ func TestPruneWatchChangeRowsUsesGlobalWindow(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != "new" {
 		t.Fatalf("remaining ids = %v, want [new]", ids)
+	}
+}
+
+func TestDiffWatchHTTPCappedKeepsStatusFlip(t *testing.T) {
+	old := watchHTTPSnapshot{URL: "https://a.example", StatusCode: 403, Title: "Forbidden"}
+	cur := watchHTTPSnapshot{URL: "https://a.example", StatusCode: 200, Title: "OK"}
+	evicted := watchHTTPSnapshot{URL: "https://zzz.example", StatusCode: 200, Title: "Old"}
+
+	before := map[string]watchHTTPSnapshot{old.URL: old, evicted.URL: evicted}
+	after := map[string]watchHTTPSnapshot{cur.URL: cur}
+
+	got := diffWatchHTTP(before, after, true, true)
+	types := map[string]bool{}
+	for _, c := range got {
+		types[c.ChangeType] = true
+		if c.ChangeType == "http_service_removed" {
+			t.Fatal("capped snapshot must not report evicted URLs as removals")
+		}
+	}
+	if !types["status_change"] {
+		t.Fatalf("types = %v, want status_change from the common window", types)
+	}
+}
+
+func TestDiffWatchHTTPNewServiceWithoutHostDiff(t *testing.T) {
+	svc := watchHTTPSnapshot{URL: "https://brand-new.example", StatusCode: 200, Title: "OK"}
+	before := map[string]watchHTTPSnapshot{}
+	after := map[string]watchHTTPSnapshot{svc.URL: svc}
+
+	got := diffWatchHTTP(before, after, false, false)
+	if len(got) != 1 || got[0].ChangeType != "new_http_service" {
+		t.Fatalf("without host diff: got %+v, want one new_http_service", got)
+	}
+
+	got = diffWatchHTTP(before, after, true, false)
+	if len(got) != 0 {
+		t.Fatalf("with host diff: got %+v, want no rows", got)
+	}
+}
+
+func TestDiffWatchHostsCappedSuppressesRemovals(t *testing.T) {
+	before := map[string]bool{"a.example": true, "zzz.example": true}
+	after := map[string]bool{"a.example": true, "new.example": true}
+
+	got := diffWatchHosts(before, after, true)
+	for _, c := range got {
+		if c.ChangeType == "subdomain_removed" {
+			t.Fatal("capped host snapshot must not report evicted hosts as removals")
+		}
+	}
+	if len(got) != 1 || got[0].ChangeType != "new_subdomain" {
+		t.Fatalf("got %+v, want one new_subdomain", got)
+	}
+}
+
+func TestPruneOrphanChangeSeen(t *testing.T) {
+	s := newTestScheduler(t)
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	stmts := []string{
+		`INSERT INTO targets (id, domain) VALUES ('t1','example.com')`,
+		`INSERT INTO tasks (id, target_id, type, status, priority, modules, total)
+			VALUES ('round-1','t1','watch_scan','finished',1,'[]',2)`,
+		`INSERT INTO monitoring_changes (id,target_id,url,change_type,detected_at)
+			VALUES ('mc-1','t1','https://a.example','status_change','` + now + `')`,
+		`INSERT INTO watch_round_changes
+			(id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+			VALUES ('wc-1','t1','round-1','https://a.example','status_change','old','new','medium','{}','` + now + `')`,
+		`INSERT INTO watch_scope_events (id,target_id,identifier,event_type,detected_at)
+			VALUES ('we-1','t1','a.example','landed','` + now + `')`,
+		`INSERT INTO notifications (id,target_id,type,title,created_at)
+			VALUES ('n-1','t1','scope_landed','Landed','` + now + `')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+	for _, id := range []string{"mc-1", "wc-1", "we-1", "n-1", "dead-1"} {
+		if _, err := s.db.Exec(`INSERT INTO change_seen (change_id,user_id,seen_at) VALUES (?,1,?)`, id, now); err != nil {
+			t.Fatalf("insert seen %s: %v", id, err)
+		}
+	}
+
+	s.pruneOrphanChangeSeen()
+
+	var ids []string
+	rows, err := s.db.Query(`SELECT change_id FROM change_seen ORDER BY change_id`)
+	if err != nil {
+		t.Fatalf("query seen: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan seen: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	want := []string{"mc-1", "n-1", "wc-1", "we-1"}
+	if len(ids) != len(want) {
+		t.Fatalf("remaining ids = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("remaining ids = %v, want %v", ids, want)
+		}
 	}
 }
 

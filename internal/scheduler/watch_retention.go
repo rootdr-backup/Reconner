@@ -30,6 +30,7 @@ func (s *Scheduler) retentionScheduler() {
 	defer s.wg.Done()
 	s.pruneWatchChangeRows()
 	s.pruneWatchRows()
+	s.pruneOrphanChangeSeen()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -39,7 +40,37 @@ func (s *Scheduler) retentionScheduler() {
 		case <-ticker.C:
 			s.pruneWatchChangeRows()
 			s.pruneWatchRows()
+			s.pruneOrphanChangeSeen()
 		}
+	}
+}
+
+// pruneOrphanChangeSeen removes seen markers whose change row no longer exists.
+// change_seen spans four source tables, so a foreign key cannot express this
+// rule. The prune runs after both retention passes and is bounded per run.
+func (s *Scheduler) pruneOrphanChangeSeen() {
+	const sql = `DELETE FROM change_seen WHERE change_id IN (
+		SELECT cs.change_id FROM change_seen cs
+		WHERE NOT EXISTS (SELECT 1 FROM monitoring_changes m WHERE m.id = cs.change_id)
+		  AND NOT EXISTS (SELECT 1 FROM watch_round_changes w WHERE w.id = cs.change_id)
+		  AND NOT EXISTS (SELECT 1 FROM watch_scope_events e WHERE e.id = cs.change_id)
+		  AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.id = cs.change_id)
+		LIMIT 5000
+	)`
+	for attempt := 0; attempt < 2; attempt++ {
+		res, err := s.db.Exec(sql)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				s.logger.Info("Watch retention prune", "table", "change_seen", "rows", n)
+			}
+			return
+		}
+		if attempt == 0 && strings.Contains(strings.ToLower(err.Error()), "busy") {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		s.logger.Warn("change_seen orphan prune failed", "error", err)
+		return
 	}
 }
 

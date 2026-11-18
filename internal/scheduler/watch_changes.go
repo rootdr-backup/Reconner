@@ -13,7 +13,9 @@ import (
 )
 
 // watchSnapshotCap bounds the snapshot cost on very large projects. The watch
-// tier must stay cheap; a capped snapshot logs a warning and diffs what it has.
+// tier must stay cheap. A capped snapshot still diffs the common window, so a
+// status flip inside the window is kept. Removal rows are suppressed because a
+// new row inside the window can evict the last row and look like a deletion.
 const watchSnapshotCap = 5000
 
 type watchHTTPSnapshot struct {
@@ -118,12 +120,17 @@ func watchURLHost(raw string) string {
 	return strings.ToLower(trimmed)
 }
 
-func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
+// diffWatchHTTP compares two HTTP snapshots. hostDiffRan reports whether a host
+// snapshot covered this round; when it did not, a new URL on an unknown host is
+// still a real exposure and must be emitted. capped reports a truncated
+// snapshot: removal rows are suppressed because a new URL inside the window
+// evicts the last URL and would be misread as a deletion.
+func diffWatchHTTP(before, after map[string]watchHTTPSnapshot, hostDiffRan, capped bool) []watchChange {
 	changes := make([]watchChange, 0)
 
 	// Hosts that already had at least one probed service before this round.
 	// A new URL on a known host is a real exposure change. A new URL on a
-	// brand-new host is already covered by the host snapshot and scope landing.
+	// brand-new host is normally covered by the host snapshot and scope landing.
 	knownHosts := make(map[string]bool, len(before))
 	for raw := range before {
 		knownHosts[watchURLHost(raw)] = true
@@ -131,6 +138,9 @@ func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 
 	for url := range before {
 		if _, ok := after[url]; !ok {
+			if capped {
+				continue
+			}
 			changes = append(changes, watchChange{
 				URL: url, ChangeType: "http_service_removed", OldValue: url,
 				NewValue: "", Severity: "medium", Metadata: "{}",
@@ -140,7 +150,7 @@ func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 	for url, cur := range after {
 		old, existed := before[url]
 		if !existed {
-			if knownHosts[watchURLHost(url)] {
+			if knownHosts[watchURLHost(url)] || !hostDiffRan {
 				changes = append(changes, watchChange{
 					URL: url, ChangeType: "new_http_service", OldValue: "",
 					NewValue: url, Severity: "medium", Metadata: "{}",
@@ -188,10 +198,16 @@ func watchAliveValue(alive bool) string {
 	return "dead"
 }
 
-func diffWatchHosts(before, after map[string]bool) []watchChange {
+// diffWatchHosts compares two host snapshots. A capped snapshot suppresses
+// removals for the same reason as diffWatchHTTP: a new host in the window can
+// evict the last host and look like a deletion.
+func diffWatchHosts(before, after map[string]bool, capped bool) []watchChange {
 	changes := make([]watchChange, 0)
 	for host := range before {
 		if _, ok := after[host]; !ok {
+			if capped {
+				continue
+			}
 			changes = append(changes, watchChange{
 				URL: host, ChangeType: "subdomain_removed", OldValue: host,
 				NewValue: "", Severity: "medium", Metadata: "{}",
