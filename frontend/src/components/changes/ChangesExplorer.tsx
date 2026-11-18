@@ -239,10 +239,11 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
       ws.on('scope_landed', schedule),
       ws.on('notification_created', schedule),
     ]
-    const poll = targetId ? null : setInterval(immediate, 30000)
+    // No periodic full reload on the global view. fetchAllPaged walks the whole
+    // history, so a 30s timer multiplied that cost for every open tab. WS events
+    // cover live changes; the Refresh button is the explicit manual fallback.
     return () => {
       offs.forEach(off => off())
-      if (poll) clearInterval(poll)
       if (reloadTimer.current) clearTimeout(reloadTimer.current)
     }
   }, [load, targetId])
@@ -406,6 +407,7 @@ export default function ChangesExplorer({ targetId, compact }: Props) {
           {selectedTaskId && (
             <Button size="sm" variant="ghost" onClick={() => setSelectedTaskId('')}>Clear round</Button>
           )}
+          <Button size="sm" variant="ghost" onClick={() => void load()} disabled={loading}>Refresh</Button>
         </div>
 
         {subtab === 'assets' && <ScopeEventsPanel targetId={targetId || selectedTargetId || undefined} />}

@@ -5,7 +5,7 @@ import { useUIStore } from '../../store/ui'
 import { notifications as notifApi, targets as targetsApi, type Notification } from '../../lib/api'
 import type { Target } from '../../types'
 import { cn, timeAgo, useDebouncedValue } from '../../lib/utils'
-import { sevDot, openNotification } from '../../lib/notifications'
+import { sevDot, openNotification, onNotificationsChanged, notifyNotificationsChanged } from '../../lib/notifications'
 import { useUpdateCenter } from './UpdateCenter'
 
 // Static labels for top-level route segments; `/targets/:id` resolves to the
@@ -149,6 +149,7 @@ export const TopBar = () => {
       ws.on('task_finished', load),
       ws.on('scope_landed', load),
       ws.on('bounty_catalog_sync', load),
+      onNotificationsChanged(load),
     ]
     return () => { alive = false; clearInterval(t); offs.forEach(off => off()) }
   }, [bucket])
@@ -163,7 +164,7 @@ export const TopBar = () => {
   }, [open])
 
   const markAllRead = async () => {
-    try { await notifApi.markRead() } catch { /* ignore */ }
+    try { await notifApi.markRead(); notifyNotificationsChanged() } catch { /* ignore */ }
     setItems(current => current.map(n => ({ ...n, is_read: true })))
     setUnread(0)
   }

@@ -45,7 +45,7 @@ type WatchRound struct {
 // order in the frontend.
 func changeCategoryExpr(col string) string {
 	return `CASE
-		WHEN ` + col + ` IN ('status_change','http_change','http_service_removed','page_change') THEN 'http'
+		WHEN ` + col + ` IN ('status_change','http_change','http_service_removed','new_http_service','page_change') THEN 'http'
 		WHEN ` + col + ` IN ('js_change','css_change')
 		     OR ` + col + ` LIKE 'security:script_%'
 		     OR ` + col + ` LIKE 'security:stylesheet_%' THEN 'scripts'
@@ -237,28 +237,52 @@ func (h *Handler) handleListWatchRounds(w http.ResponseWriter, r *http.Request) 
 	q := r.URL.Query()
 	uid, isAdmin := h.callerScope(r)
 
-	base := `FROM tasks t JOIN targets tg ON tg.id=t.target_id WHERE t.type='watch_scan'`
+	// Watch tasks are pruned at 90 days, but their change rows live for 180.
+	// Build rounds from two sources so old change rows still have a timeline:
+	//  1. real watch_scan task rows;
+	//  2. distinct task_ids that exist only in watch_round_changes.
+	// NOT EXISTS keeps the two sources from emitting the same round twice.
+	unionSQL := `SELECT t.id AS id, t.target_id AS target_id, COALESCE(tg.domain,'') AS target_name,
+		COALESCE(t.status,'') AS status, COALESCE(t.error,'') AS error,
+		COALESCE(t.started_at,'') AS started_at, COALESCE(t.finished_at,'') AS finished_at,
+		tg.owner_id AS owner_id, COALESCE(t.started_at,t.created_at) AS sort_at,
+		(SELECT COUNT(*) FROM watch_round_changes wc WHERE wc.task_id=t.id) AS change_count
+		FROM tasks t JOIN targets tg ON tg.id=t.target_id WHERE t.type='watch_scan'
+		UNION ALL
+		SELECT wc.task_id AS id, wc.target_id AS target_id, COALESCE(tg.domain,'') AS target_name,
+		'finished' AS status, '' AS error,
+		MIN(COALESCE(wc.detected_at,'')) AS started_at,
+		MAX(COALESCE(wc.detected_at,'')) AS finished_at,
+		tg.owner_id AS owner_id, MAX(COALESCE(wc.detected_at,'')) AS sort_at,
+		COUNT(*) AS change_count
+		FROM watch_round_changes wc JOIN targets tg ON tg.id=wc.target_id
+		WHERE COALESCE(wc.task_id,'') <> ''
+		  AND NOT EXISTS (SELECT 1 FROM tasks t2 WHERE t2.id=wc.task_id)
+		GROUP BY wc.task_id, wc.target_id`
+
+	whereSQL := ` WHERE 1=1`
 	args := make([]any, 0, 3)
 	if !isAdmin {
-		base += ` AND tg.owner_id=?`
+		whereSQL += ` AND owner_id=?`
 		args = append(args, uid)
 	}
 	if targetID := q.Get("target_id"); targetID != "" {
-		base += ` AND t.target_id=?`
+		whereSQL += ` AND target_id=?`
 		args = append(args, targetID)
 	}
 
+	fromRounds := ` FROM (` + unionSQL + `) rounds` + whereSQL
+
 	var total int
-	if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) `+base, args...).Scan(&total); err != nil {
+	if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*)`+fromRounds, args...).Scan(&total); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 
 	queryArgs := append(append([]any{}, args...), limit, offset)
-	rows, err := h.db.QueryContext(r.Context(), `SELECT t.id, COALESCE(t.target_id,''), COALESCE(tg.domain,''),
-		COALESCE(t.status,''), COALESCE(t.error,''), COALESCE(t.started_at,''), COALESCE(t.finished_at,''),
-		(SELECT COUNT(*) FROM watch_round_changes wc WHERE wc.task_id=t.id) `+base+`
-		ORDER BY COALESCE(t.started_at,t.created_at) DESC, t.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := h.db.QueryContext(r.Context(), `SELECT id, target_id, target_name, status, error,
+		started_at, finished_at, change_count`+fromRounds+`
+		ORDER BY sort_at DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return

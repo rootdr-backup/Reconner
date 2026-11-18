@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { notifications as notifApi } from '../../lib/api'
 import type { Notification } from '../../lib/api'
 import { ws } from '../../lib/websocket'
-import { openNotification, sevDot } from '../../lib/notifications'
+import { openNotification, sevDot, onNotificationsChanged, notifyNotificationsChanged } from '../../lib/notifications'
 import { Button } from '../ui'
 import { timeAgo } from '../../lib/utils'
 
@@ -38,6 +38,7 @@ export default function ChangesNotificationsPanel() {
       ws.on('notification_created', run),
       ws.on('scope_landed', run),
       ws.on('task_finished', run),
+      onNotificationsChanged(run),
     ]
     return () => { alive = false; clearInterval(timer); offs.forEach(off => off()) }
   }, [load])
@@ -51,6 +52,7 @@ export default function ChangesNotificationsPanel() {
   const markAll = async () => {
     try {
       await notifApi.markRead([])
+      notifyNotificationsChanged()
       setItems(prev => prev.map(n => ({ ...n, is_read: true })))
       setUnread(0)
     } catch { /* ignore */ }

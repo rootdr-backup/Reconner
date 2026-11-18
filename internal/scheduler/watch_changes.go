@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -101,8 +102,33 @@ func watchStatusSeverity(oldCode, newCode int) string {
 	return "low"
 }
 
+func watchURLHost(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil && parsed.Hostname() != "" {
+		return strings.ToLower(parsed.Hostname())
+	}
+	// Fall back to stripping the scheme for malformed rows.
+	trimmed := raw
+	if i := strings.Index(trimmed, "://"); i >= 0 {
+		trimmed = trimmed[i+3:]
+	}
+	if i := strings.IndexAny(trimmed, "/:@?"); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	return strings.ToLower(trimmed)
+}
+
 func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 	changes := make([]watchChange, 0)
+
+	// Hosts that already had at least one probed service before this round.
+	// A new URL on a known host is a real exposure change. A new URL on a
+	// brand-new host is already covered by the host snapshot and scope landing.
+	knownHosts := make(map[string]bool, len(before))
+	for raw := range before {
+		knownHosts[watchURLHost(raw)] = true
+	}
+
 	for url := range before {
 		if _, ok := after[url]; !ok {
 			changes = append(changes, watchChange{
@@ -114,8 +140,12 @@ func diffWatchHTTP(before, after map[string]watchHTTPSnapshot) []watchChange {
 	for url, cur := range after {
 		old, existed := before[url]
 		if !existed {
-			// A fresh HTTP service row is covered by the host snapshot and the
-			// scope landing. Do not double-count it as a status change.
+			if knownHosts[watchURLHost(url)] {
+				changes = append(changes, watchChange{
+					URL: url, ChangeType: "new_http_service", OldValue: "",
+					NewValue: url, Severity: "medium", Metadata: "{}",
+				})
+			}
 			continue
 		}
 		if old.StatusCode != cur.StatusCode {

@@ -18,6 +18,7 @@ export const CATEGORY_BY_TYPE: Record<string, ChangeCategory> = {
   status_change: 'http',
   http_change: 'http',
   http_service_removed: 'http',
+  new_http_service: 'http',
   page_change: 'http',
   js_change: 'scripts',
   css_change: 'scripts',

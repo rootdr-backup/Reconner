@@ -134,11 +134,113 @@ func TestListWatchRoundsChangeCount(t *testing.T) {
 	}
 }
 
+func TestListChangesFiltersAndPagination(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc1','t1','https://1','status_change','a','b','high','2026-01-01 00:00:00')`)
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc1','t1','round-1','https://2','js_change','a','b','medium','{}','2026-02-01 00:00:00')`)
+	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
+		VALUES ('n1','t1','watch_failed','Round failed','oops','high','2026-03-01 00:00:00')`)
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{"category http", "/api/changes?category=http", []string{"mc1"}},
+		{"category scripts", "/api/changes?category=scripts", []string{"wc1"}},
+		{"category alerts", "/api/changes?category=alerts", []string{"n1"}},
+		{"severity high", "/api/changes?severity=high", []string{"mc1", "n1"}},
+		{"source monitor", "/api/changes?source=monitor", []string{"mc1"}},
+		{"source watch", "/api/changes?source=watch", []string{"wc1"}},
+		{"source notification", "/api/changes?source=notification", []string{"n1"}},
+		{"task id", "/api/changes?task_id=round-1", []string{"wc1"}},
+		{"since", "/api/changes?since=2026-03-01", []string{"n1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := serveChanges(t, h, sid, tc.path, nil, h.handleListChanges)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var env changesEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			if len(env.Data) != len(tc.want) {
+				t.Fatalf("ids = %+v, want %v", idsOf(env.Data), tc.want)
+			}
+			got := idsOf(env.Data)
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("missing %q in %v", w, got)
+				}
+			}
+		})
+	}
+
+	// Pagination: page 2 must skip the first row and the total must stay 3.
+	rec := serveChanges(t, h, sid, "/api/changes?page=2&limit=1", nil, h.handleListChanges)
+	var env changesEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Total != 3 || len(env.Data) != 1 {
+		t.Fatalf("page 2: total = %d, rows = %d, want 3 and 1", env.Total, len(env.Data))
+	}
+	if env.Data[0].ID == "mc1" {
+		t.Error("page 2 repeated the first row")
+	}
+}
+
+func idsOf(rows []ChangeEntry) map[string]bool {
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[row.ID] = true
+	}
+	return ids
+}
+
+func TestListWatchRoundsIncludesOrphanedChanges(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	// No tasks row. The task was pruned at 90 days but the change survives.
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc1','t1','old-round','https://1','status_change','a','b','low','{}','2026-01-01 00:00:00')`)
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc2','t1','old-round','https://2','page_change','a','b','low','{}','2026-01-02 00:00:00')`)
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := serveChanges(t, h, sid, "/api/watch/rounds", nil, h.handleListWatchRounds)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var env roundsEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Data) != 1 || env.Data[0].ID != "old-round" || env.Data[0].ChangeCount != 2 {
+		t.Fatalf("rounds = %+v, want one synthesized old-round with 2 changes", env.Data)
+	}
+	if env.Data[0].StartedAt != "2026-01-01 00:00:00" {
+		t.Errorf("started_at = %q, want the earliest change time", env.Data[0].StartedAt)
+	}
+}
+
 func TestParseChangesSince(t *testing.T) {
 	cases := map[string]string{
-		"":                    "",
-		"2026-11-18":          "2026-11-18 00:00:00",
-		"2026-11-18 10:20:30": "2026-11-18 10:20:30",
+		"":                     "",
+		"2026-11-18":           "2026-11-18 00:00:00",
+		"2026-11-18 10:20:30":  "2026-11-18 10:20:30",
 		"2026-11-18T10:20:30Z": "2026-11-18 10:20:30",
 	}
 	for in, want := range cases {

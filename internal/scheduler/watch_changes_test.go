@@ -81,7 +81,23 @@ func TestDiffWatchHTTPOtherChanges(t *testing.T) {
 
 	got = diffWatchHTTP(map[string]watchHTTPSnapshot{}, map[string]watchHTTPSnapshot{base.URL: base})
 	if len(got) != 0 {
-		t.Fatalf("new url: got %+v, want no rows", got)
+		t.Fatalf("new url on brand-new host: got %+v, want no rows", got)
+	}
+}
+
+func TestDiffWatchHTTPNewServiceOnKnownHost(t *testing.T) {
+	base := watchHTTPSnapshot{URL: "https://a.example", StatusCode: 200, Title: "OK"}
+	newPort := watchHTTPSnapshot{URL: "https://a.example:8443/admin", StatusCode: 200, Title: "Admin"}
+
+	before := map[string]watchHTTPSnapshot{base.URL: base}
+	after := map[string]watchHTTPSnapshot{base.URL: base, newPort.URL: newPort}
+
+	got := diffWatchHTTP(before, after)
+	if len(got) != 1 || got[0].ChangeType != "new_http_service" || got[0].Severity != "medium" {
+		t.Fatalf("new service on known host: got %+v, want one medium new_http_service", got)
+	}
+	if got[0].NewValue != newPort.URL || got[0].OldValue != "" {
+		t.Fatalf("new service values: got old=%q new=%q", got[0].OldValue, got[0].NewValue)
 	}
 }
 
