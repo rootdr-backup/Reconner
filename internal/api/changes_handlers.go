@@ -25,10 +25,11 @@ type ChangeEntry struct {
 	OldValue   string         `json:"old_value"`
 	NewValue   string         `json:"new_value"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	Seen       bool           `json:"seen"`
 	DetectedAt string         `json:"detected_at"`
 }
 
-// WatchRound is one finished or running watch task for the timeline.
+// WatchRound is one finished or running watch task for the round filter strip.
 type WatchRound struct {
 	ID          string `json:"id"`
 	TargetID    string `json:"target_id"`
@@ -88,16 +89,11 @@ func parseChangesSince(raw string) string {
 	return raw
 }
 
-func (h *Handler) handleListChanges(w http.ResponseWriter, r *http.Request) {
-	h.listChanges(w, r, "")
-}
-
-func (h *Handler) handleListTargetChanges(w http.ResponseWriter, r *http.Request) {
-	h.listChanges(w, r, mux.Vars(r)["id"])
-}
-
-func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTargetID string) {
-	page, limit, offset := changesPagination(r)
+// changesFeedQuery builds the four-source UNION and the shared WHERE clause.
+// ownerArgs are the owner-scope placeholders inside the UNION; filterArgs are
+// the placeholders in the WHERE clause. Read state is joined by the caller so
+// count queries stay cheap.
+func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inner, whereSQL string, ownerArgs, filterArgs []any) {
 	q := r.URL.Query()
 	uid, isAdmin := h.callerScope(r)
 
@@ -152,11 +148,11 @@ func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTarg
 		args = append(args, uid)
 	}
 
-	inner := `(` + sourceMonitor + ` UNION ALL ` + sourceWatch + ` UNION ALL ` +
+	inner = `(` + sourceMonitor + ` UNION ALL ` + sourceWatch + ` UNION ALL ` +
 		sourceScope + ` UNION ALL ` + sourceNotification + `) x`
 
 	filters := make([]string, 0, 6)
-	filterArgs := make([]any, 0, 6)
+	filterArgs = make([]any, 0, 6)
 	targetID := forcedTargetID
 	if targetID == "" {
 		targetID = q.Get("target_id")
@@ -185,22 +181,42 @@ func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTarg
 		filters = append(filters, `x.detected_at>=?`)
 		filterArgs = append(filterArgs, since)
 	}
-	whereSQL := ""
 	if len(filters) > 0 {
 		whereSQL = ` WHERE ` + strings.Join(filters, ` AND `)
 	}
+	return inner, whereSQL, args, filterArgs
+}
 
-	countArgs := append(append([]any{}, args...), filterArgs...)
+func (h *Handler) handleListChanges(w http.ResponseWriter, r *http.Request) {
+	h.listChanges(w, r, "")
+}
+
+func (h *Handler) handleListTargetChanges(w http.ResponseWriter, r *http.Request) {
+	h.listChanges(w, r, mux.Vars(r)["id"])
+}
+
+func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTargetID string) {
+	page, limit, offset := changesPagination(r)
+	uid, _ := h.callerScope(r)
+	inner, whereSQL, ownerArgs, filterArgs := h.changesFeedQuery(r, forcedTargetID)
+
+	countArgs := append(append([]any{}, ownerArgs...), filterArgs...)
 	var total int
 	if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM `+inner+whereSQL, countArgs...).Scan(&total); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 
-	queryArgs := append(append([]any{}, countArgs...), limit, offset)
+	// Read state is per user. Join it after the UNION so one small table serves
+	// all four sources and each caller sees only their own marks.
+	dataArgs := append(append([]any{}, ownerArgs...), uid)
+	dataArgs = append(dataArgs, filterArgs...)
+	dataArgs = append(dataArgs, limit, offset)
 	rows, err := h.db.QueryContext(r.Context(), `SELECT x.id, x.source, x.target_id, x.target_name, x.task_id,
-		x.url, x.change_type, x.category, x.severity, x.old_value, x.new_value, x.metadata, x.detected_at
-		FROM `+inner+whereSQL+` ORDER BY x.detected_at DESC, x.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+		x.url, x.change_type, x.category, x.severity, x.old_value, x.new_value, x.metadata, x.detected_at,
+		CASE WHEN cs.change_id IS NULL THEN 0 ELSE 1 END AS seen
+		FROM `+inner+` LEFT JOIN change_seen cs ON cs.change_id=x.id AND cs.user_id=? `+
+		whereSQL+` ORDER BY x.detected_at DESC, x.id DESC LIMIT ? OFFSET ?`, dataArgs...)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return
@@ -213,7 +229,7 @@ func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTarg
 		var metadata string
 		if err := rows.Scan(&e.ID, &e.Source, &e.TargetID, &e.TargetName, &e.TaskID,
 			&e.URL, &e.ChangeType, &e.Category, &e.Severity, &e.OldValue, &e.NewValue,
-			&metadata, &e.DetectedAt); err != nil {
+			&metadata, &e.DetectedAt, &e.Seen); err != nil {
 			h.writeError(w, http.StatusInternalServerError, "scan failed")
 			return
 		}
@@ -230,6 +246,76 @@ func (h *Handler) listChanges(w http.ResponseWriter, r *http.Request, forcedTarg
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"data": entries, "total": total, "page": page, "limit": limit,
 	})
+}
+
+// handleSetChangesSeen marks a bounded set of change rows read or unread for
+// the current user. Change ids are unique across all four feed sources.
+func (h *Handler) handleSetChangesSeen(w http.ResponseWriter, r *http.Request) {
+	uid, _ := h.callerScope(r)
+	var body struct {
+		IDs  []string `json:"ids"`
+		Seen bool     `json:"seen"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(body.IDs) == 0 || len(body.IDs) > 500 {
+		h.writeError(w, http.StatusBadRequest, "ids must contain 1 to 500 entries")
+		return
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "transaction failed")
+		return
+	}
+	defer tx.Rollback()
+
+	query := `DELETE FROM change_seen WHERE change_id=? AND user_id=?`
+	if body.Seen {
+		query = `INSERT OR IGNORE INTO change_seen(change_id,user_id,seen_at) VALUES(?,?,CURRENT_TIMESTAMP)`
+	}
+	stmt, err := tx.PrepareContext(r.Context(), query)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "prepare failed")
+		return
+	}
+	defer stmt.Close()
+
+	for _, id := range body.IDs {
+		if id == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(r.Context(), id, uid); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "update failed")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "commit failed")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"updated": len(body.IDs)})
+}
+
+// handleMarkAllChangesSeen marks every row matching the current feed filters
+// read for the current user. It uses the same UNION and filters as the list,
+// so "Mark all read" honours the active target, time, and category filters.
+func (h *Handler) handleMarkAllChangesSeen(w http.ResponseWriter, r *http.Request) {
+	uid, _ := h.callerScope(r)
+	inner, whereSQL, ownerArgs, filterArgs := h.changesFeedQuery(r, "")
+	queryArgs := append([]any{uid}, ownerArgs...)
+	queryArgs = append(queryArgs, filterArgs...)
+
+	res, err := h.db.ExecContext(r.Context(), `INSERT OR IGNORE INTO change_seen(change_id,user_id,seen_at)
+		SELECT x.id, ?, CURRENT_TIMESTAMP FROM `+inner+whereSQL, queryArgs...)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	updated, _ := res.RowsAffected()
+	h.writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
 }
 
 func (h *Handler) handleListWatchRounds(w http.ResponseWriter, r *http.Request) {

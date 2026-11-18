@@ -341,6 +341,7 @@ export interface ChangeEntry {
   old_value: string
   new_value: string
   metadata?: Record<string, unknown>
+  seen: boolean
   detected_at: string
 }
 

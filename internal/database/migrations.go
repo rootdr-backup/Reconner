@@ -174,6 +174,7 @@ func RunMigrations(db *DB) error {
 		alterTargetsAddWatchPaused,
 		createWatchScopeEventsTable,
 		createWatchRoundChangesTable,
+		createChangeSeenTable,
 		createWatchTierIndexes,
 		alterTelegramChatsAddWatchPrefs,
 	}
@@ -1924,6 +1925,18 @@ CREATE TABLE IF NOT EXISTS watch_round_changes (
 CREATE INDEX IF NOT EXISTS idx_watch_round_changes_target_time ON watch_round_changes(target_id, detected_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_watch_round_changes_task ON watch_round_changes(task_id, detected_at);
 CREATE INDEX IF NOT EXISTS idx_watch_round_changes_type_time ON watch_round_changes(change_type, detected_at DESC);`
+
+// createChangeSeenTable stores per-user read state for the unified Changes
+// feed. Change ids are globally unique UUIDs from all four source tables. A
+// single table therefore covers every source without altering the sources.
+const createChangeSeenTable = `
+CREATE TABLE IF NOT EXISTS change_seen (
+	change_id TEXT NOT NULL,
+	user_id INTEGER NOT NULL,
+	seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (change_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_change_seen_user ON change_seen(user_id);`
 
 // createWatchTierIndexes serves the watch workload: the scheduler lists tasks
 // by type and status, the task list pages per target, and the Projects filter

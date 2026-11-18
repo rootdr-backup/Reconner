@@ -208,6 +208,8 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/findings", h.requireAuth(h.handleListAllFindings)).Methods("GET")
 	api.HandleFunc("/targets/{id}/monitoring-changes", h.requireAuth(h.handleListMonitoringChanges)).Methods("GET")
 	api.HandleFunc("/changes", h.requireAuth(h.handleListChanges)).Methods("GET")
+	api.HandleFunc("/changes/seen", h.requireAuth(h.handleSetChangesSeen)).Methods("POST")
+	api.HandleFunc("/changes/seen-all", h.requireAuth(h.handleMarkAllChangesSeen)).Methods("POST")
 	api.HandleFunc("/targets/{id}/changes", h.requireAuth(h.handleListTargetChanges)).Methods("GET")
 	api.HandleFunc("/watch/rounds", h.requireAuth(h.handleListWatchRounds)).Methods("GET")
 	api.HandleFunc("/targets/{id}/css-files/body", h.requireAuth(h.handleGetCSSFileBody)).Methods("GET")

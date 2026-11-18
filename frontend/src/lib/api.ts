@@ -426,6 +426,14 @@ export const changes = {
   list: (params?: Record<string, string>) => fetchAllPaged<ChangeEntry>('/changes', params),
   forTarget: (id: string, params?: Record<string, string>) =>
     fetchAllPaged<ChangeEntry>(`/targets/${id}/changes`, params),
+  setSeen: (ids: string[], seen: boolean) =>
+    req<{ updated: number }>('/changes/seen', {
+      method: 'POST', body: JSON.stringify({ ids, seen }),
+    }),
+  markAllSeen: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : ''
+    return req<{ updated: number }>(`/changes/seen-all${q}`, { method: 'POST' })
+  },
 }
 
 export const watchApi = {

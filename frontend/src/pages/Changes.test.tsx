@@ -9,14 +9,14 @@ const changeRows: ChangeEntry[] = [
   {
     id: 'c1', source: 'watch', target_id: 't1', target_name: 'alpha.test',
     task_id: 'round-1', url: 'https://alpha.test', change_type: 'status_change',
-    category: 'http', severity: 'medium',
+    category: 'http', severity: 'medium', seen: false,
     old_value: 'status=403 title=Forbidden', new_value: 'status=200 title=OK',
     detected_at: '2026-01-02 10:00:00',
   },
   {
     id: 'c2', source: 'monitor', target_id: 't2', target_name: 'beta.test',
     task_id: '', url: 'https://beta.test/app.js', change_type: 'js_change',
-    category: 'scripts', severity: 'medium',
+    category: 'scripts', severity: 'medium', seen: false,
     old_value: 'hash=aaa', new_value: 'hash=bbb',
     detected_at: '2026-01-01 09:00:00',
   },
@@ -50,11 +50,25 @@ function success(data: unknown) {
 }
 
 function mockApi(opts?: { changes?: ChangeEntry[]; rounds?: WatchRound[] }) {
-  const rows = opts?.changes ?? changeRows
+  const rows = (opts?.changes ?? changeRows).map(r => ({ ...r }))
   const roundRows = opts?.rounds ?? rounds
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString()
-    if (url.startsWith('/api/changes?')) return envelope(rows)
+    if (url === '/api/changes/seen' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body || '{}')) as { ids?: string[]; seen?: boolean }
+      for (const row of rows) if (body.ids?.includes(row.id)) row.seen = !!body.seen
+      return success({ updated: body.ids?.length || 0 })
+    }
+    if (url.startsWith('/api/changes/seen-all')) {
+      rows.forEach(r => { r.seen = true })
+      return success({ updated: rows.length })
+    }
+    if (url.startsWith('/api/changes?')) {
+      const u = new URL(url, 'http://localhost')
+      const cat = u.searchParams.get('category')
+      const filtered = cat && cat !== 'all' ? rows.filter(r => r.category === cat) : rows
+      return envelope(filtered)
+    }
     if (url.startsWith('/api/watch/rounds?')) return envelope(roundRows)
     if (url.startsWith('/api/targets?')) return success(targetList)
     return success([])
@@ -66,63 +80,69 @@ function mockApi(opts?: { changes?: ChangeEntry[]; rounds?: WatchRound[] }) {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('global Changes page', () => {
-  it('renders KPIs, rounds, and grouped change rows', async () => {
+  it('renders a flat feed with field diffs and source badges', async () => {
     mockApi()
     render(<MemoryRouter><Changes /></MemoryRouter>)
 
     await screen.findByRole('heading', { name: 'Changes' })
-    expect(await screen.findByText('alpha.test', { selector: 'button span' })).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText('status_change')).toBeInTheDocument())
-    expect(screen.getByText('js_change')).toBeInTheDocument()
-    expect(screen.getByText('Watch')).toBeInTheDocument()
-    expect(screen.getByText('Deep')).toBeInTheDocument()
-    expect(screen.getByText('1 changes')).toBeInTheDocument()
+    expect(await screen.findByText('STATUS CODE')).toBeInTheDocument()
+    expect(screen.getByText('JAVASCRIPT')).toBeInTheDocument()
+    expect(screen.getAllByText('Watch').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Deep').length).toBeGreaterThan(0)
+    expect(screen.getByText('403')).toBeInTheDocument()
+    expect(screen.getByText('200')).toBeInTheDocument()
+    expect(screen.getByText('https://alpha.test')).toBeInTheDocument()
   })
 
-  it('switches subtabs and filters the list', async () => {
+  it('filters the feed by category chip', async () => {
     const user = userEvent.setup()
     mockApi()
     render(<MemoryRouter><Changes /></MemoryRouter>)
-    await waitFor(() => expect(screen.getByText('js_change')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('JAVASCRIPT')).toBeInTheDocument())
 
-    await user.click(screen.getByRole('button', { name: 'HTTP & status' }))
-    await waitFor(() => expect(screen.getByText('status_change')).toBeInTheDocument())
-    expect(screen.queryByText('js_change')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'HTTP' }))
+    await waitFor(() => expect(screen.queryByText('JAVASCRIPT')).not.toBeInTheDocument())
+    expect(screen.getByText('STATUS CODE')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Scripts' }))
-    await waitFor(() => expect(screen.getByText('js_change')).toBeInTheDocument())
-    expect(screen.queryByText('status_change')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('JAVASCRIPT')).toBeInTheDocument())
+    expect(screen.queryByText('STATUS CODE')).not.toBeInTheDocument()
   })
 
-  it('filters by round when a round is clicked', async () => {
+  it('filters by round when a round chip is clicked', async () => {
     const user = userEvent.setup()
     const fetchMock = mockApi()
     render(<MemoryRouter><Changes /></MemoryRouter>)
-    await waitFor(() => expect(screen.getByText('status_change')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
 
-    const roundButton = screen.getByRole('button', { name: /alpha\.test.*1 changes/ })
+    const roundButton = screen.getByRole('button', { name: /alpha\.test.*finished/ })
     fetchMock.mockClear()
     await user.click(roundButton)
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
       String(input).includes('task_id=round-1'))).toBe(true)
     )
-    expect(await screen.findByText('Clear round')).toBeInTheDocument()
+    expect(await screen.findByText('Clear')).toBeInTheDocument()
   })
 
-  it('keeps identical changes from two targets in separate groups', async () => {
-    const twin: ChangeEntry = {
-      ...changeRows[0], id: 'c3', target_id: 't2', target_name: 'beta.test', task_id: 'round-2',
-    }
-    mockApi({ changes: [changeRows[0], twin] })
+  it('marks all read and hides seen cards', async () => {
+    const user = userEvent.setup()
+    const fetchMock = mockApi()
     render(<MemoryRouter><Changes /></MemoryRouter>)
-    await waitFor(() => expect(screen.getAllByText('status_change')).toHaveLength(2))
+    await waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Mark all read' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      String(input).includes('/api/changes/seen-all'))).toBe(true)
+    )
+
+    await user.click(screen.getByLabelText('Hide seen'))
+    expect(await screen.findByText('All changes are marked as seen.')).toBeInTheDocument()
   })
 
-  it('shows empty states when there are no rows', async () => {
+  it('shows an empty state when there are no changes', async () => {
     mockApi({ changes: [], rounds: [] })
     render(<MemoryRouter><Changes /></MemoryRouter>)
     expect(await screen.findByText('No changes recorded yet.')).toBeInTheDocument()
-    expect(screen.getByText('No watch rounds yet.')).toBeInTheDocument()
   })
 })

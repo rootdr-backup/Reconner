@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -233,6 +234,93 @@ func TestListWatchRoundsIncludesOrphanedChanges(t *testing.T) {
 	}
 	if env.Data[0].StartedAt != "2026-01-01 00:00:00" {
 		t.Errorf("started_at = %q, want the earliest change time", env.Data[0].StartedAt)
+	}
+}
+
+func postChanges(t *testing.T, h *Handler, sid, path string, body any, handler http.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", path, bytes.NewReader(raw))
+	req.AddCookie(&http.Cookie{Name: "recon_session", Value: sid})
+	rec := httptest.NewRecorder()
+	h.requireAuth(handler)(rec, req)
+	return rec
+}
+
+func TestChangesSeenIsPerUserAndHonoursFilters(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	bob, err := h.auth.CreateUser("bob", "bobpassword", auth.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSID, err := h.auth.Login("bob", "bobpassword")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSID, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-admin','admin.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-bob','bob.example',?)`, bob.ID)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc1','t-admin','https://a','status_change','403','200','high',CURRENT_TIMESTAMP)`)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc2','t-bob','https://b','status_change','403','200','high',CURRENT_TIMESTAMP)`)
+
+	// Each user marks only their own change.
+	rec := postChanges(t, h, adminSID, "/api/changes/seen", map[string]any{"ids": []string{"mc1"}, "seen": true}, h.handleSetChangesSeen)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin seen status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = postChanges(t, h, bobSID, "/api/changes/seen", map[string]any{"ids": []string{"mc2"}, "seen": true}, h.handleSetChangesSeen)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bob seen status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	readSeen := func(sid, path string) map[string]bool {
+		t.Helper()
+		rec := serveChanges(t, h, sid, path, nil, h.handleListChanges)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var env changesEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, e := range env.Data {
+			out[e.ID] = e.Seen
+		}
+		return out
+	}
+
+	adminSeen := readSeen(adminSID, "/api/changes")
+	if !adminSeen["mc1"] || adminSeen["mc2"] {
+		t.Errorf("admin seen = %v, want mc1 read and mc2 unread", adminSeen)
+	}
+	bobSeen := readSeen(bobSID, "/api/changes")
+	if len(bobSeen) != 1 || !bobSeen["mc2"] {
+		t.Errorf("bob seen = %v, want only mc2 read", bobSeen)
+	}
+
+	// Owner scope, read-state join, and three filters in one query.
+	bobFiltered := readSeen(bobSID, "/api/changes?category=http&severity=high&target_id=t-bob")
+	if len(bobFiltered) != 1 || !bobFiltered["mc2"] {
+		t.Errorf("bob filtered seen = %v, want only mc2 read", bobFiltered)
+	}
+
+	// Mark-all honours the target filter: only t-admin rows change.
+	rec = postChanges(t, h, adminSID, "/api/changes/seen-all?target_id=t-admin", map[string]any{}, h.handleMarkAllChangesSeen)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seen-all status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	adminSeen = readSeen(adminSID, "/api/changes")
+	if !adminSeen["mc1"] || adminSeen["mc2"] {
+		t.Errorf("after filtered mark-all, admin seen = %v, want mc1 read and mc2 unread", adminSeen)
 	}
 }
 
