@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -111,6 +112,18 @@ func classifyProjectScope(values []string) string {
 	}
 }
 
+// parseAssetTime parses a timestamp returned by SQLite. A COALESCE expression
+// has no declared column type, so the driver returns a plain string instead of
+// time.Time. Scan directly into time.Time fails and silently drops the row.
+func parseAssetTime(raw string) time.Time {
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 func (h *Handler) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(),
@@ -127,11 +140,20 @@ func (h *Handler) handleListAssets(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a models.Asset
 		var monitor int
-		if rows.Scan(&a.ID, &a.TargetID, &a.Name, &a.Value, &a.Kind, &a.AssetType, &a.Source, &a.SourceID,
-			&a.ApprovalStatus, &monitor, &a.Metadata, &a.CreatedAt, &a.UpdatedAt) == nil {
-			a.MonitorEnabled = monitor == 1
-			out = append(out, a)
+		var createdRaw, updatedRaw string
+		if err := rows.Scan(&a.ID, &a.TargetID, &a.Name, &a.Value, &a.Kind, &a.AssetType, &a.Source, &a.SourceID,
+			&a.ApprovalStatus, &monitor, &a.Metadata, &createdRaw, &updatedRaw); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "scan asset row")
+			return
 		}
+		a.CreatedAt = parseAssetTime(createdRaw)
+		a.UpdatedAt = parseAssetTime(updatedRaw)
+		a.MonitorEnabled = monitor == 1
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "read assets")
+		return
 	}
 	h.writeSuccess(w, out)
 }
