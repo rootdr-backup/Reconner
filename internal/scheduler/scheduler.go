@@ -2027,6 +2027,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		}
 		modules = pruned
 		logFn("info", ModuleSubdomainEnum, "subdomain_enum skipped — no scannable web roots (store and app assets excluded)")
+		// Keep the ledger in sync with the pruned module. Without this, the
+		// phase row stays pending and the terminal backstop rewrites an
+		// otherwise finished task to failed with an invariant error.
+		s.finishTaskPhase(taskID, ModuleSubdomainEnum, "skipped",
+			"no scannable web roots (store and app assets excluded)", 0)
 	}
 	// The skipped-module report: a watch round runs two phases, so everything
 	// else in the deep pipeline is SKIPPED. The report is written when the
