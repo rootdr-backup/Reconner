@@ -50,7 +50,7 @@ func TestListChangesScopedToOwner(t *testing.T) {
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-bob','bob.example',?)`, bob.ID)
 
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc-admin','t-admin','https://a','status_change','403','200','high',CURRENT_TIMESTAMP)`)
+		VALUES ('mc-admin','t-admin','https://a','http_change','status=403 title=Forbidden','status=200 title=OK','high',CURRENT_TIMESTAMP)`)
 	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
 		VALUES ('wc-bob','t-bob','round-1','https://b','status_change','403 title=Forbidden','200 title=OK','medium','{"old_code":403,"new_code":200}',CURRENT_TIMESTAMP)`)
 	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity)
@@ -121,9 +121,9 @@ func TestListTargetChangesForcesRoutedTarget(t *testing.T) {
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t2','two.example',?)`, adminID)
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc1','t1','https://1','status_change','a','b','low',CURRENT_TIMESTAMP)`)
+		VALUES ('mc1','t1','https://1','http_change','status=403 title=Forbidden','status=200 title=OK','low',CURRENT_TIMESTAMP)`)
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc2','t2','https://2','status_change','a','b','low',CURRENT_TIMESTAMP)`)
+		VALUES ('mc2','t2','https://2','http_change','status=200 title=OK','status=404 title=Gone','low',CURRENT_TIMESTAMP)`)
 	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +173,7 @@ func TestListChangesFiltersAndPagination(t *testing.T) {
 	h, adminID := newIsoHandler(t)
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc1','t1','https://1','status_change','a','b','high','2026-01-01 00:00:00')`)
+		VALUES ('mc1','t1','https://1','http_change','status=403 title=Forbidden','status=200 title=OK','high','2026-01-01 00:00:00')`)
 	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
 		VALUES ('wc1','t1','round-1','https://2','js_change','a','b','medium','{}','2026-02-01 00:00:00')`)
 	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
@@ -301,9 +301,9 @@ func TestChangesSeenIsPerUserAndHonoursFilters(t *testing.T) {
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-admin','admin.example',?)`, adminID)
 	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-bob','bob.example',?)`, bob.ID)
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc1','t-admin','https://a','status_change','403','200','high',CURRENT_TIMESTAMP)`)
+		VALUES ('mc1','t-admin','https://a','http_change','status=403 title=Forbidden','status=200 title=OK','high',CURRENT_TIMESTAMP)`)
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
-		VALUES ('mc2','t-bob','https://b','status_change','403','200','high',CURRENT_TIMESTAMP)`)
+		VALUES ('mc2','t-bob','https://b','http_change','status=403 title=Forbidden','status=200 title=OK','high',CURRENT_TIMESTAMP)`)
 
 	// Each user marks only their own change.
 	rec := postChanges(t, h, adminSID, "/api/changes/seen", map[string]any{"ids": []string{"mc1"}, "seen": true}, h.handleSetChangesSeen)
@@ -355,6 +355,166 @@ func TestChangesSeenIsPerUserAndHonoursFilters(t *testing.T) {
 	adminSeen = readSeen(adminSID, "/api/changes")
 	if !adminSeen["mc1"] || adminSeen["mc2"] {
 		t.Errorf("after filtered mark-all, admin seen = %v, want mc1 read and mc2 unread", adminSeen)
+	}
+}
+
+func TestListChangesNewFilters(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+
+	// Deep status flip: http_change with status=NNN text, no metadata.
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-deep','t1','https://deep','http_change','status=403 title=Forbidden','status=200 title=OK','medium','2026-01-01 00:00:00')`)
+	// Watch status flip: status_change with structured metadata.
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc-watch','t1','r1','https://watch','status_change','status=500 title=Error','status=200 title=OK','medium','{"old_code":500,"new_code":200}','2026-01-02 00:00:00')`)
+	// Same status, title only.
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-title','t1','https://title','http_change','status=200 title=Old','status=200 title=New','low','2026-01-03 00:00:00')`)
+	// No status codes.
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc-js','t1','r1','https://js','js_change','a','b','medium','{}','2026-01-04 00:00:00')`)
+	// Removal row: has a code in old_value but must be excluded from status filters.
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc-removed','t1','r1','https://gone','http_service_removed','status=403 title=Forbidden','','medium','{}','2026-01-05 00:00:00')`)
+	// Over-long code: status=2000 must not parse as 200 (trailing-space guard).
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-longcode','t1','https://long','http_change','status=2000 title=Big','status=2001 title=Big2','low','2026-01-06 00:00:00')`)
+	// No prefix: 200 inside arbitrary text must not match (instr guard).
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-plain','t1','https://plain','http_change','abcdef200x','plain','low','2026-01-07 00:00:00')`)
+	// Literal percent in a value, for LIKE escaping.
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-pct','t1','https://pct','http_change','status=404 title=Not%Found','status=200 title=OK','low','2026-01-08 00:00:00')`)
+	// Alert row, for multi-category.
+	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
+		VALUES ('n-alert','t1','watch_failed','Round failed','oops','high','2026-01-09 00:00:00')`)
+
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{"status only", "/api/changes?status_only=1", []string{"mc-deep", "wc-watch", "mc-pct"}},
+		{"class 2xx", "/api/changes?status_class=2", []string{"mc-deep", "wc-watch", "mc-title", "mc-pct"}},
+		{"class 4xx", "/api/changes?status_class=4", []string{"mc-deep", "mc-pct"}},
+		{"class 5xx", "/api/changes?status_class=5", []string{"wc-watch"}},
+		{"code 200", "/api/changes?status_code=200", []string{"mc-deep", "wc-watch", "mc-title", "mc-pct"}},
+		{"code 403", "/api/changes?status_code=403", []string{"mc-deep"}},
+		{"multi category", "/api/changes?category=scripts,alerts", []string{"wc-js", "n-alert"}},
+		{"all plus category", "/api/changes?category=all,http", []string{"mc-deep", "wc-watch", "mc-title", "wc-removed", "mc-longcode", "mc-plain", "mc-pct"}},
+		{"q plain", "/api/changes?q=Forbidden", []string{"mc-deep", "wc-removed"}},
+		{"q literal percent", "/api/changes?q=%25", []string{"mc-pct"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := serveChanges(t, h, sid, tc.path, nil, h.handleListChanges)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var env changesEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			got := idsOf(env.Data)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ids = %v, want %v", got, tc.want)
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("missing %q in %v", w, got)
+				}
+			}
+			if env.Total != len(tc.want) {
+				t.Errorf("total = %d, want %d", env.Total, len(tc.want))
+			}
+		})
+	}
+}
+
+func TestListChangesNewFiltersMalformedValues(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-long','t1','https://long','http_change','status=2000 title=Big','status=2001 title=Big2','medium',CURRENT_TIMESTAMP)`)
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Malformed values are dropped, never truncated into a valid match.
+	for _, q := range []string{
+		"/api/changes?status_code=20",
+		"/api/changes?status_code=2000",
+		"/api/changes?status_code=abc",
+		"/api/changes?status_class=9",
+	} {
+		rec := serveChanges(t, h, sid, q, nil, h.handleListChanges)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", q, rec.Code)
+		}
+		var env changesEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if len(env.Data) != 1 {
+			t.Errorf("%s: ids = %v, want the unfiltered row", q, idsOf(env.Data))
+		}
+	}
+
+	// No truncation: a 2000-only row must not match a valid 200 filter.
+	rec := serveChanges(t, h, sid, "/api/changes?status_code=200", nil, h.handleListChanges)
+	var env changesEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Data) != 0 {
+		t.Errorf("status_code=200 matched %v, want none (2000 must not truncate)", idsOf(env.Data))
+	}
+}
+
+func TestListChangesNewFiltersScopedToOwner(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	bob, err := h.auth.CreateUser("bob", "bobpassword", auth.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSID, err := h.auth.Login("bob", "bobpassword")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-admin','admin.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t-bob','bob.example',?)`, bob.ID)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-admin','t-admin','https://a','http_change','status=403 title=Forbidden','status=200 title=OK','medium',CURRENT_TIMESTAMP)`)
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc-bob','t-bob','r1','https://b','status_change','status=500 title=Error','status=200 title=OK','medium','{"old_code":500,"new_code":200}',CURRENT_TIMESTAMP)`)
+
+	for _, q := range []string{
+		"/api/changes?status_only=1",
+		"/api/changes?status_code=200",
+		"/api/changes?status_class=5",
+		"/api/changes?q=Forbidden",
+		"/api/changes?category=http,scripts",
+	} {
+		rec := serveChanges(t, h, bobSID, q, nil, h.handleListChanges)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", q, rec.Code)
+		}
+		var env changesEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range env.Data {
+			if e.ID == "mc-admin" {
+				t.Errorf("%s: member saw another owner's change", q)
+			}
+		}
 	}
 }
 

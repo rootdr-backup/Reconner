@@ -30,6 +30,13 @@ const TIME_FILTERS = [
   { id: '-1', label: 'Custom' },
 ]
 
+const STATUS_CLASS_FILTERS = [
+  { id: '2', label: '2xx' },
+  { id: '3', label: '3xx' },
+  { id: '4', label: '4xx' },
+  { id: '5', label: '5xx' },
+]
+
 const FIELD_LABELS: Record<string, string> = {
   status_change: 'Status code',
   http_change: 'HTTP / page',
@@ -76,6 +83,20 @@ function sinceFor(hours: string, custom: string): string {
   const ms = Number(hours) * 3600_000
   if (!Number.isFinite(ms)) return ''
   return new Date(Date.now() - ms).toISOString()
+}
+
+// Keep only whole codes in the real HTTP range. Invalid tokens are dropped,
+// so a half-typed input never turns into a partial or truncated code.
+function parseStatusCodes(raw: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const token of raw.split(',')) {
+    const code = token.trim()
+    if (!/^[1-5][0-9]{2}$/.test(code) || seen.has(code)) continue
+    seen.add(code)
+    out.push(code)
+  }
+  return out
 }
 
 function fmtDate(value: string): string {
@@ -176,7 +197,11 @@ interface Props {
 export default function ChangeLog({ targetId, compact }: Props) {
   const [hours, setHours] = useState('0')
   const [customSince, setCustomSince] = useState('')
-  const [category, setCategory] = useState<ChangeFilter>('all')
+  const [categories, setCategories] = useState<Set<ChangeFilter>>(() => new Set<ChangeFilter>(['all']))
+  const [statusOnly, setStatusOnly] = useState(false)
+  const [statusClasses, setStatusClasses] = useState<Set<string>>(() => new Set<string>())
+  const [statusCodes, setStatusCodes] = useState('')
+  const [q, setQ] = useState('')
   const [source, setSource] = useState('')
   const [severity, setSeverity] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
@@ -213,14 +238,20 @@ export default function ChangeLog({ targetId, compact }: Props) {
     const p: Record<string, string> = {}
     const since = sinceFor(hours, customSince)
     if (since) p.since = since
-    if (category !== 'all') p.category = category
+    const cats = [...categories].filter(c => c !== 'all')
+    if (cats.length) p.category = cats.join(',')
+    if (statusOnly) p.status_only = '1'
+    if (statusClasses.size) p.status_class = [...statusClasses].join(',')
+    const codes = parseStatusCodes(statusCodes)
+    if (codes.length) p.status_code = codes.join(',')
+    if (q.trim()) p.q = q.trim()
     if (source) p.source = source
     if (severity) p.severity = severity
     if (selectedTaskId) p.task_id = selectedTaskId
     const t = targetId || selectedTargetId
     if (t) p.target_id = t
     return p
-  }, [hours, customSince, category, source, severity, selectedTaskId, targetId, selectedTargetId])
+  }, [hours, customSince, categories, statusOnly, statusClasses, statusCodes, q, source, severity, selectedTaskId, targetId, selectedTargetId])
 
   const load = useCallback(async (mode: LoadMode = 'refresh') => {
     if (inFlight.current) {
@@ -316,6 +347,26 @@ export default function ChangeLog({ targetId, compact }: Props) {
     }
   }
 
+  const toggleCategory = (chip: ChangeFilter) => {
+    setCategories(prev => {
+      if (chip === 'all') return new Set<ChangeFilter>(['all'])
+      const next = new Set(prev)
+      next.delete('all')
+      if (next.has(chip)) next.delete(chip)
+      else next.add(chip)
+      return next.size ? next : new Set<ChangeFilter>(['all'])
+    })
+  }
+
+  const toggleStatusClass = (cls: string) => {
+    setStatusClasses(prev => {
+      const next = new Set(prev)
+      if (next.has(cls)) next.delete(cls)
+      else next.add(cls)
+      return next
+    })
+  }
+
   const applySeen = (ids: string[], seen: boolean) => {
     const idSet = new Set(ids)
     setRows(prev => prev.map(r => idSet.has(r.id) ? { ...r, seen } : r))
@@ -379,16 +430,16 @@ export default function ChangeLog({ targetId, compact }: Props) {
         )}
       </div>
 
-      {/* Category and source filters */}
+      {/* Category filters. Multi-select; All resets the selection. */}
       <div className="flex flex-wrap items-center gap-1.5">
         {CHANGE_FILTERS.map(chip => (
           <button
             key={chip.id}
             type="button"
-            onClick={() => setCategory(chip.id)}
+            onClick={() => toggleCategory(chip.id)}
             className={cn(
               'rounded-full border px-2.5 py-1 text-[11px] transition',
-              category === chip.id
+              categories.has(chip.id)
                 ? 'border-accent bg-accent/15 text-accent'
                 : 'border-border text-text-muted hover:text-text-primary',
             )}
@@ -398,7 +449,55 @@ export default function ChangeLog({ targetId, compact }: Props) {
         ))}
       </div>
 
+      {/* Status filters. Status-only, class ranges and exact codes combine. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[10px] uppercase tracking-wide text-text-muted">Status</span>
+        <button
+          type="button"
+          onClick={() => setStatusOnly(v => !v)}
+          className={cn(
+            'rounded-full border px-2.5 py-1 text-[11px] transition',
+            statusOnly
+              ? 'border-accent bg-accent/15 text-accent'
+              : 'border-border text-text-muted hover:text-text-primary',
+          )}
+        >
+          Status changes only
+        </button>
+        <span className="mx-1 text-[10px] text-text-muted">Class</span>
+        {STATUS_CLASS_FILTERS.map(f => (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => toggleStatusClass(f.id)}
+            className={cn(
+              'rounded-full border px-2.5 py-1 text-[11px] transition',
+              statusClasses.has(f.id)
+                ? 'border-accent bg-accent/15 text-accent'
+                : 'border-border text-text-muted hover:text-text-primary',
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
+        <span className="mx-1 text-[10px] text-text-muted">Codes</span>
+        <input
+          className="input w-32 py-1 text-xs"
+          placeholder="200,403"
+          value={statusCodes}
+          onChange={e => setStatusCodes(e.target.value)}
+          title="Exact status codes, comma separated (100-599)"
+        />
+      </div>
+
       <div className="flex flex-wrap items-center gap-2 border-y border-white/[.06] py-2">
+        <input
+          className="input w-48 py-1 text-xs"
+          placeholder="Search changes…"
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          title="Search URL, target, change type, before and after values"
+        />
         <select className="input w-auto py-1 text-xs" value={source} onChange={e => setSource(e.target.value)}>
           <option value="">All sources</option>
           {['monitor', 'watch', 'scope', 'notification'].map(s => <option key={s} value={s}>{s}</option>)}
