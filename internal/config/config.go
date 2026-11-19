@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 type WorkerConfig struct {
@@ -407,6 +408,29 @@ type Config struct {
 	// path is the on-disk config.json this Config was loaded from (unexported, so
 	// it is never marshaled back into the file). Save() writes here.
 	path string
+
+	// concurrencyMu guards the three two-tier concurrency limits. The API writes
+	// them from an HTTP goroutine (System -> Scanning PATCH) while the scheduler
+	// reads them on every admission decision. Without a lock, a PATCH can land
+	// mid-read and produce a caps tuple from two different config generations.
+	concurrencyMu sync.RWMutex
+}
+
+// ConcurrencyLimits returns a consistent snapshot of the three admission caps.
+// The scheduler and API use this instead of reading the fields directly.
+func (c *Config) ConcurrencyLimits() (global, deep, watch int) {
+	c.concurrencyMu.RLock()
+	defer c.concurrencyMu.RUnlock()
+	return c.Limits.MaxConcurrentScans, c.Limits.MaxConcurrentDeepScans, c.Limits.MaxConcurrentWatchScans
+}
+
+// SetConcurrencyLimits stores the three admission caps atomically.
+func (c *Config) SetConcurrencyLimits(global, deep, watch int) {
+	c.concurrencyMu.Lock()
+	defer c.concurrencyMu.Unlock()
+	c.Limits.MaxConcurrentScans = global
+	c.Limits.MaxConcurrentDeepScans = deep
+	c.Limits.MaxConcurrentWatchScans = watch
 }
 
 // Save marshals the config back to the file it was loaded from (0600), so

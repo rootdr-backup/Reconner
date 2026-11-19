@@ -60,11 +60,13 @@ type ScanDraft = {
   watchNotifyHostCap: number; watchFailLimit: number;
 }
 
-// numOr parses a bounded integer input. NaN and out-of-range values fall back
-// to a safe default so a half-typed number cannot reach the API.
+// numOr parses a bounded integer input. NaN falls back to a safe default so a
+// half-typed number cannot reach the API. Values outside [min, max] are clamped
+// to the nearest bound, matching the API's own clamp on save.
 const numOr = (raw: string, fallback: number, min: number, max: number) => {
   const n = Number.parseInt(raw, 10)
-  return Number.isFinite(n) && n >= min && n <= max ? n : fallback
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
 }
 
 // scanDraftFrom maps the wire config into the editable draft. The defaults

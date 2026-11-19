@@ -155,6 +155,7 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 	if h.sched != nil {
 		envTotal, envDeep, envWatch = h.sched.HealthyEnvelope()
 	}
+	cfgGlobal, cfgDeep, cfgWatch := h.cfg.ConcurrencyLimits()
 	h.writeSuccess(w, scanConfigPayload{
 		DNSResolvers:                  h.cfg.DNSResolvers,
 		SubdomainRecursionDepth:       h.cfg.SubdomainRecursionDepth,
@@ -163,9 +164,9 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		NucleiExcludeTemplateIDs:      h.cfg.NucleiExcludeTemplateIDs,
 		NucleiExtraTemplateRepos:      h.cfg.NucleiExtraTemplateRepos,
 		MonitorModules:                h.cfg.MonitorModules,
-		MaxConcurrentScans:            h.cfg.Limits.MaxConcurrentScans,
-		MaxConcurrentDeepScans:        h.cfg.Limits.MaxConcurrentDeepScans,
-		MaxConcurrentWatchScans:       h.cfg.Limits.MaxConcurrentWatchScans,
+		MaxConcurrentScans:            cfgGlobal,
+		MaxConcurrentDeepScans:        cfgDeep,
+		MaxConcurrentWatchScans:       cfgWatch,
 		HealthyEnvelopeTotal:          envTotal,
 		HealthyEnvelopeDeep:           envDeep,
 		HealthyEnvelopeWatch:          envWatch,
@@ -288,15 +289,17 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 	// the total to NumCPU here: that silently discarded the saved value on small
 	// boxes. Admission honors these numbers inside a visible hardware envelope
 	// and brakes them under live pressure (see scheduler.admissionCaps).
+	cfgG, cfgD, cfgW := h.cfg.ConcurrencyLimits()
 	if body.MaxConcurrentScans != nil {
-		h.cfg.Limits.MaxConcurrentScans = clamp(*body.MaxConcurrentScans, 1, 32)
+		cfgG = clamp(*body.MaxConcurrentScans, 1, 32)
 	}
 	if body.MaxConcurrentDeepScans != nil {
-		h.cfg.Limits.MaxConcurrentDeepScans = clamp(*body.MaxConcurrentDeepScans, 1, 8)
+		cfgD = clamp(*body.MaxConcurrentDeepScans, 1, 8)
 	}
 	if body.MaxConcurrentWatchScans != nil {
-		h.cfg.Limits.MaxConcurrentWatchScans = clamp(*body.MaxConcurrentWatchScans, 0, 16)
+		cfgW = clamp(*body.MaxConcurrentWatchScans, 0, 16)
 	}
+	h.cfg.SetConcurrencyLimits(cfgG, cfgD, cfgW)
 	if body.WatchHTTPThreads != nil {
 		h.cfg.Limits.WatchHTTPThreads = clamp(*body.WatchHTTPThreads, 1, 40)
 	}

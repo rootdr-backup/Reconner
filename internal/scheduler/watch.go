@@ -97,10 +97,14 @@ func (s *Scheduler) runDueWatchRounds() {
 	s.mu.RLock()
 	running := len(s.running)
 	s.mu.RUnlock()
-	if s.watchLaneCap(running) == 0 {
+	watchCap := s.watchLaneCap(running)
+	if watchCap == 0 {
 		return
 	}
-	limit := s.cfg.Limits.MaxConcurrentWatchScans * 2
+	// Bound pending creation by the EFFECTIVE cap, not the configured value:
+	// on a small box a configured 16 may resolve to a cap of 3, and creating
+	// 32 pending rows would still flood the lane when it reopens.
+	limit := watchCap * 2
 	if limit < 1 {
 		limit = 1
 	}

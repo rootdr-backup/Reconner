@@ -120,4 +120,24 @@ describe('System scanning concurrency', () => {
     expect(patchBody!.max_concurrent_deep_scans).toBe(8)
     expect(patchBody!.max_concurrent_scans).toBe(32)
   })
+
+  it('clamps out-of-range input to the ceiling, not the floor', async () => {
+    const user = userEvent.setup()
+    renderSystem()
+    const tab = await screen.findByRole('tab', { name: 'Toolchain' })
+    await user.click(tab)
+    await waitFor(() => expect(screen.getByText('Scanning configuration')).toBeInTheDocument())
+
+    // Values above each max must clamp to the max; the old numOr returned the
+    // fallback (0 for watch, 1 for deep/total), silently disabling or shrinking.
+    fireEvent.change(screen.getByLabelText('Watch rounds in parallel'), { target: { value: '99' } })
+    fireEvent.change(screen.getByLabelText('Deep scans in parallel'), { target: { value: '99' } })
+    fireEvent.change(screen.getByLabelText('Total scans in parallel'), { target: { value: '99' } })
+
+    await user.click(screen.getByRole('button', { name: 'Save configuration' }))
+    await waitFor(() => expect(patchBody).not.toBeNull())
+    expect(patchBody!.max_concurrent_watch_scans).toBe(16)
+    expect(patchBody!.max_concurrent_deep_scans).toBe(8)
+    expect(patchBody!.max_concurrent_scans).toBe(32)
+  })
 })

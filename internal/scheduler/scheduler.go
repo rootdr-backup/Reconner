@@ -3342,9 +3342,7 @@ func (s *Scheduler) admissionCaps(running int) (global, deep, watch int) {
 	cfgGlobal, cfgDeep, cfgWatch := 2, 1, 1
 	memBudget := 0
 	if s.cfg != nil {
-		cfgGlobal = s.cfg.Limits.MaxConcurrentScans
-		cfgDeep = s.cfg.Limits.MaxConcurrentDeepScans
-		cfgWatch = s.cfg.Limits.MaxConcurrentWatchScans
+		cfgGlobal, cfgDeep, cfgWatch = s.cfg.ConcurrencyLimits()
 		memBudget = s.cfg.Limits.MaxMemoryMB
 	}
 	level := s.pressureLevel()
@@ -3364,9 +3362,10 @@ func (s *Scheduler) admissionCaps(running int) (global, deep, watch int) {
 	if cfgGlobal > envGlobal || cfgDeep > envDeep || cfgWatch > envWatch {
 		if s.envelopeLog.CompareAndSwap(false, true) {
 			s.logger.Info("Scan concurrency capped by hardware envelope",
-				"configured_total", cfgGlobal, "effective_total", envGlobal,
-				"configured_deep", cfgDeep, "effective_deep", envDeep,
-				"configured_watch", cfgWatch, "effective_watch", envWatch)
+				"configured_total", cfgGlobal, "effective_total", global,
+				"configured_deep", cfgDeep, "effective_deep", deep,
+				"configured_watch", cfgWatch, "effective_watch", watch,
+				"envelope_total", envGlobal, "envelope_deep", envDeep, "envelope_watch", envWatch)
 		}
 	} else {
 		s.envelopeLog.Store(false)
