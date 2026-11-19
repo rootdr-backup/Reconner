@@ -134,11 +134,22 @@ func TestClassifyCNAMEAliasCopiesTargetIP(t *testing.T) {
 		t.Fatalf("dangling CNAME alias = (%q, %v), want (\"\", false)", ip, live)
 	}
 
-	// A wildcard answer pool is never copied onto an alias.
+	// A wildcard answer pool is never copied onto a NON-CDN alias. A plain
+	// hostname is not proof of a real host, so the wildcard check still applies.
 	profile := &wildcardProfile{apex: wildcardZone{ips: map[string]bool{"108.157.60.59": true}}}
-	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	ip, live = classifyCNAMEAlias("account.merck.com", "origin.merck.net", func(string) []string {
+		return []string{"108.157.60.59"}
+	}, profile)
 	if live || ip != "" {
-		t.Fatalf("wildcard CNAME target = (%q, %v), want (\"\", false)", ip, live)
+		t.Fatalf("wildcard pool on non-CDN target = (%q, %v), want empty IP", ip, live)
+	}
+
+	// An explicit CNAME to a known CDN is trusted even when its IP overlaps a
+	// wildcard pool. CDN providers share ranges across customers, so an overlap
+	// is common and must not drop the alias IP (the Merck case).
+	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	if !live || ip != "108.157.60.59" {
+		t.Fatalf("CDN target with overlapping wildcard pool = (%q, %v), want (108.157.60.59, true)", ip, live)
 	}
 
 	// A wildcard CNAME target is rejected before the IP lookup.

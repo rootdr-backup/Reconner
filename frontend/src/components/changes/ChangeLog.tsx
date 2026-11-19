@@ -13,6 +13,10 @@ import { ChangeDiffViewer } from '../targets/ChangeDiffViewer'
 
 type DiffView = { targetId: string; url: string; kind: 'css' | 'js' }
 
+// 'initial' shows a skeleton and resets paging. 'refresh' keeps the current
+// rows on screen and only shows a subtle hint while new data loads.
+type LoadMode = 'initial' | 'refresh'
+
 const PAGE = 200
 
 const TIME_FILTERS = [
@@ -182,6 +186,7 @@ export default function ChangeLog({ targetId, compact }: Props) {
   const [rounds, setRounds] = useState<WatchRound[]>([])
   const [targetList, setTargetList] = useState<Target[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [serverTotal, setServerTotal] = useState(0)
   const [detail, setDetail] = useState<ChangeCard | null>(null)
@@ -190,6 +195,12 @@ export default function ChangeLog({ targetId, compact }: Props) {
   const requestSeq = useRef(0)
   const pageCount = useRef(1)
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Coalescing state. A refresh triggered while one is running is collapsed
+  // into a single follow-up, so overlapping WS events cannot stack queries.
+  const inFlight = useRef(false)
+  const pending = useRef(false)
+  const hasLoaded = useRef(false)
+  const loadRef = useRef<((mode?: LoadMode) => Promise<void>) | null>(null)
 
   useEffect(() => {
     if (targetId) return
@@ -211,11 +222,18 @@ export default function ChangeLog({ targetId, compact }: Props) {
     return p
   }, [hours, customSince, category, source, severity, selectedTaskId, targetId, selectedTargetId])
 
-  const load = useCallback(async (reset = false) => {
+  const load = useCallback(async (mode: LoadMode = 'refresh') => {
+    if (inFlight.current) {
+      pending.current = true
+      return
+    }
+    inFlight.current = true
+    const first = mode === 'initial' || !hasLoaded.current
+    if (first) setLoading(true)
+    else setRefreshing(true)
     const seq = ++requestSeq.current
-    setLoading(true)
     setError('')
-    if (reset) pageCount.current = 1
+    if (mode === 'initial') pageCount.current = 1
     const p = params()
     const roundTarget = targetId || selectedTargetId
     try {
@@ -238,22 +256,32 @@ export default function ChangeLog({ targetId, compact }: Props) {
           }),
         watchApi.rounds(roundTarget ? { target_id: roundTarget } : {}),
       ])
+      // Only the newest response may replace the rows. A stale response is
+      // still cleared below, so it can never leave the skeleton stuck.
       if (seq !== requestSeq.current) return
       setRows(changeRows)
       setRounds(roundRows)
     } catch (e) {
       if (seq === requestSeq.current) setError(e instanceof Error ? e.message : 'Failed to load changes')
     } finally {
-      if (seq === requestSeq.current) setLoading(false)
+      inFlight.current = false
+      hasLoaded.current = true
+      setLoading(false)
+      setRefreshing(false)
+      if (pending.current) {
+        pending.current = false
+        void loadRef.current?.('refresh')
+      }
     }
   }, [params, targetId, selectedTargetId])
+  loadRef.current = load
 
-  useEffect(() => { void load(true) }, [load])
+  useEffect(() => { void load('initial') }, [load])
 
   useEffect(() => {
     const schedule = () => {
       if (reloadTimer.current) clearTimeout(reloadTimer.current)
-      reloadTimer.current = setTimeout(() => { void load() }, 2500)
+      reloadTimer.current = setTimeout(() => { void load('refresh') }, 2500)
     }
     const offs = [
       ws.on('task_progress', schedule),
@@ -261,11 +289,9 @@ export default function ChangeLog({ targetId, compact }: Props) {
       ws.on('scope_landed', schedule),
       ws.on('notification_created', schedule),
     ]
-    const poll = setInterval(() => { void load() }, 30000)
     return () => {
       offs.forEach(off => off())
       if (reloadTimer.current) clearTimeout(reloadTimer.current)
-      clearInterval(poll)
     }
   }, [load])
 
@@ -314,7 +340,7 @@ export default function ChangeLog({ targetId, compact }: Props) {
   const markAllRead = async () => {
     try {
       const res = await changes.markAllSeen(params())
-      if (res.updated > 0) await load()
+      if (res.updated > 0) await load('refresh')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to mark all read')
     }
@@ -400,11 +426,17 @@ export default function ChangeLog({ targetId, compact }: Props) {
         >
           Mark all read
         </button>
+        {refreshing && !loading && (
+          <span className="ml-auto text-[10px] text-text-muted">Refreshing…</span>
+        )}
         <button
           type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="ml-auto text-[11px] text-text-muted hover:text-text-primary disabled:opacity-50"
+          onClick={() => void load('refresh')}
+          disabled={loading || refreshing}
+          className={cn(
+            'text-[11px] text-text-muted hover:text-text-primary disabled:opacity-50',
+            !(refreshing && !loading) && 'ml-auto',
+          )}
         >
           Refresh
         </button>

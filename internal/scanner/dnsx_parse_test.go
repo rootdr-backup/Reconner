@@ -20,6 +20,11 @@ func TestParseDNSXResponseLine(t *testing.T) {
 		{"trailing.example.com. [ 1.2.3.4 ]", "trailing.example.com", []string{"1.2.3.4"}},
 		{"no brackets here", "", nil},
 		{"[1.2.3.4] alone", "", nil},
+		// dnsx 1.3.1 -resp emits a record-type marker group and colourises tokens.
+		{"account.merck.com [A] [99.86.91.61]", "account.merck.com", []string{"a", "99.86.91.61"}},
+		{"account.merck.com [\x1b[35mA\x1b[0m] [\x1b[32m99.86.91.61\x1b[0m]", "account.merck.com", []string{"a", "99.86.91.61"}},
+		{"account.merck.com [CNAME] [d27qwt9heez1et.cloudfront.net]", "account.merck.com", []string{"cname", "d27qwt9heez1et.cloudfront.net"}},
+		{"account.merck.com [\x1b[35mCNAME\x1b[0m] [\x1b[32md27qwt9heez1et.cloudfront.net\x1b[0m]", "account.merck.com", []string{"cname", "d27qwt9heez1et.cloudfront.net"}},
 	}
 	for i, tc := range cases {
 		gotName, gotToks := parseDNSXResponseLine(tc.line)

@@ -236,7 +236,11 @@ func (s *SubdomainScanner) dnsxResolveIPs(ctx context.Context, targetID string, 
 	if workers > 400 {
 		workers = 400
 	}
-	args := []string{"-silent", "-a", "-aaaa", "-resp", "-retry", "2", "-t", fmt.Sprint(workers)}
+	// -nc keeps dnsx from colouring the -resp tokens. dnsx 1.3.1 wraps the
+	// record type and each value in ANSI escapes; without this, net.ParseIP
+	// sees "\x1b[32m1.2.3.4\x1b[0m" and rejects every address. stripANSI in
+	// parseDNSXResponseLine is the defensive backstop for older installs.
+	args := []string{"-silent", "-nc", "-a", "-aaaa", "-resp", "-retry", "2", "-t", fmt.Sprint(workers)}
 	// Same resolver file contract as every other dnsx pass: the operator list
 	// (or the public default) — the SAME list the in-process s.resolver
 	// round-robins, so answers and wildcard probes share one resolver source.
@@ -269,6 +273,32 @@ func (s *SubdomainScanner) dnsxResolveIPs(ctx context.Context, targetID string, 
 	return out
 }
 
+// isDNSXRecordMarker reports whether a parsed -resp token is the record-type
+// marker that dnsx 1.3.1 emits as the first bracket group (host [a] [1.2.3.4],
+// host [cname] [target]). The real value follows it in the next group.
+func isDNSXRecordMarker(tok string) bool {
+	switch tok {
+	case "a", "aaaa", "cname", "mx", "ns", "txt", "srv", "ptr", "caa":
+		return true
+	}
+	return false
+}
+
+// stripANSI removes SGR escape sequences from tool output. Some dnsx builds
+// colourise `-resp` tokens even when -nc is passed, so the parser must also
+// work on lines like "host [\x1b[35mA\x1b[0m] [\x1b[32m1.2.3.4\x1b[0m]".
+func stripANSI(line string) string {
+	for strings.Contains(line, "\x1b[") {
+		start := strings.Index(line, "\x1b[")
+		end := strings.IndexAny(line[start:], "ABCDEFGHJKSTfmnsulh")
+		if end < 0 {
+			break
+		}
+		line = line[:start] + line[start+end+1:]
+	}
+	return line
+}
+
 // parseDNSXResponseLine splits one dnsx `-resp` output line into the hostname
 // and the bracket-group tokens — separators and trailing dots stripped, lower
 // cased:
@@ -279,7 +309,7 @@ func (s *SubdomainScanner) dnsxResolveIPs(ctx context.Context, targetID string, 
 // Tokens come back as raw text; IP-vs-CNAME validation is the caller's
 // concern. Lines without a usable bracket group parse as ("", nil).
 func parseDNSXResponseLine(line string) (string, []string) {
-	line = strings.TrimSpace(line)
+	line = stripANSI(strings.TrimSpace(line))
 	openBr := strings.Index(line, "[")
 	closeBr := strings.LastIndex(line, "]")
 	if openBr <= 0 || closeBr <= openBr {

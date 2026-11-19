@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/projectdiscovery/cdncheck"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -1576,7 +1577,7 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 	}
 	out := map[string]bool{}
 	targets := map[string]string{}
-	args := []string{"-silent", "-cname", "-resp", "-retry", "1"}
+	args := []string{"-silent", "-nc", "-cname", "-resp", "-retry", "1"}
 	// Resolve the CNAME prefilter through the configured fast public resolvers,
 	// not the (often slow/single-flight) system resolver — this was a full extra
 	// serial DNS pass over the whole candidate list with no -r before.
@@ -1600,7 +1601,16 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 			}
 			out[name] = true
 			if len(toks) > 0 {
-				targets[name] = toks[0]
+				// dnsx 1.3.1 emits two bracket groups for -resp:
+				//   host [cname] [target]
+				// so toks[0] is the record-type marker and the real target is
+				// toks[1]. Older builds emit a single group (host [target]);
+				// keep using toks[0] for those.
+				target := toks[0]
+				if isDNSXRecordMarker(target) && len(toks) > 1 {
+					target = toks[1]
+				}
+				targets[name] = target
 			}
 		}, "dnsx", args...)
 	if err != nil && ctx.Err() == nil {
@@ -1638,14 +1648,35 @@ func (s *SubdomainScanner) cnameTargetIPSet(ctx context.Context, targetID string
 	return s.dnsxResolveIPs(ctx, targetID, names)
 }
 
+// cdnSuffixChecker is a shared, cached CDN suffix matcher. CheckSuffix is a
+// pure in-memory lookup — it does no DNS I/O — so one client serves every
+// alias in every scan. It lets us trust an explicit CDN CNAME target even when
+// its IP overlaps a detected wildcard pool (shared CDN ranges are common).
+var cdnSuffixChecker = cdncheck.New()
+
 // classifyCNAMEAlias returns the IP to store on a CNAME-only alias and true
 // when the target resolved. A dangling target returns ("", false) and keeps
-// the alias in takeover only. A wildcard answer pool rejects the target set.
+// the alias in takeover only.
+//
+// A wildcard answer pool normally rejects the target set, because a wildcard
+// DNS answer is not proof of a real host. An EXPLICIT CNAME to a known CDN is
+// different: the CNAME record itself is proof, and CDN providers share ranges
+// across many customers, so a CDN IP landing in a wildcard pool is common. For
+// such targets we trust the CNAME and keep the first resolved IP. Non-CDN
+// targets keep the wildcard check. The wildcard-CNAME guard stays in both
+// paths so a target known to be a wildcard CNAME is still rejected.
 func classifyCNAMEAlias(alias, target string, resolve func(string) []string, profile *wildcardProfile) (string, bool) {
 	if target == "" || resolve == nil || profile.isWildcardCNAME(alias, target) {
 		return "", false
 	}
-	ip := profile.firstNonWildcardIP(alias, resolve(target))
+	resolved := resolve(target)
+	if len(resolved) == 0 {
+		return "", false
+	}
+	if matched, _, _, err := cdnSuffixChecker.CheckSuffix(target); matched && err == nil {
+		return resolved[0], true
+	}
+	ip := profile.firstNonWildcardIP(alias, resolved)
 	if ip == "" {
 		return "", false
 	}
