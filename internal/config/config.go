@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 type WorkerConfig struct {
@@ -36,19 +37,20 @@ type ResourceLimits struct {
 	// (0 = tool default).
 	HTTPRateLimit int `json:"http_rate_limit"`
 	// ── Two-tier (deep + breadth/watch) limits ───────────────────────────────
-	// MaxConcurrentScans is the GLOBAL ceiling: how many scans (deep AND watch)
-	// may run at the same time. The effective ceiling is
-	// min(this, NumCPU, effectiveMaxConcurrent()+1) — the +1 leaves room for
-	// one cheap watch round next to one heavy deep scan on a small box.
-	// Default 2. Set via System → Scanning.
+	// These three knobs are authoritative operator settings edited in
+	// System → Scanning. They are stored and returned exactly. Admission honors
+	// them inside a visible per-lane hardware envelope; live memory/CPU pressure
+	// may brake that envelope temporarily, and scans resume when it clears.
+	// MaxConcurrentScans is the GLOBAL ceiling (deep AND watch together).
+	// Default 2.
 	MaxConcurrentScans int `json:"max_concurrent_scans"`
 	// MaxConcurrentDeepScans caps the DEEP lane (the expensive full pipeline).
-	// Also bounded by effectiveMaxConcurrent(), which is memory/CPU aware.
+	// Deep keeps its reservation; a deep scan never waits for a watch round.
 	// Default 1.
 	MaxConcurrentDeepScans int `json:"max_concurrent_deep_scans"`
 	// MaxConcurrentWatchScans caps the BREADTH lane (the cheap watch rounds).
-	// It never eats the deep lane's reserved slots: the effective watch cap is
-	// min(this, max(0, globalCeiling - deepLaneCap)). Default 1.
+	// It only gets slots the deep lane did not reserve. 0 disables watch rounds.
+	// Default 1.
 	MaxConcurrentWatchScans int `json:"max_concurrent_watch_scans"`
 	// WatchHTTPThreads is the httpx thread count for ONE watch round. The deep
 	// tier keeps Workers.HTTPProbing. Default 10.
@@ -406,6 +408,29 @@ type Config struct {
 	// path is the on-disk config.json this Config was loaded from (unexported, so
 	// it is never marshaled back into the file). Save() writes here.
 	path string
+
+	// concurrencyMu guards the three two-tier concurrency limits. The API writes
+	// them from an HTTP goroutine (System -> Scanning PATCH) while the scheduler
+	// reads them on every admission decision. Without a lock, a PATCH can land
+	// mid-read and produce a caps tuple from two different config generations.
+	concurrencyMu sync.RWMutex
+}
+
+// ConcurrencyLimits returns a consistent snapshot of the three admission caps.
+// The scheduler and API use this instead of reading the fields directly.
+func (c *Config) ConcurrencyLimits() (global, deep, watch int) {
+	c.concurrencyMu.RLock()
+	defer c.concurrencyMu.RUnlock()
+	return c.Limits.MaxConcurrentScans, c.Limits.MaxConcurrentDeepScans, c.Limits.MaxConcurrentWatchScans
+}
+
+// SetConcurrencyLimits stores the three admission caps atomically.
+func (c *Config) SetConcurrencyLimits(global, deep, watch int) {
+	c.concurrencyMu.Lock()
+	defer c.concurrencyMu.Unlock()
+	c.Limits.MaxConcurrentScans = global
+	c.Limits.MaxConcurrentDeepScans = deep
+	c.Limits.MaxConcurrentWatchScans = watch
 }
 
 // Save marshals the config back to the file it was loaded from (0600), so

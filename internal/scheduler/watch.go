@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,66 +24,28 @@ func watchScanModules() []string {
 }
 
 // globalScanCeiling is the TOTAL number of scans (deep + watch) allowed to run
-// at the same time.
-//
-// The deep lane alone used to be bounded by effectiveMaxConcurrent(), which on
-// a 2-core/3GB box is 1. The watch tier adds a second, much lighter slot:
-//   - effectiveMaxConcurrent()+1 because the memory/CPU guard is sized for one
-//     HEAVY scan; a watch round is discovery + one HTTP pass and needs far less.
-//   - NumCPU because two CPU-bound rounds on two cores is already saturation.
-//   - MaxConcurrentScans is the operator knob (System → Scanning).
-//
-// When the pressure guard reports 0 (severe memory/CPU pressure while idle)
-// nothing new starts — not even a watch round.
+// at the same time. It is the operator value from System → Scanning, honored
+// inside the visible hardware envelope and braked by live memory/CPU pressure.
+// Severe pressure while idle returns 0: no new scan starts.
 func (s *Scheduler) globalScanCeiling(running int) int {
-	eff := s.effectiveMaxConcurrent(running)
-	if eff <= 0 {
-		return 0
-	}
-	ceiling := 1
-	if s.cfg != nil && s.cfg.Limits.MaxConcurrentScans > 0 {
-		ceiling = s.cfg.Limits.MaxConcurrentScans
-	}
-	if cpus := runtime.NumCPU(); ceiling > cpus {
-		ceiling = cpus
-	}
-	if max := eff + 1; ceiling > max {
-		ceiling = max
-	}
-	return ceiling
+	global, _, _ := s.admissionCaps(running)
+	return global
 }
 
-// deepLaneCap is how many DEEP scans may run at once. It is the memory-aware
-// effectiveMaxConcurrent() bounded by the operator knob
-// Limits.MaxConcurrentDeepScans (default 1).
+// deepLaneCap is how many DEEP scans may run at once. It is the operator value
+// bounded by the heavy-pipeline hardware envelope and by pressure. Deep keeps
+// its reservation: a deep scan never waits for a watch round.
 func (s *Scheduler) deepLaneCap(running int) int {
-	eff := s.effectiveMaxConcurrent(running)
-	if eff < 0 {
-		eff = 0
-	}
-	cap := eff
-	if s.cfg != nil && s.cfg.Limits.MaxConcurrentDeepScans > 0 && s.cfg.Limits.MaxConcurrentDeepScans < cap {
-		cap = s.cfg.Limits.MaxConcurrentDeepScans
-	}
-	return cap
+	_, deep, _ := s.admissionCaps(running)
+	return deep
 }
 
-// watchLaneCap is how many WATCH rounds may run at once. The deep lane keeps
-// its reservation, so a deep scan never waits for a watch round: the watch
-// lane only gets the slots the deep lane did not reserve.
+// watchLaneCap is how many WATCH rounds may run at once. Watch rounds are light
+// (discovery + one HTTP pass), so they get their own envelope. The deep lane
+// keeps its reservation: watch only gets slots deep did not take.
 func (s *Scheduler) watchLaneCap(running int) int {
-	cap := 0
-	if s.cfg != nil && s.cfg.Limits.MaxConcurrentWatchScans > 0 {
-		cap = s.cfg.Limits.MaxConcurrentWatchScans
-	}
-	free := s.globalScanCeiling(running) - s.deepLaneCap(running)
-	if free < 0 {
-		free = 0
-	}
-	if cap > free {
-		cap = free
-	}
-	return cap
+	_, _, watch := s.admissionCaps(running)
+	return watch
 }
 
 // watchGapMinutes is the retry gap: the wait before the next chained round
@@ -130,7 +91,20 @@ func (s *Scheduler) runDueWatchRounds() {
 	if s.cfg == nil {
 		return
 	}
-	limit := s.cfg.Limits.MaxConcurrentWatchScans * 2
+	// If the watch lane is disabled (configured 0) or severe pressure has closed
+	// it, do not create pending rounds. Otherwise one task per due project piles
+	// up every 60s tick and floods the lane the moment it reopens.
+	s.mu.RLock()
+	running := len(s.running)
+	s.mu.RUnlock()
+	watchCap := s.watchLaneCap(running)
+	if watchCap == 0 {
+		return
+	}
+	// Bound pending creation by the EFFECTIVE cap, not the configured value:
+	// on a small box a configured 16 may resolve to a cap of 3, and creating
+	// 32 pending rows would still flood the lane when it reopens.
+	limit := watchCap * 2
 	if limit < 1 {
 		limit = 1
 	}

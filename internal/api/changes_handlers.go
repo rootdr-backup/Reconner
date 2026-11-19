@@ -148,11 +148,26 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 		args = append(args, uid)
 	}
 
-	inner = `(` + sourceMonitor + ` UNION ALL ` + sourceWatch + ` UNION ALL ` +
-		sourceScope + ` UNION ALL ` + sourceNotification + `) x`
+	unionSQL := `( ` + sourceMonitor + ` UNION ALL ` + sourceWatch + ` UNION ALL ` +
+		sourceScope + ` UNION ALL ` + sourceNotification + ` )`
 
-	filters := make([]string, 0, 6)
-	filterArgs = make([]any, 0, 6)
+	// Build derived status codes in a wrapper around the UNION. Source aliases
+	// (mc/wc/se/n) differ and the sources are not uniform, so referencing x.*
+	// inside a source would not compile. Only real change rows whose type
+	// carries a status transition are parsed. Bell rows are excluded even when
+	// their type matches: a notification mirrors a deep change with the same
+	// type and a body that repeats the "status=NNN " text, so parsing it would
+	// create a duplicate of the real change. The trailing-space check prevents
+	// a value like "status=2000x" from parsing as 200.
+	inner = `(
+		SELECT u.*,
+			` + changesStatusCodeExpr("u.change_type", "u.source", "u.old_value") + ` AS status_old,
+			` + changesStatusCodeExpr("u.change_type", "u.source", "u.new_value") + ` AS status_new
+		FROM ` + unionSQL + ` u
+	) x`
+
+	filters := make([]string, 0, 12)
+	filterArgs = make([]any, 0, 12)
 	targetID := forcedTargetID
 	if targetID == "" {
 		targetID = q.Get("target_id")
@@ -161,10 +176,56 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 		filters = append(filters, `x.target_id=?`)
 		filterArgs = append(filterArgs, targetID)
 	}
-	if v := q.Get("category"); v != "" && v != "all" {
-		filters = append(filters, `x.category=?`)
-		filterArgs = append(filterArgs, v)
+
+	// category accepts a comma list. "all" is dropped; all,http means http.
+	// Unknown tokens are ignored. A non-empty value with no valid category
+	// (for example ",,," or "garbage") matches nothing instead of silently
+	// returning every category.
+	if v := q.Get("category"); v != "" {
+		validCategories := map[string]bool{
+			"http": true, "scripts": true, "security": true, "tech": true,
+			"headers": true, "assets": true, "alerts": true,
+		}
+		cats := make([]string, 0, 4)
+		seenCat := map[string]bool{}
+		hasAll := false
+		for _, c := range strings.Split(v, ",") {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if c == "all" {
+				hasAll = true
+				continue
+			}
+			if validCategories[c] && !seenCat[c] {
+				seenCat[c] = true
+				cats = append(cats, c)
+			}
+		}
+		if len(cats) > 0 {
+			ph := make([]string, len(cats))
+			for i, c := range cats {
+				ph[i] = "?"
+				filterArgs = append(filterArgs, c)
+			}
+			filters = append(filters, `x.category IN (`+strings.Join(ph, ",")+`)`)
+		} else if !hasAll {
+			filters = append(filters, `1=0`)
+		}
 	}
+
+	// Text search over the visible fields. LIKE wildcards in user input are
+	// escaped so they stay literal.
+	if v := strings.TrimSpace(q.Get("q")); v != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(v)
+		like := "%" + escaped + "%"
+		filters = append(filters, `(x.url LIKE ? ESCAPE '\' OR x.target_name LIKE ? ESCAPE '\' OR x.change_type LIKE ? ESCAPE '\' OR x.old_value LIKE ? ESCAPE '\' OR x.new_value LIKE ? ESCAPE '\')`)
+		for i := 0; i < 5; i++ {
+			filterArgs = append(filterArgs, like)
+		}
+	}
+
 	if v := q.Get("severity"); v != "" {
 		filters = append(filters, `x.severity=?`)
 		filterArgs = append(filterArgs, v)
@@ -181,10 +242,100 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 		filters = append(filters, `x.detected_at>=?`)
 		filterArgs = append(filterArgs, since)
 	}
+
+	// A status-only row is a real transition: both codes valid and different.
+	// The type and source guards live in changesStatusCodeExpr, which builds
+	// the derived codes used here and in the class/code filters below.
+	if q.Get("status_only") == "1" {
+		filters = append(filters, `x.status_old BETWEEN 100 AND 599 AND x.status_new BETWEEN 100 AND 599
+			AND x.status_old <> x.status_new AND x.change_type <> 'http_service_removed'`)
+	}
+
+	// status_class matches when either code falls in a requested class.
+	if v := q.Get("status_class"); v != "" {
+		seen := map[string]bool{}
+		classes := make([]string, 0, 4)
+		for _, c := range strings.Split(v, ",") {
+			c = strings.TrimSpace(c)
+			if (c == "2" || c == "3" || c == "4" || c == "5") && !seen[c] {
+				seen[c] = true
+				classes = append(classes, c)
+			}
+		}
+		if len(classes) > 0 {
+			parts := make([]string, 0, len(classes))
+			for _, d := range classes {
+				n, _ := strconv.Atoi(d)
+				lo, hi := n*100, n*100+99
+				parts = append(parts, `(x.status_old BETWEEN `+strconv.Itoa(lo)+` AND `+strconv.Itoa(hi)+
+					` OR x.status_new BETWEEN `+strconv.Itoa(lo)+` AND `+strconv.Itoa(hi)+`)`)
+			}
+			filters = append(filters, `(x.status_old BETWEEN 100 AND 599 OR x.status_new BETWEEN 100 AND 599)
+				AND (`+strings.Join(parts, " OR ")+`) AND x.change_type <> 'http_service_removed'`)
+		}
+	}
+
+	// status_code matches an exact code on either side. Reject malformed or
+	// out-of-range values instead of truncating or coercing them.
+	if v := q.Get("status_code"); v != "" {
+		codes := make([]any, 0, 8)
+		seen := map[int]bool{}
+		for _, c := range strings.Split(v, ",") {
+			n, ok := statusCodeToken(strings.TrimSpace(c))
+			if ok && !seen[n] {
+				seen[n] = true
+				codes = append(codes, n)
+			}
+		}
+		if len(codes) > 0 {
+			ph := make([]string, len(codes))
+			for i := range codes {
+				ph[i] = "?"
+			}
+			joined := strings.Join(ph, ",")
+			filters = append(filters, `(x.status_old IN (`+joined+`) OR x.status_new IN (`+joined+`))
+				AND x.change_type <> 'http_service_removed'`)
+			filterArgs = append(filterArgs, codes...)
+			filterArgs = append(filterArgs, codes...)
+		}
+	}
+
 	if len(filters) > 0 {
 		whereSQL = ` WHERE ` + strings.Join(filters, ` AND `)
 	}
 	return inner, whereSQL, args, filterArgs
+}
+
+// changesStatusCodeExpr parses the "status=NNN " prefix from a value column.
+// Watch writes status_change and deep writes http_change/page_change; those
+// are the only types that carry a status transition. Bell rows are excluded:
+// a notification mirrors a deep change with the same type and repeats the
+// token in its body, so parsing it would duplicate the real change. Other
+// free-text rows (alerts, scope events) are already outside the type list.
+// No metadata/JSON path is needed.
+func changesStatusCodeExpr(typeCol, sourceCol, col string) string {
+	return `CASE WHEN ` + typeCol + ` IN ('status_change','http_change','page_change')
+		AND ` + sourceCol + ` <> 'notification'
+		AND instr(` + col + `,'status=') > 0
+		AND substr(` + col + `, instr(` + col + `,'status=')+10, 1) = ' '
+		THEN CAST(substr(` + col + `, instr(` + col + `,'status=')+7, 3) AS INTEGER)
+		ELSE 0 END`
+}
+
+// statusCodeToken accepts exactly three digits in the HTTP range. This matches
+// the frontend's ^[1-5][0-9]{2}$ rule, so "+200" and "0200" are not silently
+// accepted by the API but rejected by the UI.
+func statusCodeToken(s string) (int, bool) {
+	if len(s) != 3 || s[0] < '1' || s[0] > '5' {
+		return 0, false
+	}
+	for i := 1; i < 3; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, _ := strconv.Atoi(s)
+	return n, true
 }
 
 func (h *Handler) handleListChanges(w http.ResponseWriter, r *http.Request) {

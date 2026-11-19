@@ -265,12 +265,18 @@ A watch round covers all approved web roots. Root rotation is no longer used.
 | `WatchNotifyHostCap` | 20 | Host names listed per grouped scope alert |
 | `WatchFailLimit` | 3 | Consecutive failed rounds before the chain pauses |
 
-The global ceiling is `min(MaxConcurrentScans, NumCPU, effectiveMaxConcurrent+1)`.
-The deep lane is capped by the memory guard; the watch lane takes only the slots
-the deep lane did not reserve. A deep scan therefore never waits for a watch
-round, and watch rounds still run while deep scans are queued. The chaos source
-needs a projectdiscovery API key, set under **System → Integrations → Passive
-intelligence providers**; without it, chaos is skipped with one log line.
+The three concurrency values set under **System → Toolchain → Scanning** are
+authoritative. They are stored and returned exactly as entered. Each lane has a
+visible hardware safety envelope (shown as "Safe range for this box" in the
+panel): a deep scan is heavy, a watch round is light, and the total is their sum.
+If a value exceeds its envelope, admission caps it at the envelope and logs why.
+Live memory and CPU pressure temporarily brake the envelope (at 82%/92% memory
+and 1.0x/1.6x core load); scans resume when pressure drops. A deep scan keeps
+its reserved slot, so it never waits for a watch round, and watch rounds still
+run while deep scans are queued. Setting watch rounds to 0 disables the lane.
+The chaos source needs a projectdiscovery API key, set under **System →
+Integrations → Passive intelligence providers**; without it, chaos is skipped
+with one log line.
 
 ### Watch FAQ
 

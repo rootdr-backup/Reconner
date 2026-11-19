@@ -276,9 +276,15 @@ type Scheduler struct {
 	// stop the chain for every healthy root. watch_fail_count stays per project
 	// in the database; this counter is deliberately in memory.
 	watchRootFails map[string]int
-	// throttleLog dedupes the cooldown warning so a loaded box logs it once, not
-	// every 2s drain tick.
+	// throttleLog dedupes the severe-pressure cooldown warning so a loaded box
+	// logs it once, not every 2s drain tick.
 	throttleLog atomic.Bool
+	// envelopeLog dedupes the "configured value capped by hardware envelope"
+	// notice. It is separate from throttleLog and queuedLog so a healthy tick
+	// cannot clear it and make the notice repeat.
+	envelopeLog atomic.Bool
+	// queuedLog dedupes the "scans queued" warning in drainPendingTasks.
+	queuedLog atomic.Bool
 	// memoryLog separately dedupes cgroup/host pressure warnings. Memory pressure
 	// is handled by admission control; repeated runtime.GC calls cannot reclaim
 	// Chromium/nuclei/sqlmap child processes and only add CPU churn.
@@ -1442,11 +1448,16 @@ func (s *Scheduler) drainPendingTasks() {
 	s.mu.RLock()
 	running := len(s.running)
 	s.mu.RUnlock()
-	if len(pending) > 0 && running >= s.effectiveMaxConcurrent(running) {
-		if s.throttleLog.CompareAndSwap(false, true) {
+	// This warning covers the GLOBAL ceiling only. A full lane can still queue
+	// tasks while running < global; that is pre-existing and not claimed here.
+	globalCap := s.globalScanCeiling(running)
+	if len(pending) > 0 && running >= globalCap {
+		if s.queuedLog.CompareAndSwap(false, true) {
 			s.logger.Warn("Scans queued — concurrency ceiling reached",
-				"pending", len(pending), "running", running, "ceiling", s.effectiveMaxConcurrent(running))
+				"pending", len(pending), "running", running, "ceiling", globalCap)
 		}
+	} else {
+		s.queuedLog.Store(false)
 	}
 
 	for _, id := range pending {
@@ -1461,20 +1472,17 @@ func (s *Scheduler) tryStartTask(taskID string) {
 	}
 	isWatch := taskType == watchScanType
 
-	// Smart admission: the ceiling isn't a fixed number — it drops when the box is
-	// under memory/CPU pressure (cooldown) and rises back toward the configured
-	// max when things calm down. Because drainPendingTasks re-runs every 2s using
-	// this same dynamic ceiling, throttled tasks auto-resume once load lightens.
+	// Read pressure ONCE for this admission decision so the global, deep and
+	// watch caps all come from the same sample. The configured values are honored
+	// inside a visible hardware envelope; pressure only brakes that envelope.
 	s.mu.Lock()
 	if s.stopping || s.running[taskID] {
 		s.mu.Unlock()
 		return
 	}
 	runningCount := len(s.running)
-	// Total slots (deep + watch) and the per-lane caps. The watch lane only gets
-	// the slots the deep lane did not reserve, so a deep scan never waits for a
-	// watch round.
-	if runningCount >= s.globalScanCeiling(runningCount) {
+	globalCap, deepCap, watchCap := s.admissionCaps(runningCount)
+	if runningCount >= globalCap {
 		s.mu.Unlock()
 		return
 	}
@@ -1485,7 +1493,7 @@ func (s *Scheduler) tryStartTask(taskID string) {
 				watchRunning++
 			}
 		}
-		if watchRunning >= s.watchLaneCap(runningCount) {
+		if watchRunning >= watchCap {
 			s.mu.Unlock()
 			return
 		}
@@ -1506,7 +1514,7 @@ func (s *Scheduler) tryStartTask(taskID string) {
 				deepRunning++
 			}
 		}
-		if deepRunning >= s.deepLaneCap(runningCount) {
+		if deepRunning >= deepCap {
 			s.mu.Unlock()
 			return
 		}
@@ -3203,79 +3211,183 @@ func (s *Scheduler) updateTargetStats(targetID string) {
 	`, subdomainCount, aliveCount, findingCount, targetID)
 }
 
-// effectiveMaxConcurrent is the load-aware admission ceiling. It starts from the
-// configured MaxConcurrentTargets and shrinks under pressure so a heavy box
-// doesn't thrash: high memory OR a CPU run-queue above the core count throttles
-// new starts (a "cooldown"), and once load drops the ceiling climbs back toward
-// the configured max on the next drain tick. It returns zero only while an idle
-// host/container is already under severe pressure; otherwise it stays between
-// one and the configured maximum.
-func (s *Scheduler) effectiveMaxConcurrent(running int) int {
-	base := s.cfg.Limits.MaxConcurrentTargets
-	if base < 1 {
-		base = 1
+// pressureLevel returns 0 (healthy), 1 (moderate) or 2 (severe) from live memory
+// and CPU load. A failed load reading is treated as healthy: a monitoring
+// failure must never block scans.
+func (s *Scheduler) pressureLevel() int {
+	memLevel := 0
+	if s.cfg != nil {
+		memLevel = classifyMemoryPressure(currentMemoryLoad(s.cfg.Limits.MaxMemoryMB).percent)
 	}
-	// A persisted config from older releases commonly says "7" even on a tiny
-	// 1–2 core / 3GB appliance. Admitting all seven before load average catches up
-	// lets each scan spawn its own module/browser/tool pools and makes every target
-	// slower. Apply a proactive capacity ceiling first; this changes admission,
-	// not detector coverage, and queued scans start automatically as slots free.
-	base = resourceTargetCeiling(runtime.NumCPU(), s.cfg.Limits.MaxMemoryMB, base)
+	cpuLevel := 0
+	if avg, err := load.Avg(); err == nil {
+		cpuLevel = classifyCPUPressure(avg.Load1, runtime.NumCPU())
+	}
+	if cpuLevel > memLevel {
+		return cpuLevel
+	}
+	return memLevel
+}
 
-	// Read the cgroup first so a 2 GiB container on a large host throttles against
-	// its own limit and includes child-process memory. Bare-metal installs retain
-	// the host-wide fallback.
-	memPressure := classifyMemoryPressure(currentMemoryLoad(s.cfg.Limits.MaxMemoryMB).percent)
-
-	// CPU run-queue pressure: 1-min load average relative to core count.
-	cpuPressure := 0
-	cores := float64(runtime.NumCPU())
+// classifyCPUPressure maps the 1-minute load average relative to core count to
+// a pressure level. Pure so its boundaries can be tested.
+func classifyCPUPressure(load1 float64, cores int) int {
 	if cores < 1 {
 		cores = 1
 	}
-	if avg, err := load.Avg(); err == nil {
-		ratio := avg.Load1 / cores
-		switch {
-		case ratio >= 1.6:
-			cpuPressure = 2
-		case ratio >= 1.0:
-			cpuPressure = 1
+	ratio := load1 / float64(cores)
+	switch {
+	case ratio >= 1.6:
+		return 2
+	case ratio >= 1.0:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// watchHardwareCeiling models one light watch round: 1 CPU and ~500 MB of the
+// configured memory budget, with a 15% reserve for the OS, the Go runtime and
+// Chromium. At least one slot is always allowed.
+func watchHardwareCeiling(cpu, memoryBudgetMB int) int {
+	if cpu < 1 {
+		cpu = 1
+	}
+	cpuSlots := cpu * 2
+	if memoryBudgetMB <= 0 {
+		return cpuSlots
+	}
+	usable := memoryBudgetMB * 85 / 100
+	memSlots := 1
+	if usable >= 500 {
+		memSlots = usable / 500
+	}
+	if cpuSlots < memSlots {
+		return cpuSlots
+	}
+	return memSlots
+}
+
+// hardwareEnvelope returns the pressure-braked per-lane envelope before the
+// operator's configured values are applied. Pressure uses absolute low bounds,
+// not a fraction of a large configured value, so a 3g box stays safe even when
+// someone sets every knob to its maximum.
+func hardwareEnvelope(cpu, memBudgetMB, level, running int) (global, deep, watch int) {
+	deep = resourceTargetCeiling(cpu, memBudgetMB, 32)
+	watch = watchHardwareCeiling(cpu, memBudgetMB)
+	global = deep + watch
+
+	brake := func(hw int) int {
+		if level == 2 && running == 0 {
+			return 0
 		}
+		b := hw
+		switch level {
+		case 2:
+			b = hw / 3
+		case 1:
+			b = hw / 2
+		}
+		if b < 1 {
+			b = 1
+		}
+		if b > hw {
+			b = hw
+		}
+		return b
+	}
+	return brake(global), brake(deep), brake(watch)
+}
+
+// computeAdmissionCaps is the pure core of admission control. It builds the
+// per-lane envelope, then caps it by the configured values. Deep reserves its
+// slots first; watch gets only the remainder so a deep scan never waits for a
+// watch round.
+func computeAdmissionCaps(cfgGlobal, cfgDeep, cfgWatch, cpu, memBudgetMB, level, running int) (global, deep, watch int) {
+	global, deep, watch = hardwareEnvelope(cpu, memBudgetMB, level, running)
+
+	// Only watch has a meaningful explicit zero: it disables the lane. Global and
+	// deep zero come from old configs and fall back to the defaults.
+	if cfgGlobal < 1 {
+		cfgGlobal = 2
+	}
+	if cfgDeep < 1 {
+		cfgDeep = 1
+	}
+	if cfgWatch < 0 {
+		cfgWatch = 0
 	}
 
-	pressure := memPressure
-	if cpuPressure > pressure {
-		pressure = cpuPressure
+	if cfgGlobal < global {
+		global = cfgGlobal
 	}
+	if cfgDeep < deep {
+		deep = cfgDeep
+	}
+	if deep > global {
+		deep = global
+	}
+	if cfgWatch < watch {
+		watch = cfgWatch
+	}
+	remainder := global - deep
+	if remainder < 0 {
+		remainder = 0
+	}
+	if watch > remainder {
+		watch = remainder
+	}
+	return global, deep, watch
+}
 
-	eff := base
-	switch pressure {
-	case 2: // severe — cool down hard, let in-flight work drain
-		eff = base / 3
-	case 1: // moderate — hold roughly half
-		eff = base / 2
+// admissionCaps reads live pressure ONCE and returns the effective (global,
+// deep, watch) caps for the current load. It is the single source of truth for
+// scan admission.
+func (s *Scheduler) admissionCaps(running int) (global, deep, watch int) {
+	cfgGlobal, cfgDeep, cfgWatch := 2, 1, 1
+	memBudget := 0
+	if s.cfg != nil {
+		cfgGlobal, cfgDeep, cfgWatch = s.cfg.ConcurrencyLimits()
+		memBudget = s.cfg.Limits.MaxMemoryMB
 	}
-	if eff < 1 {
-		eff = 1
-	}
-	if eff > base {
-		eff = base
-	}
-	// Under severe pressure, don't admit anything beyond what's already running.
-	// If the box/container is already critically full while idle, admit zero new
-	// work until it recovers rather than guaranteeing an OOM by starting one scan.
-	if pressure == 2 && running == 0 {
-		eff = 0
-	}
-	if pressure == 2 && running >= eff && eff < base {
+	level := s.pressureLevel()
+	global, deep, watch = computeAdmissionCaps(cfgGlobal, cfgDeep, cfgWatch, runtime.NumCPU(), memBudget, level, running)
+
+	if level == 2 && running > 0 {
 		if s.throttleLog.CompareAndSwap(false, true) {
 			s.logger.Warn("Scheduler cooldown: server under load, throttling new scans",
-				"effective_max", eff, "configured_max", base, "running", running)
+				"level", level, "effective_total", global, "running", running)
 		}
 	} else {
 		s.throttleLog.Store(false)
 	}
-	return eff
+	// Compare against the healthy envelope: a configured value above it is capped
+	// even when the box is calm. Pressure throttling is reported separately above.
+	envGlobal, envDeep, envWatch := s.HealthyEnvelope()
+	if cfgGlobal > envGlobal || cfgDeep > envDeep || cfgWatch > envWatch {
+		if s.envelopeLog.CompareAndSwap(false, true) {
+			s.logger.Info("Scan concurrency capped by hardware envelope",
+				"configured_total", cfgGlobal, "effective_total", global,
+				"configured_deep", cfgDeep, "effective_deep", deep,
+				"configured_watch", cfgWatch, "effective_watch", watch,
+				"envelope_total", envGlobal, "envelope_deep", envDeep, "envelope_watch", envWatch)
+		}
+	} else {
+		s.envelopeLog.Store(false)
+	}
+	return global, deep, watch
+}
+
+// HealthyEnvelope returns the safe per-lane caps for this host with no pressure.
+// It is read-only and shown in the System panel so nothing is hidden.
+func (s *Scheduler) HealthyEnvelope() (global, deep, watch int) {
+	memBudget := 0
+	if s.cfg != nil {
+		memBudget = s.cfg.Limits.MaxMemoryMB
+	}
+	deep = resourceTargetCeiling(runtime.NumCPU(), memBudget, 32)
+	watch = watchHardwareCeiling(runtime.NumCPU(), memBudget)
+	return deep + watch, deep, watch
 }
 
 // resourceTargetCeiling estimates how many full web pipelines the box can make

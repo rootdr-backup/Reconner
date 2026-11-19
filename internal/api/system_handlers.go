@@ -108,9 +108,15 @@ type scanConfigPayload struct {
 	MonitorModules            []string `json:"monitor_modules"`
 	// Watch-tier knobs (the breadth/watch tier). Every value is clamped on
 	// write; the defaults live in internal/config/config.go.
-	MaxConcurrentScans            int      `json:"max_concurrent_scans"`
-	MaxConcurrentDeepScans        int      `json:"max_concurrent_deep_scans"`
-	MaxConcurrentWatchScans       int      `json:"max_concurrent_watch_scans"`
+	MaxConcurrentScans      int `json:"max_concurrent_scans"`
+	MaxConcurrentDeepScans  int `json:"max_concurrent_deep_scans"`
+	MaxConcurrentWatchScans int `json:"max_concurrent_watch_scans"`
+	// HealthyEnvelope_* are read-only hints: the safe per-lane caps for this host.
+	// The operator's values are honored up to these numbers; live pressure may
+	// brake them temporarily.
+	HealthyEnvelopeTotal          int      `json:"envelope_total"`
+	HealthyEnvelopeDeep           int      `json:"envelope_deep"`
+	HealthyEnvelopeWatch          int      `json:"envelope_watch"`
 	WatchHTTPThreads              int      `json:"watch_http_threads"`
 	WatchHTTPRateLimit            int      `json:"watch_http_rate_limit"`
 	WatchRoundsMinGap             int      `json:"watch_rounds_min_gap"`
@@ -145,6 +151,11 @@ func effectiveWatchChangesRetentionDays(days int) int {
 }
 
 func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
+	envTotal, envDeep, envWatch := 0, 0, 0
+	if h.sched != nil {
+		envTotal, envDeep, envWatch = h.sched.HealthyEnvelope()
+	}
+	cfgGlobal, cfgDeep, cfgWatch := h.cfg.ConcurrencyLimits()
 	h.writeSuccess(w, scanConfigPayload{
 		DNSResolvers:                  h.cfg.DNSResolvers,
 		SubdomainRecursionDepth:       h.cfg.SubdomainRecursionDepth,
@@ -153,9 +164,12 @@ func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
 		NucleiExcludeTemplateIDs:      h.cfg.NucleiExcludeTemplateIDs,
 		NucleiExtraTemplateRepos:      h.cfg.NucleiExtraTemplateRepos,
 		MonitorModules:                h.cfg.MonitorModules,
-		MaxConcurrentScans:            h.cfg.Limits.MaxConcurrentScans,
-		MaxConcurrentDeepScans:        h.cfg.Limits.MaxConcurrentDeepScans,
-		MaxConcurrentWatchScans:       h.cfg.Limits.MaxConcurrentWatchScans,
+		MaxConcurrentScans:            cfgGlobal,
+		MaxConcurrentDeepScans:        cfgDeep,
+		MaxConcurrentWatchScans:       cfgWatch,
+		HealthyEnvelopeTotal:          envTotal,
+		HealthyEnvelopeDeep:           envDeep,
+		HealthyEnvelopeWatch:          envWatch,
 		WatchHTTPThreads:              h.cfg.Limits.WatchHTTPThreads,
 		WatchHTTPRateLimit:            h.cfg.Limits.WatchHTTPRateLimit,
 		WatchRoundsMinGap:             h.cfg.WatchRoundsMinGap,
@@ -271,19 +285,21 @@ func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request)
 		}
 		return v
 	}
-	cpuLimit := runtime.NumCPU()
-	if cpuLimit < 1 {
-		cpuLimit = 1
-	}
+	// The three two-tier knobs are authoritative operator settings. Do NOT clamp
+	// the total to NumCPU here: that silently discarded the saved value on small
+	// boxes. Admission honors these numbers inside a visible hardware envelope
+	// and brakes them under live pressure (see scheduler.admissionCaps).
+	cfgG, cfgD, cfgW := h.cfg.ConcurrencyLimits()
 	if body.MaxConcurrentScans != nil {
-		h.cfg.Limits.MaxConcurrentScans = clamp(*body.MaxConcurrentScans, 1, cpuLimit)
+		cfgG = clamp(*body.MaxConcurrentScans, 1, 32)
 	}
 	if body.MaxConcurrentDeepScans != nil {
-		h.cfg.Limits.MaxConcurrentDeepScans = clamp(*body.MaxConcurrentDeepScans, 1, 4)
+		cfgD = clamp(*body.MaxConcurrentDeepScans, 1, 8)
 	}
 	if body.MaxConcurrentWatchScans != nil {
-		h.cfg.Limits.MaxConcurrentWatchScans = clamp(*body.MaxConcurrentWatchScans, 0, 4)
+		cfgW = clamp(*body.MaxConcurrentWatchScans, 0, 16)
 	}
+	h.cfg.SetConcurrencyLimits(cfgG, cfgD, cfgW)
 	if body.WatchHTTPThreads != nil {
 		h.cfg.Limits.WatchHTTPThreads = clamp(*body.WatchHTTPThreads, 1, 40)
 	}

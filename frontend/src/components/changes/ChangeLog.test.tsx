@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ChangeLog from './ChangeLog'
 import { ws } from '../../lib/websocket'
@@ -45,6 +45,16 @@ function deferred<T>() {
 
 function changesCount(fetchMock: ReturnType<typeof vi.fn>) {
   return fetchMock.mock.calls.filter(([input]) => String(input).startsWith('/api/changes?')).length
+}
+
+function lastChangesUrl(fetchMock: ReturnType<typeof vi.fn>): string {
+  const calls = fetchMock.mock.calls.filter(([input]) => String(input).startsWith('/api/changes?'))
+  return decodeURIComponent(String(calls[calls.length - 1][0]))
+}
+
+function lastSeenAllUrl(fetchMock: ReturnType<typeof vi.fn>): string {
+  const calls = fetchMock.mock.calls.filter(([input]) => String(input).startsWith('/api/changes/seen-all?'))
+  return decodeURIComponent(String(calls[calls.length - 1][0]))
 }
 
 function installFetch(options?: { rows?: ChangeEntry[]; firstChanges?: Promise<Response> }) {
@@ -146,5 +156,86 @@ describe('ChangeLog loading and refresh', () => {
     const before = changesCount(fetchMock)
     await vi.advanceTimersByTimeAsync(60_000)
     expect(changesCount(fetchMock)).toBe(before)
+  })
+})
+
+describe('ChangeLog filter controls', () => {
+  it('multi-selects categories and All resets the selection', async () => {
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scripts' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('category=scripts'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alerts' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('category=scripts,alerts'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).not.toContain('category='))
+  })
+
+  it('sends status-only, class, exact codes and search as query params', async () => {
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Status changes only' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('status_only=1'))
+
+    fireEvent.click(screen.getByRole('button', { name: '4xx' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('status_class=4'))
+
+    fireEvent.change(screen.getByPlaceholderText('200,403'), { target: { value: '200,403' } })
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('status_code=200,403'))
+
+    fireEvent.change(screen.getByPlaceholderText('Search changes…'), { target: { value: 'Forbidden' } })
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('q=Forbidden'))
+  })
+
+  it('drops invalid status codes instead of truncating them', async () => {
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByPlaceholderText('200,403'), { target: { value: '20,2000,abc,403' } })
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('status_code=403'))
+    expect(lastChangesUrl(fetchMock)).not.toContain('status_code=20,')
+
+    fireEvent.change(screen.getByPlaceholderText('200,403'), { target: { value: '20,2000' } })
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).not.toContain('status_code='))
+  })
+
+  it('passes the new filters through to mark-all-read', async () => {
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scripts' }))
+    await vi.waitFor(() => expect(lastChangesUrl(fetchMock)).toContain('category=scripts'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Status changes only' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }))
+    await vi.waitFor(() => {
+      expect(lastSeenAllUrl(fetchMock)).toContain('category=scripts')
+      expect(lastSeenAllUrl(fetchMock)).toContain('status_only=1')
+    })
+  })
+
+  it('mark-all-read uses raw search text before the debounce settles', async () => {
+    vi.useFakeTimers()
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    // Type and click within the 300ms debounce window. The seen-all request
+    // must carry the raw text, not the still-empty debounced value.
+    fireEvent.change(screen.getByPlaceholderText('Search changes…'), { target: { value: 'Forbidden' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }))
+
+    await vi.waitFor(() => {
+      expect(lastSeenAllUrl(fetchMock)).toContain('q=Forbidden')
+    })
   })
 })

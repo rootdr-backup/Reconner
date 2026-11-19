@@ -66,7 +66,8 @@ function mockApi(opts?: { changes?: ChangeEntry[]; rounds?: WatchRound[] }) {
     if (url.startsWith('/api/changes?')) {
       const u = new URL(url, 'http://localhost')
       const cat = u.searchParams.get('category')
-      const filtered = cat && cat !== 'all' ? rows.filter(r => r.category === cat) : rows
+      const cats = cat ? cat.split(',').filter(c => c && c !== 'all') : []
+      const filtered = cats.length ? rows.filter(r => cats.includes(r.category)) : rows
       return envelope(filtered)
     }
     if (url.startsWith('/api/watch/rounds?')) return envelope(roundRows)
@@ -94,7 +95,7 @@ describe('global Changes page', () => {
     expect(screen.getByText('https://alpha.test')).toBeInTheDocument()
   })
 
-  it('filters the feed by category chip', async () => {
+  it('filters the feed by category chips with multi-select', async () => {
     const user = userEvent.setup()
     mockApi()
     render(<MemoryRouter><Changes /></MemoryRouter>)
@@ -106,7 +107,11 @@ describe('global Changes page', () => {
 
     await user.click(screen.getByRole('button', { name: 'Scripts' }))
     await waitFor(() => expect(screen.getByText('JAVASCRIPT')).toBeInTheDocument())
-    expect(screen.queryByText('STATUS CODE')).not.toBeInTheDocument()
+    expect(screen.getByText('STATUS CODE')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'HTTP' }))
+    await waitFor(() => expect(screen.queryByText('STATUS CODE')).not.toBeInTheDocument())
+    expect(screen.getByText('JAVASCRIPT')).toBeInTheDocument()
   })
 
   it('filters by round when a round chip is clicked', async () => {
