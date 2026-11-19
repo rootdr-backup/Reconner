@@ -473,6 +473,10 @@ export interface ScanConfig {
   max_concurrent_scans: number
   max_concurrent_deep_scans: number
   max_concurrent_watch_scans: number
+  // Read-only: the safe per-lane caps for this host on a healthy box.
+  envelope_total: number
+  envelope_deep: number
+  envelope_watch: number
   watch_http_threads: number
   watch_http_rate_limit: number
   watch_rounds_min_gap: number

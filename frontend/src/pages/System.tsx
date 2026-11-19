@@ -60,6 +60,13 @@ type ScanDraft = {
   watchNotifyHostCap: number; watchFailLimit: number;
 }
 
+// numOr parses a bounded integer input. NaN and out-of-range values fall back
+// to a safe default so a half-typed number cannot reach the API.
+const numOr = (raw: string, fallback: number, min: number, max: number) => {
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback
+}
+
 // scanDraftFrom maps the wire config into the editable draft. The defaults
 // mirror internal/config/config.go.
 const scanDraftFrom = (sc: ScanConfig): ScanDraft => ({
@@ -485,25 +492,35 @@ export default function System() {
                       <p className="text-[10px] text-text-muted mt-1">Per source. There is no round-wide timeout: the round always finishes.</p>
                     </div>
                     <div>
-                      <label className="text-xs font-medium">Watch rounds in parallel</label>
-                      <input type="number" min={0} max={4} value={scanDraft.maxConcurrentWatchScans}
-                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentWatchScans: parseInt(e.target.value, 10) || 0 }))}
+                      <label htmlFor="maxConcurrentWatchScans" className="text-xs font-medium">Watch rounds in parallel</label>
+                      <input id="maxConcurrentWatchScans" type="number" min={0} max={16} value={scanDraft.maxConcurrentWatchScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentWatchScans: numOr(e.target.value, 0, 0, 16) }))}
                         className="input font-mono text-xs w-full mt-1" />
-                      <p className="text-[10px] text-text-muted mt-1">Watch rounds that may run at the same time.</p>
+                      <p className="text-[10px] text-text-muted mt-1">Watch rounds that may run at the same time. 0 disables them.</p>
                     </div>
                     <div>
-                      <label className="text-xs font-medium">Deep scans in parallel</label>
-                      <input type="number" min={1} max={4} value={scanDraft.maxConcurrentDeepScans}
-                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentDeepScans: parseInt(e.target.value, 10) || 1 }))}
+                      <label htmlFor="maxConcurrentDeepScans" className="text-xs font-medium">Deep scans in parallel</label>
+                      <input id="maxConcurrentDeepScans" type="number" min={1} max={8} value={scanDraft.maxConcurrentDeepScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentDeepScans: numOr(e.target.value, 1, 1, 8) }))}
                         className="input font-mono text-xs w-full mt-1" />
-                      <p className="text-[10px] text-text-muted mt-1">Heavy scans. The box limit lowers this further.</p>
+                      <p className="text-[10px] text-text-muted mt-1">Heavy full-pipeline scans. Deep keeps its slots; watch uses the rest.</p>
                     </div>
                     <div>
-                      <label className="text-xs font-medium">Total scans in parallel</label>
-                      <input type="number" min={1} max={8} value={scanDraft.maxConcurrentScans}
-                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentScans: parseInt(e.target.value, 10) || 1 }))}
+                      <label htmlFor="maxConcurrentScans" className="text-xs font-medium">Total scans in parallel</label>
+                      <input id="maxConcurrentScans" type="number" min={1} max={32} value={scanDraft.maxConcurrentScans}
+                        onChange={e => setScanDraft(d => d && ({ ...d, maxConcurrentScans: numOr(e.target.value, 1, 1, 32) }))}
                         className="input font-mono text-xs w-full mt-1" />
                       <p className="text-[10px] text-text-muted mt-1">Ceiling for deep plus watch rounds together.</p>
+                    </div>
+                    <div className="col-span-2 rounded-lg border border-white/[.06] bg-white/[.02] px-3 py-2">
+                      <p className="text-[11px] font-medium text-text-primary">Safe range for this box</p>
+                      <p className="text-[10px] text-text-muted mt-0.5">
+                        Total {scanCfg?.envelope_total ?? '—'} · deep {scanCfg?.envelope_deep ?? '—'} · watch {scanCfg?.envelope_watch ?? '—'}
+                      </p>
+                      <p className="text-[10px] text-text-muted mt-1">
+                        Values apply while the box is healthy. Live memory/CPU pressure may briefly throttle new scans.
+                        A deep scan and a watch round never run on the same project.
+                      </p>
                     </div>
                     <div>
                       <label className="text-xs font-medium">Watch HTTP threads</label>
