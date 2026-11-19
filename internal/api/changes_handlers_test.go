@@ -528,8 +528,13 @@ func TestListChangesStatusFiltersIgnoreFreeText(t *testing.T) {
 	// not status-bearing, so it must not match any status filter.
 	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
 		VALUES ('n-text','t1','monitor_failed','Scan failed','upstream replied status=404 title=Missing','high',CURRENT_TIMESTAMP)`)
-	// A removal row carrying a status token in old_value. Even with that token
-	// it must be excluded by the status-bearing type guard.
+	// A bell that mirrors a real deep change: it carries the same type as the
+	// real row and repeats the token in its body. The source guard in
+	// changesStatusCodeExpr must exclude it, or it duplicates mc-real.
+	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
+		VALUES ('n-mirror','t1','http_change','Status changed','https://mirror — status=404 title=Missing','medium',CURRENT_TIMESTAMP)`)
+	// A removal row carrying a status token in old_value. It is excluded by the
+	// explicit http_service_removed clause in each status filter.
 	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
 		VALUES ('wc-removed','t1','r1','https://gone','http_service_removed','status=404 title=Missing','','medium','{}',CURRENT_TIMESTAMP)`)
 

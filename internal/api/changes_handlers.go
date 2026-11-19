@@ -153,14 +153,16 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 
 	// Build derived status codes in a wrapper around the UNION. Source aliases
 	// (mc/wc/se/n) differ and the sources are not uniform, so referencing x.*
-	// inside a source would not compile. Only rows whose change type carries a
-	// status transition are parsed; a bell or scope row whose text happens to
-	// contain "status=NNN " must not match a status filter. The trailing-space
-	// check prevents a value like "status=2000x" from parsing as 200.
+	// inside a source would not compile. Only real change rows whose type
+	// carries a status transition are parsed. Bell rows are excluded even when
+	// their type matches: a notification mirrors a deep change with the same
+	// type and a body that repeats the "status=NNN " text, so parsing it would
+	// create a duplicate of the real change. The trailing-space check prevents
+	// a value like "status=2000x" from parsing as 200.
 	inner = `(
 		SELECT u.*,
-			` + changesStatusCodeExpr("u.change_type", "u.old_value") + ` AS status_old,
-			` + changesStatusCodeExpr("u.change_type", "u.new_value") + ` AS status_new
+			` + changesStatusCodeExpr("u.change_type", "u.source", "u.old_value") + ` AS status_old,
+			` + changesStatusCodeExpr("u.change_type", "u.source", "u.new_value") + ` AS status_new
 		FROM ` + unionSQL + ` u
 	) x`
 
@@ -242,8 +244,8 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 	}
 
 	// A status-only row is a real transition: both codes valid and different.
-	// Deep rows are http_change/page_change, not status_change, so do not guard
-	// on change_type here.
+	// The type and source guards live in changesStatusCodeExpr, which builds
+	// the derived codes used here and in the class/code filters below.
 	if q.Get("status_only") == "1" {
 		filters = append(filters, `x.status_old BETWEEN 100 AND 599 AND x.status_new BETWEEN 100 AND 599
 			AND x.status_old <> x.status_new AND x.change_type <> 'http_service_removed'`)
@@ -306,11 +308,14 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 
 // changesStatusCodeExpr parses the "status=NNN " prefix from a value column.
 // Watch writes status_change and deep writes http_change/page_change; those
-// are the only types that carry a status transition. Other rows (alerts, scope
-// events, bell notices) can contain the same token in free text, so they are
-// excluded here. No metadata/JSON path is needed.
-func changesStatusCodeExpr(typeCol, col string) string {
+// are the only types that carry a status transition. Bell rows are excluded:
+// a notification mirrors a deep change with the same type and repeats the
+// token in its body, so parsing it would duplicate the real change. Other
+// free-text rows (alerts, scope events) are already outside the type list.
+// No metadata/JSON path is needed.
+func changesStatusCodeExpr(typeCol, sourceCol, col string) string {
 	return `CASE WHEN ` + typeCol + ` IN ('status_change','http_change','page_change')
+		AND ` + sourceCol + ` <> 'notification'
 		AND instr(` + col + `,'status=') > 0
 		AND substr(` + col + `, instr(` + col + `,'status=')+10, 1) = ' '
 		THEN CAST(substr(` + col + `, instr(` + col + `,'status=')+7, 3) AS INTEGER)

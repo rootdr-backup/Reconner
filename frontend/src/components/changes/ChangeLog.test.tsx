@@ -221,4 +221,21 @@ describe('ChangeLog filter controls', () => {
       expect(lastSeenAllUrl(fetchMock)).toContain('status_only=1')
     })
   })
+
+  it('mark-all-read uses raw search text before the debounce settles', async () => {
+    vi.useFakeTimers()
+    const fetchMock = installFetch()
+    render(<ChangeLog />)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(screen.getByText('STATUS CODE')).toBeInTheDocument())
+
+    // Type and click within the 300ms debounce window. The seen-all request
+    // must carry the raw text, not the still-empty debounced value.
+    fireEvent.change(screen.getByPlaceholderText('Search changes…'), { target: { value: 'Forbidden' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }))
+
+    await vi.waitFor(() => {
+      expect(lastSeenAllUrl(fetchMock)).toContain('q=Forbidden')
+    })
+  })
 })

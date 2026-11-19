@@ -248,7 +248,10 @@ export default function ChangeLog({ targetId, compact }: Props) {
     return () => { alive = false }
   }, [targetId])
 
-  const params = useCallback((): Record<string, string> => {
+  // Build query params from explicit text values. Reads pass the debounced
+  // values, while writes (mark-all-read) pass the raw values so a click before
+  // the debounce settles still targets exactly the rows currently on screen.
+  const buildParams = useCallback((searchText: string, codesText: string): Record<string, string> => {
     const p: Record<string, string> = {}
     const since = sinceFor(hours, customSince)
     if (since) p.since = since
@@ -256,16 +259,19 @@ export default function ChangeLog({ targetId, compact }: Props) {
     if (cats.length) p.category = cats.join(',')
     if (statusOnly) p.status_only = '1'
     if (statusClasses.size) p.status_class = [...statusClasses].join(',')
-    const codes = parseStatusCodes(debouncedCodes)
+    const codes = parseStatusCodes(codesText)
     if (codes.length) p.status_code = codes.join(',')
-    if (debouncedQ.trim()) p.q = debouncedQ.trim()
+    if (searchText.trim()) p.q = searchText.trim()
     if (source) p.source = source
     if (severity) p.severity = severity
     if (selectedTaskId) p.task_id = selectedTaskId
     const t = targetId || selectedTargetId
     if (t) p.target_id = t
     return p
-  }, [hours, customSince, categories, statusOnly, statusClasses, debouncedCodes, debouncedQ, source, severity, selectedTaskId, targetId, selectedTargetId])
+  }, [hours, customSince, categories, statusOnly, statusClasses, source, severity, selectedTaskId, targetId, selectedTargetId])
+
+  const params = useCallback((): Record<string, string> => buildParams(debouncedQ, debouncedCodes),
+    [buildParams, debouncedQ, debouncedCodes])
 
   const load = useCallback(async (mode: LoadMode = 'refresh') => {
     if (inFlight.current) {
@@ -409,7 +415,9 @@ export default function ChangeLog({ targetId, compact }: Props) {
 
   const markAllRead = async () => {
     try {
-      const res = await changes.markAllSeen(params())
+      // Use raw text, not the debounced values, so a click right after typing
+      // marks only the rows the user currently sees.
+      const res = await changes.markAllSeen(buildParams(q, statusCodes))
       if (res.updated > 0) await load('refresh')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to mark all read')
