@@ -374,9 +374,9 @@ func TestListChangesNewFilters(t *testing.T) {
 	// No status codes.
 	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
 		VALUES ('wc-js','t1','r1','https://js','js_change','a','b','medium','{}','2026-01-04 00:00:00')`)
-	// Removal row: has a code in old_value but must be excluded from status filters.
+	// Removal row. The producer writes a URL in old_value, not a status token.
 	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
-		VALUES ('wc-removed','t1','r1','https://gone','http_service_removed','status=403 title=Forbidden','','medium','{}','2026-01-05 00:00:00')`)
+		VALUES ('wc-removed','t1','r1','https://gone','http_service_removed','https://gone.example/app','','medium','{}','2026-01-05 00:00:00')`)
 	// Over-long code: status=2000 must not parse as 200 (trailing-space guard).
 	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
 		VALUES ('mc-longcode','t1','https://long','http_change','status=2000 title=Big','status=2001 title=Big2','low','2026-01-06 00:00:00')`)
@@ -408,7 +408,7 @@ func TestListChangesNewFilters(t *testing.T) {
 		{"code 403", "/api/changes?status_code=403", []string{"mc-deep"}},
 		{"multi category", "/api/changes?category=scripts,alerts", []string{"wc-js", "n-alert"}},
 		{"all plus category", "/api/changes?category=all,http", []string{"mc-deep", "wc-watch", "mc-title", "wc-removed", "mc-longcode", "mc-plain", "mc-pct"}},
-		{"q plain", "/api/changes?q=Forbidden", []string{"mc-deep", "wc-removed"}},
+		{"q plain", "/api/changes?q=Forbidden", []string{"mc-deep"}},
 		{"q literal percent", "/api/changes?q=%25", []string{"mc-pct"}},
 	}
 	for _, tc := range cases {
@@ -514,6 +514,94 @@ func TestListChangesNewFiltersScopedToOwner(t *testing.T) {
 			if e.ID == "mc-admin" {
 				t.Errorf("%s: member saw another owner's change", q)
 			}
+		}
+	}
+}
+
+func TestListChangesStatusFiltersIgnoreFreeText(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	// A real deep status flip: the only row that should match.
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc-real','t1','https://real','http_change','status=404 title=Missing','status=200 title=OK','medium',CURRENT_TIMESTAMP)`)
+	// A bell notice whose free text contains a status token. Its change type is
+	// not status-bearing, so it must not match any status filter.
+	h.db.Exec(`INSERT INTO notifications (id,target_id,type,title,body,severity,created_at)
+		VALUES ('n-text','t1','monitor_failed','Scan failed','upstream replied status=404 title=Missing','high',CURRENT_TIMESTAMP)`)
+	// A removal row carrying a status token in old_value. Even with that token
+	// it must be excluded by the status-bearing type guard.
+	h.db.Exec(`INSERT INTO watch_round_changes (id,target_id,task_id,url,change_type,old_value,new_value,severity,metadata,detected_at)
+		VALUES ('wc-removed','t1','r1','https://gone','http_service_removed','status=404 title=Missing','','medium','{}',CURRENT_TIMESTAMP)`)
+
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"/api/changes?status_code=404",
+		"/api/changes?status_class=4",
+		"/api/changes?status_only=1",
+	} {
+		rec := serveChanges(t, h, sid, q, nil, h.handleListChanges)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", q, rec.Code)
+		}
+		var env changesEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		got := idsOf(env.Data)
+		if len(got) != 1 || !got["mc-real"] {
+			t.Errorf("%s: ids = %v, want only mc-real (free text must not match)", q, got)
+		}
+	}
+}
+
+func TestListChangesCategoryMalformed(t *testing.T) {
+	h, adminID := newIsoHandler(t)
+	h.db.Exec(`INSERT INTO targets (id, domain, owner_id) VALUES ('t1','one.example',?)`, adminID)
+	h.db.Exec(`INSERT INTO monitoring_changes (id,target_id,url,change_type,old_value,new_value,severity,detected_at)
+		VALUES ('mc1','t1','https://a','http_change','a','b','medium',CURRENT_TIMESTAMP)`)
+	sid, err := h.auth.Login("admin", config.DefaultAdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty category value with no valid token must match nothing, not
+	// silently return the unfiltered feed.
+	for _, q := range []string{
+		"/api/changes?category=,,,",
+		"/api/changes?category=garbage",
+	} {
+		rec := serveChanges(t, h, sid, q, nil, h.handleListChanges)
+		var env changesEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if len(env.Data) != 0 {
+			t.Errorf("%s: ids = %v, want none", q, idsOf(env.Data))
+		}
+	}
+	// "all" still means no filter.
+	rec := serveChanges(t, h, sid, "/api/changes?category=all", nil, h.handleListChanges)
+	var env changesEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Data) != 1 {
+		t.Errorf("category=all: ids = %v, want the row", idsOf(env.Data))
+	}
+}
+
+func TestStatusCodeToken(t *testing.T) {
+	valid := map[string]int{"200": 200, "403": 403, "599": 599, "100": 100}
+	for in, want := range valid {
+		if got, ok := statusCodeToken(in); !ok || got != want {
+			t.Errorf("statusCodeToken(%q) = %d,%v want %d,true", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"+200", "0200", "20", "2000", "abc", "60x", ""} {
+		if got, ok := statusCodeToken(in); ok {
+			t.Errorf("statusCodeToken(%q) = %d,true want false", in, got)
 		}
 	}
 }

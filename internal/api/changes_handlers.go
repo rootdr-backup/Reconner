@@ -153,12 +153,14 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 
 	// Build derived status codes in a wrapper around the UNION. Source aliases
 	// (mc/wc/se/n) differ and the sources are not uniform, so referencing x.*
-	// inside a source would not compile. The trailing-space check prevents a
-	// value like "status=2000x" from parsing as 200.
+	// inside a source would not compile. Only rows whose change type carries a
+	// status transition are parsed; a bell or scope row whose text happens to
+	// contain "status=NNN " must not match a status filter. The trailing-space
+	// check prevents a value like "status=2000x" from parsing as 200.
 	inner = `(
 		SELECT u.*,
-			` + changesStatusCodeExpr("u.old_value") + ` AS status_old,
-			` + changesStatusCodeExpr("u.new_value") + ` AS status_new
+			` + changesStatusCodeExpr("u.change_type", "u.old_value") + ` AS status_old,
+			` + changesStatusCodeExpr("u.change_type", "u.new_value") + ` AS status_new
 		FROM ` + unionSQL + ` u
 	) x`
 
@@ -174,11 +176,28 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 	}
 
 	// category accepts a comma list. "all" is dropped; all,http means http.
+	// Unknown tokens are ignored. A non-empty value with no valid category
+	// (for example ",,," or "garbage") matches nothing instead of silently
+	// returning every category.
 	if v := q.Get("category"); v != "" {
+		validCategories := map[string]bool{
+			"http": true, "scripts": true, "security": true, "tech": true,
+			"headers": true, "assets": true, "alerts": true,
+		}
 		cats := make([]string, 0, 4)
+		seenCat := map[string]bool{}
+		hasAll := false
 		for _, c := range strings.Split(v, ",") {
 			c = strings.TrimSpace(c)
-			if c != "" && c != "all" {
+			if c == "" {
+				continue
+			}
+			if c == "all" {
+				hasAll = true
+				continue
+			}
+			if validCategories[c] && !seenCat[c] {
+				seenCat[c] = true
 				cats = append(cats, c)
 			}
 		}
@@ -189,6 +208,8 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 				filterArgs = append(filterArgs, c)
 			}
 			filters = append(filters, `x.category IN (`+strings.Join(ph, ",")+`)`)
+		} else if !hasAll {
+			filters = append(filters, `1=0`)
 		}
 	}
 
@@ -252,14 +273,14 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 		}
 	}
 
-	// status_code matches an exact code on either side. Reject out-of-range
-	// values instead of truncating them.
+	// status_code matches an exact code on either side. Reject malformed or
+	// out-of-range values instead of truncating or coercing them.
 	if v := q.Get("status_code"); v != "" {
 		codes := make([]any, 0, 8)
 		seen := map[int]bool{}
 		for _, c := range strings.Split(v, ",") {
-			n, err := strconv.Atoi(strings.TrimSpace(c))
-			if err == nil && n >= 100 && n <= 599 && !seen[n] {
+			n, ok := statusCodeToken(strings.TrimSpace(c))
+			if ok && !seen[n] {
 				seen[n] = true
 				codes = append(codes, n)
 			}
@@ -284,13 +305,32 @@ func (h *Handler) changesFeedQuery(r *http.Request, forcedTargetID string) (inne
 }
 
 // changesStatusCodeExpr parses the "status=NNN " prefix from a value column.
-// Both producers (watch status_change and deep http_change/page_change) write
-// this prefix, so no metadata/JSON path is needed.
-func changesStatusCodeExpr(col string) string {
-	return `CASE WHEN instr(` + col + `,'status=') > 0
+// Watch writes status_change and deep writes http_change/page_change; those
+// are the only types that carry a status transition. Other rows (alerts, scope
+// events, bell notices) can contain the same token in free text, so they are
+// excluded here. No metadata/JSON path is needed.
+func changesStatusCodeExpr(typeCol, col string) string {
+	return `CASE WHEN ` + typeCol + ` IN ('status_change','http_change','page_change')
+		AND instr(` + col + `,'status=') > 0
 		AND substr(` + col + `, instr(` + col + `,'status=')+10, 1) = ' '
 		THEN CAST(substr(` + col + `, instr(` + col + `,'status=')+7, 3) AS INTEGER)
 		ELSE 0 END`
+}
+
+// statusCodeToken accepts exactly three digits in the HTTP range. This matches
+// the frontend's ^[1-5][0-9]{2}$ rule, so "+200" and "0200" are not silently
+// accepted by the API but rejected by the UI.
+func statusCodeToken(s string) (int, bool) {
+	if len(s) != 3 || s[0] < '1' || s[0] > '5' {
+		return 0, false
+	}
+	for i := 1; i < 3; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, _ := strconv.Atoi(s)
+	return n, true
 }
 
 func (h *Handler) handleListChanges(w http.ResponseWriter, r *http.Request) {

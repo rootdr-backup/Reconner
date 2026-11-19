@@ -85,6 +85,18 @@ function sinceFor(hours: string, custom: string): string {
   return new Date(Date.now() - ms).toISOString()
 }
 
+// Free-text inputs are debounced so each keystroke does not trigger a full
+// reload and paging reset. The committed value still feeds params(), so any
+// real filter change behaves exactly as before.
+function useDebounced<T>(value: T, delay: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), delay)
+    return () => clearTimeout(timer)
+  }, [value, delay])
+  return settled
+}
+
 // Keep only whole codes in the real HTTP range. Invalid tokens are dropped,
 // so a half-typed input never turns into a partial or truncated code.
 function parseStatusCodes(raw: string): string[] {
@@ -201,7 +213,9 @@ export default function ChangeLog({ targetId, compact }: Props) {
   const [statusOnly, setStatusOnly] = useState(false)
   const [statusClasses, setStatusClasses] = useState<Set<string>>(() => new Set<string>())
   const [statusCodes, setStatusCodes] = useState('')
+  const debouncedCodes = useDebounced(statusCodes, 300)
   const [q, setQ] = useState('')
+  const debouncedQ = useDebounced(q, 300)
   const [source, setSource] = useState('')
   const [severity, setSeverity] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
@@ -242,16 +256,16 @@ export default function ChangeLog({ targetId, compact }: Props) {
     if (cats.length) p.category = cats.join(',')
     if (statusOnly) p.status_only = '1'
     if (statusClasses.size) p.status_class = [...statusClasses].join(',')
-    const codes = parseStatusCodes(statusCodes)
+    const codes = parseStatusCodes(debouncedCodes)
     if (codes.length) p.status_code = codes.join(',')
-    if (q.trim()) p.q = q.trim()
+    if (debouncedQ.trim()) p.q = debouncedQ.trim()
     if (source) p.source = source
     if (severity) p.severity = severity
     if (selectedTaskId) p.task_id = selectedTaskId
     const t = targetId || selectedTargetId
     if (t) p.target_id = t
     return p
-  }, [hours, customSince, categories, statusOnly, statusClasses, statusCodes, q, source, severity, selectedTaskId, targetId, selectedTargetId])
+  }, [hours, customSince, categories, statusOnly, statusClasses, debouncedCodes, debouncedQ, source, severity, selectedTaskId, targetId, selectedTargetId])
 
   const load = useCallback(async (mode: LoadMode = 'refresh') => {
     if (inFlight.current) {
@@ -267,6 +281,10 @@ export default function ChangeLog({ targetId, compact }: Props) {
     if (mode === 'initial') pageCount.current = 1
     const p = params()
     const roundTarget = targetId || selectedTargetId
+    // Total is captured here and only committed after the stale-response
+    // check. Setting it inside the fetch callback let a superseded response
+    // overwrite the total for the current filter set.
+    let fetchedTotal: number | null = null
     try {
       const [changeRows, roundRows] = await Promise.all([
         targetId
@@ -278,7 +296,7 @@ export default function ChangeLog({ targetId, compact }: Props) {
             const merged: ChangeEntry[] = []
             const ids = new Set<string>()
             for (const page of pages) {
-              setServerTotal(page.total)
+              fetchedTotal = page.total
               for (const row of page.data) {
                 if (!ids.has(row.id)) { ids.add(row.id); merged.push(row) }
               }
@@ -290,6 +308,7 @@ export default function ChangeLog({ targetId, compact }: Props) {
       // Only the newest response may replace the rows. A stale response is
       // still cleared below, so it can never leave the skeleton stuck.
       if (seq !== requestSeq.current) return
+      if (fetchedTotal !== null) setServerTotal(fetchedTotal)
       setRows(changeRows)
       setRounds(roundRows)
     } catch (e) {
