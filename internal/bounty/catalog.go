@@ -2,7 +2,9 @@ package bounty
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	assetutil "github.com/recon-platform/internal/assets"
 )
 
 type ListOptions struct {
@@ -215,6 +218,12 @@ type CreateProjectRequest struct {
 	AssetIDs             []string `json:"asset_ids"`
 	MonitorEnabled       bool     `json:"monitor_enabled"`
 	MonitorIntervalHours int      `json:"monitor_interval_hours"`
+	// WatchOnly creates a BREADTH project: it runs the cheap watch rounds
+	// (passive discovery + one HTTP probe) instead of the deep pipeline.
+	// The backend is the enforcement point — network/IP assets are filtered
+	// out so the project can never end up mixed, and the old monitor tier is
+	// switched off (both flags on would double-scan the project).
+	WatchOnly bool `json:"watch_only"`
 }
 
 func projectAssetKind(t string) string {
@@ -223,9 +232,25 @@ func projectAssetKind(t string) string {
 		return "network"
 	case "domain", "wildcard", "url", "page", "js", "api":
 		return "web"
+	case "app_store", "android", "ios", "hardware", "source_code", "other", "reference":
+		return "reference"
 	default:
 		return "reference"
 	}
+}
+
+// managedAssetKind also demotes web-typed assets whose identifier is not a
+// host or URL. Old catalog rows can carry a prose note with type "domain";
+// those values must never become project roots.
+func managedAssetKind(a Asset) string {
+	kind := projectAssetKind(a.AssetType)
+	if kind != "web" {
+		return kind
+	}
+	if !assetutil.IsScannableWebAsset(a.AssetType, a.Identifier) {
+		return "reference"
+	}
+	return "web"
 }
 
 func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID string, req CreateProjectRequest) (string, error) {
@@ -233,6 +258,14 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 	if err != nil {
 		return "", err
 	}
+	return s.createProjectFromProgram(ctx, ownerID, p, req, 0)
+}
+
+// createProjectFromProgram holds the import logic so a bulk import can reuse a
+// program that was already loaded. That avoids a second provider detail fetch
+// for every program in the batch. watchStartOffsetMinutes staggers the first
+// round of bulk-created breadth projects; a single create passes 0.
+func (s *Service) createProjectFromProgram(ctx context.Context, ownerID int64, p Program, req CreateProjectRequest, watchStartOffsetMinutes int) (string, error) {
 	if len(req.AssetIDs) == 0 {
 		return "", fmt.Errorf("select at least one current scope asset")
 	}
@@ -265,16 +298,39 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 	}
 	values := make([]string, 0, len(assets))
 	hasWeb, hasNet := false, false
+	skippedNetwork := []string{}
+	skippedAppStore := []string{}
 	for _, a := range assets {
-		if a.AssetType == "other" || a.AssetType == "android" || a.AssetType == "ios" || a.AssetType == "hardware" || a.AssetType == "source_code" {
+		if a.AssetType == "app_store" || assetutil.IsAppStoreAsset(a.Identifier) {
+			skippedAppStore = append(skippedAppStore, a.Identifier)
+			continue
+		}
+		kind := managedAssetKind(a)
+		if kind == "reference" {
+			continue
+		}
+		// A breadth project runs WEB modules only. Network assets (CIDR/IP) have
+		// no place in a watch round, and a mixed project cannot run one at all —
+		// so the backend drops them here instead of creating a broken project.
+		if req.WatchOnly && kind == "network" {
+			skippedNetwork = append(skippedNetwork, a.Identifier)
 			continue
 		}
 		values = append(values, a.Identifier)
-		if projectAssetKind(a.AssetType) == "network" {
+		if kind == "network" {
 			hasNet = true
 		} else {
 			hasWeb = true
 		}
+	}
+	if req.WatchOnly && len(values) == 0 {
+		return "", fmt.Errorf("no web assets: a breadth project needs at least one web asset")
+	}
+	if len(skippedNetwork) > 0 && s.log != nil {
+		s.log.Info("Breadth project import dropped network assets", "count", len(skippedNetwork), "assets", strings.Join(skippedNetwork, ", "))
+	}
+	if len(skippedAppStore) > 0 && s.log != nil {
+		s.log.Info("Project import dropped app-store assets", "count", len(skippedAppStore), "assets", strings.Join(skippedAppStore, ", "))
 	}
 	if len(values) == 0 {
 		values = []string{p.Provider + ":" + p.Handle}
@@ -304,8 +360,23 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO targets(id,domain,name,description,priority,notes,kind,exclude_scope,owner_id,monitor_enabled,monitor_interval_hours)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(req.MonitorEnabled), hours)
+	// A breadth project starts in the watch tier: the old monitor tier is off
+	// (both flags on would scan the project twice) and the first watch round is
+	// due immediately.
+	monitorEnabled := req.MonitorEnabled
+	watchOnly := 0
+	if req.WatchOnly {
+		monitorEnabled = false
+		watchOnly = 1
+	}
+	// watch_next_run must be a real SQLite timestamp, not a bound string: the
+	// due query compares watch_next_run <= datetime('now') as TEXT, and the
+	// literal "CURRENT_TIMESTAMP" sorts after "2026-..." so the first round
+	// would never be due. For breadth projects, a single create starts now;
+	// bulk creates spread their first rounds across the normal interval.
+	// Deep projects keep NULL ("not scheduled").
+	_, err = tx.ExecContext(ctx, `INSERT INTO targets(id,domain,name,description,priority,notes,kind,exclude_scope,owner_id,monitor_enabled,monitor_interval_hours,watch_only,watch_next_run,watch_paused,watch_fail_count,watch_root_index)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? = 1 THEN datetime('now','+' || ? || ' minutes') ELSE NULL END,0,0,0)`, targetID, scope, name, req.Description, priority, req.Notes, kind, strings.Join(outScope, "\n"), ownerID, boolInt(monitorEnabled), hours, watchOnly, watchOnly, watchStartOffsetMinutes)
 	if err != nil {
 		return "", err
 	}
@@ -314,9 +385,19 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	for _, a := range assets {
+		if req.WatchOnly && managedAssetKind(a) == "network" {
+			continue // network assets are not part of a breadth project
+		}
+		if managedAssetKind(a) == "reference" {
+			continue // prose notes and app listings are not project assets
+		}
 		meta, _ := json.Marshal(map[string]any{"provider": p.Provider, "program": p.Handle, "raw_hash": a.RawHash, "eligible_bounty": a.EligibleBounty, "max_severity": a.MaxSeverity, "instruction": a.Instruction})
+		assetMonitor := 1
+		if req.WatchOnly {
+			assetMonitor = 0 // the old monitor tier is off for breadth projects
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at)
-		VALUES(?,?,?,?,?,?,?,?, 'approved',1,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, "bounty:"+p.Provider, a.ID, string(meta))
+		VALUES(?,?,?,?,?,?,?,?, 'approved',?,?,CURRENT_TIMESTAMP)`, uuid.New().String(), targetID, a.Identifier, a.Identifier, managedAssetKind(a), a.AssetType, "bounty:"+p.Provider, a.ID, assetMonitor, string(meta))
 		if err != nil {
 			return "", err
 		}
@@ -325,6 +406,189 @@ func (s *Service) CreateProject(ctx context.Context, ownerID int64, programID st
 		return "", err
 	}
 	return targetID, nil
+}
+
+// maxBulkProjectCreations bounds one bulk request. Program detail fetches can
+// reach providers, so an unbounded list could tie up the API for a long time.
+const maxBulkProjectCreations = 100
+
+type BulkCreateProjectsRequest struct {
+	ProgramIDs           []string `json:"program_ids"`
+	Coverage             string   `json:"coverage"`     // breadth or deep
+	AssetPolicy          string   `json:"asset_policy"` // all_eligible_web or all_eligible
+	Priority             string   `json:"priority"`
+	NameTemplate         string   `json:"name_template"` // {program}, {handle}, {provider}
+	MonitorEnabled       bool     `json:"monitor_enabled"`
+	MonitorIntervalHours int      `json:"monitor_interval_hours"`
+	SkipExisting         bool     `json:"skip_existing"`
+	// WatchIntervalMinutes is internal. The API handler fills it from config
+	// so bulk-created breadth projects can spread their first rounds.
+	WatchIntervalMinutes int `json:"-"`
+}
+
+type BulkCreateProjectResult struct {
+	ProgramID       string `json:"program_id"`
+	ProgramName     string `json:"program_name,omitempty"`
+	OK              bool   `json:"ok"`
+	TargetID        string `json:"target_id,omitempty"`
+	Assets          int    `json:"assets,omitempty"`
+	SkippedNetwork  int    `json:"skipped_network,omitempty"`
+	SkippedAppStore int    `json:"skipped_app_store,omitempty"`
+	SkippedInvalid  int    `json:"skipped_invalid,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// CreateProjectsBulk imports many bounty programs in one call. Each program is
+// independent: one failure never rolls back the others. The caller gets one
+// result per program so the UI can show created, skipped and failed projects.
+func (s *Service) CreateProjectsBulk(ctx context.Context, ownerID int64, req BulkCreateProjectsRequest) ([]BulkCreateProjectResult, error) {
+	ids := make([]string, 0, len(req.ProgramIDs))
+	seen := map[string]bool{}
+	for _, raw := range req.ProgramIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("select at least one program")
+	}
+	if len(ids) > maxBulkProjectCreations {
+		return nil, fmt.Errorf("bulk import is limited to %d programs", maxBulkProjectCreations)
+	}
+
+	coverage := strings.ToLower(strings.TrimSpace(req.Coverage))
+	if coverage == "" {
+		coverage = "breadth"
+	}
+	if coverage != "breadth" && coverage != "deep" {
+		return nil, fmt.Errorf("coverage must be breadth or deep")
+	}
+	assetPolicy := strings.ToLower(strings.TrimSpace(req.AssetPolicy))
+	if assetPolicy == "" {
+		assetPolicy = "all_eligible_web"
+	}
+	if assetPolicy != "all_eligible_web" && assetPolicy != "all_eligible" {
+		return nil, fmt.Errorf("asset_policy must be all_eligible_web or all_eligible")
+	}
+
+	interval := req.WatchIntervalMinutes
+	if interval <= 0 {
+		interval = 12 * 60
+	}
+	total := len(ids)
+	results := make([]BulkCreateProjectResult, 0, len(ids))
+	for i, programID := range ids {
+		result := BulkCreateProjectResult{ProgramID: programID}
+		p, err := s.GetProgram(ctx, programID)
+		if err != nil {
+			result.Reason = "program unavailable"
+			results = append(results, result)
+			continue
+		}
+		result.ProgramName = p.Name
+
+		if req.SkipExisting {
+			var existingID string
+			err := s.db.QueryRowContext(ctx, `
+				SELECT t.id FROM project_programs pp
+				JOIN targets t ON t.id = pp.target_id
+				WHERE pp.program_id = ? AND t.owner_id = ? LIMIT 1`, programID, ownerID).Scan(&existingID)
+			if err == nil {
+				result.Reason = "already_linked"
+				result.TargetID = existingID
+				results = append(results, result)
+				continue
+			}
+			if err != sql.ErrNoRows {
+				result.Reason = "lookup failed"
+				results = append(results, result)
+				continue
+			}
+		}
+
+		assetIDs := []string{}
+		skippedNetwork := 0
+		skippedAppStore := 0
+		skippedInvalid := 0
+		for _, a := range p.Assets {
+			if !a.Active || !a.InScope || !a.EligibleSubmission {
+				continue
+			}
+			if a.AssetType == "app_store" || assetutil.IsAppStoreAsset(a.Identifier) {
+				skippedAppStore++
+				continue
+			}
+			kind := managedAssetKind(a)
+			if kind == "reference" {
+				if projectAssetKind(a.AssetType) == "web" {
+					skippedInvalid++
+				}
+				continue
+			}
+			if kind == "network" {
+				if coverage == "breadth" || assetPolicy == "all_eligible_web" {
+					skippedNetwork++
+					continue
+				}
+			}
+			assetIDs = append(assetIDs, a.ID)
+		}
+		if len(assetIDs) == 0 {
+			result.Reason = "no eligible web assets"
+			results = append(results, result)
+			continue
+		}
+
+		name := p.Name
+		if strings.TrimSpace(req.NameTemplate) != "" {
+			name = strings.NewReplacer(
+				"{program}", p.Name,
+				"{handle}", p.Handle,
+				"{provider}", p.Provider,
+			).Replace(req.NameTemplate)
+		}
+		notes := ""
+		if p.URL != "" {
+			notes = "Program: " + p.URL
+		}
+		createReq := CreateProjectRequest{
+			Name:                 name,
+			Description:          "Bulk import from " + p.Provider + " public program",
+			Priority:             req.Priority,
+			Notes:                notes,
+			AssetIDs:             assetIDs,
+			MonitorEnabled:       req.MonitorEnabled && coverage == "deep",
+			MonitorIntervalHours: req.MonitorIntervalHours,
+			WatchOnly:            coverage == "breadth",
+		}
+		// Spread first rounds of breadth projects across one normal interval.
+		// Deep projects ignore the offset: their watch_next_run stays NULL.
+		watchStartOffsetMinutes := 0
+		if coverage == "breadth" && total > 0 {
+			watchStartOffsetMinutes = (i * interval / total) % interval
+		}
+		targetID, err := s.createProjectFromProgram(ctx, ownerID, p, createReq, watchStartOffsetMinutes)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				result.Reason = "already_linked"
+			} else {
+				result.Reason = err.Error()
+			}
+			results = append(results, result)
+			continue
+		}
+		result.OK = true
+		result.TargetID = targetID
+		result.Assets = len(assetIDs)
+		result.SkippedNetwork = skippedNetwork
+		result.SkippedAppStore = skippedAppStore
+		result.SkippedInvalid = skippedInvalid
+		results = append(results, result)
+	}
+	return results, nil
 }
 
 type ScopeEvent struct {
@@ -342,7 +606,11 @@ type ScopeEvent struct {
 }
 
 func (s *Service) ListScopeEvents(ctx context.Context, targetID string) ([]ScopeEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,target_id,program_id,COALESCE(program_asset_id,''),event_type,identifier,old_json,new_json,status,detected_at,resolved_at FROM bounty_scope_events WHERE target_id=? ORDER BY detected_at DESC`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.target_id,e.program_id,COALESCE(e.program_asset_id,''),e.event_type,e.identifier,e.old_json,e.new_json,e.status,e.detected_at,e.resolved_at,
+		COALESCE(b.asset_type,''),COALESCE(b.identifier,'')
+		FROM bounty_scope_events e
+		LEFT JOIN bounty_program_assets b ON b.id = e.program_asset_id
+		WHERE e.target_id=? ORDER BY e.detected_at DESC`, targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +619,14 @@ func (s *Service) ListScopeEvents(ctx context.Context, targetID string) ([]Scope
 	for rows.Next() {
 		var e ScopeEvent
 		var resolved sql.NullTime
-		if err := rows.Scan(&e.ID, &e.TargetID, &e.ProgramID, &e.ProgramAssetID, &e.EventType, &e.Identifier, &e.OldJSON, &e.NewJSON, &e.Status, &e.DetectedAt, &resolved); err != nil {
+		var assetType, assetIdentifier string
+		if err := rows.Scan(&e.ID, &e.TargetID, &e.ProgramID, &e.ProgramAssetID, &e.EventType, &e.Identifier, &e.OldJSON, &e.NewJSON, &e.Status, &e.DetectedAt, &resolved, &assetType, &assetIdentifier); err != nil {
 			return nil, err
+		}
+		// Hide old events for app listings and prose notes. Keep events whose
+		// program asset no longer exists; those are genuine history.
+		if e.ProgramAssetID != "" && !assetutil.IsTrackableScopeAsset(assetType, assetIdentifier) {
+			continue
 		}
 		if resolved.Valid {
 			e.ResolvedAt = &resolved.Time
@@ -398,15 +672,25 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 		return err
 	}
 	existing := map[string]struct{ ID, Value, Status, Raw string }{}
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.source_id,a.value,a.approval_status,a.metadata
+	staleNonWeb := []string{}
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.source_id,a.value,a.approval_status,a.metadata,
+		COALESCE(b.asset_type,''),COALESCE(b.identifier,'')
 		FROM assets a JOIN bounty_program_assets b ON b.id=a.source_id
 		WHERE a.target_id=? AND b.program_id=? AND a.source LIKE 'bounty:%'`, targetID, programID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var id, sid, value, status, meta string
-		if rows.Scan(&id, &sid, &value, &status, &meta) == nil {
+		var id, sid, value, status, meta, bType, bIdentifier string
+		if rows.Scan(&id, &sid, &value, &status, &meta, &bType, &bIdentifier) == nil {
+			if !assetutil.IsTrackableScopeAsset(bType, bIdentifier) {
+				// Old imports may have approved an app listing or a prose note.
+				// Suspend it silently. No event and no bell row for this cleanup.
+				if status == "approved" {
+					staleNonWeb = append(staleNonWeb, id)
+				}
+				continue
+			}
 			var m map[string]any
 			_ = json.Unmarshal([]byte(meta), &m)
 			raw, _ := m["raw_hash"].(string)
@@ -414,25 +698,34 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 		}
 	}
 	rows.Close()
+	for _, id := range staleNonWeb {
+		_, _ = s.db.ExecContext(ctx, `UPDATE assets SET approval_status='suspended',monitor_enabled=0,updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	}
 	current := map[string]Asset{}
 	added, removed, modified := 0, 0, 0
 	for _, a := range p.Assets {
+		if !assetutil.IsTrackableScopeAsset(a.AssetType, a.Identifier) {
+			continue
+		}
 		if a.Active && a.InScope && a.EligibleSubmission {
 			current[a.ID] = a
 			if old, ok := existing[a.ID]; !ok {
-				s.createScopeEvent(ctx, targetID, p.ID, a.ID, "added", a.Identifier, "{}", mustJSON(a))
-				added++
+				if s.createScopeEvent(ctx, targetID, p.ID, a.ID, "added", a.Identifier, "{}", mustJSON(a)) {
+					added++
+				}
 			} else if old.Raw != "" && old.Raw != a.RawHash {
-				s.createScopeEvent(ctx, targetID, p.ID, a.ID, "modified", a.Identifier, mustJSON(old), mustJSON(a))
-				modified++
+				if s.createScopeEvent(ctx, targetID, p.ID, a.ID, "modified", a.Identifier, mustJSON(old), mustJSON(a)) {
+					modified++
+				}
 			}
 		}
 	}
 	for sid, old := range existing {
 		if _, ok := current[sid]; !ok && old.Status != "suspended" {
 			_, _ = s.db.ExecContext(ctx, `UPDATE assets SET approval_status='suspended',monitor_enabled=0,updated_at=CURRENT_TIMESTAMP WHERE id=?`, old.ID)
-			s.createScopeEvent(ctx, targetID, p.ID, sid, "removed", old.Value, mustJSON(old), "{}")
-			removed++
+			if s.createScopeEvent(ctx, targetID, p.ID, sid, "removed", old.Value, mustJSON(old), "{}") {
+				removed++
+			}
 		}
 	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE project_programs SET last_scope_hash=?,last_checked_at=CURRENT_TIMESTAMP WHERE target_id=? AND program_id=?`, p.ScopeHash, targetID, p.ID)
@@ -444,17 +737,45 @@ func (s *Service) reconcileProject(ctx context.Context, targetID, programID stri
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
-func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON string) {
+
+// scopeEventFingerprint identifies one specific scope state. "added" and
+// "modified" events are keyed by the new program-asset state; "removed" events
+// are keyed by the old state that was taken away. A rejected or approved
+// decision on this fingerprint suppresses the same event on later syncs. A
+// genuine later change produces a different JSON state and is reported again.
+func scopeEventFingerprint(eventType, identifier, oldJSON, newJSON string) string {
+	state := newJSON
+	if eventType == "removed" {
+		state = oldJSON
+	}
+	sum := sha256.Sum256([]byte(eventType + "\x00" + identifier + "\x00" + state))
+	return hex.EncodeToString(sum[:])
+}
+
+// createScopeEvent inserts a pending review event unless the fingerprint was
+// already decided or a pending event exists. It reports whether a row was
+// inserted so callers count and notify only for genuinely new changes.
+func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON string) bool {
+	fingerprint := scopeEventFingerprint(eventType, identifier, oldJSON, newJSON)
+	var decided int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_decisions WHERE target_id=? AND program_id=? AND program_asset_id=? AND event_type=? AND fingerprint=?`, targetID, programID, assetID, eventType, fingerprint).Scan(&decided)
+	if decided > 0 {
+		return false
+	}
 	var n int
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND program_asset_id=? AND event_type=? AND status='pending'`, targetID, assetID, eventType).Scan(&n)
 	if n > 0 {
-		return
+		return false
 	}
 	eventID := uuid.New().String()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO bounty_scope_events(id,target_id,program_id,program_asset_id,event_type,identifier,old_json,new_json,status) VALUES(?,?,?,?,?,?,?,?, 'pending')`, eventID, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON)
-	if err == nil && s.onScopeEvent != nil {
+	if err != nil {
+		return false
+	}
+	if s.onScopeEvent != nil {
 		s.onScopeEvent(ctx, targetID, programID, eventID, eventType, identifier)
 	}
+	return true
 }
 
 func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, decision string) error {
@@ -466,13 +787,16 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 		return err
 	}
 	defer tx.Rollback()
-	var eventType, assetID, status string
-	err = tx.QueryRowContext(ctx, `SELECT event_type,COALESCE(program_asset_id,''),status FROM bounty_scope_events WHERE id=? AND target_id=?`, eventID, targetID).Scan(&eventType, &assetID, &status)
+	var eventType, assetID, status, programID, identifier, oldJSON, newJSON string
+	err = tx.QueryRowContext(ctx, `SELECT event_type,COALESCE(program_asset_id,''),status,program_id,identifier,old_json,new_json FROM bounty_scope_events WHERE id=? AND target_id=?`, eventID, targetID).Scan(&eventType, &assetID, &status, &programID, &identifier, &oldJSON, &newJSON)
 	if err != nil {
 		return err
 	}
-	if status != "pending" {
+	if status != "pending" && status != "rejected" {
 		return fmt.Errorf("scope event already resolved")
+	}
+	if status == "rejected" && decision == "reject" {
+		return fmt.Errorf("scope event already dismissed")
 	}
 	if decision == "approve" {
 		switch eventType {
@@ -489,7 +813,11 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 			}
 			meta := map[string]any{"raw_hash": a.RawHash, "eligible_bounty": bounty == 1, "max_severity": a.MaxSeverity, "instruction": a.Instruction}
 			metaJSON, _ := json.Marshal(meta)
-			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP`, uuid.New().String(), targetID, a.Identifier, a.Identifier, projectAssetKind(a.AssetType), a.AssetType, a.ID, string(metaJSON))
+			// The upsert must NOT rewrite a row the watch tier landed
+			// (source='watch:scope'): that row is the operator's landed scope
+			// and keeps its own source, asset_type and metadata. The WHERE on
+			// the conflict clause leaves the landed row untouched.
+			_, err = tx.ExecContext(ctx, `INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at) VALUES(?,?,?,?,?,?, 'bounty:catalog',?,'approved',1,?,CURRENT_TIMESTAMP) ON CONFLICT(target_id,value) DO UPDATE SET value=excluded.value,kind=excluded.kind,asset_type=excluded.asset_type,source='bounty:catalog',source_id=excluded.source_id,approval_status='approved',monitor_enabled=1,metadata=excluded.metadata,updated_at=CURRENT_TIMESTAMP WHERE assets.source <> 'watch:scope'`, uuid.New().String(), targetID, a.Identifier, a.Identifier, managedAssetKind(a), a.AssetType, a.ID, string(metaJSON))
 			if err != nil {
 				return err
 			}
@@ -499,6 +827,19 @@ func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, deci
 				return err
 			}
 		}
+	}
+	fingerprint := scopeEventFingerprint(eventType, identifier, oldJSON, newJSON)
+	// One decision per fingerprint. Upserting also lets an operator approve a
+	// scope change they dismissed earlier: the approve path below still runs,
+	// and the stored decision flips so the event cannot come back again.
+	_, err = tx.ExecContext(ctx, `INSERT INTO bounty_scope_decisions
+		(id,target_id,program_id,program_asset_id,event_type,identifier,fingerprint,decision,resolved_event_id)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(target_id,program_id,program_asset_id,event_type,fingerprint)
+		DO UPDATE SET decision=excluded.decision,resolved_event_id=excluded.resolved_event_id,decided_at=CURRENT_TIMESTAMP`,
+		uuid.New().String(), targetID, programID, assetID, eventType, identifier, fingerprint, decision, eventID)
+	if err != nil {
+		return err
 	}
 	resolved := "rejected"
 	if decision == "approve" {

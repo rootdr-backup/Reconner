@@ -166,6 +166,91 @@ func TestResolveRejectsAssetThatBecameIneligible(t *testing.T) {
 	}
 }
 
+func TestRejectedScopeDecisionsSuppressReappearance(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "decision-1", Handle: "decide", Name: "Decide", Status: "live",
+		Assets: []Asset{
+			{ExternalID: "one", Identifier: "one.decide.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true, RawHash: "v1"},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	projectID, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{AssetIDs: []string{p.Assets[0].ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p.Assets = append(p.Assets, Asset{ExternalID: "two", Identifier: "two.decide.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true, RawHash: "v1"})
+	storeTestProgram(t, svc, &p)
+	var eventID string
+	if err := db.QueryRow(`SELECT id FROM bounty_scope_events WHERE target_id=? AND event_type='added' AND status='pending'`, projectID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResolveScopeEvent(context.Background(), projectID, eventID, "reject"); err != nil {
+		t.Fatal(err)
+	}
+
+	var decisions, pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_decisions WHERE target_id=?`, projectID).Scan(&decisions); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 1 {
+		t.Fatalf("reject did not store a decision: got %d", decisions)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND status='pending'`, projectID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("rejected event still pending: got %d", pending)
+	}
+
+	// A resync with the same program state must not recreate the event.
+	storeTestProgram(t, svc, &p)
+	var added int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND event_type='added'`, projectID).Scan(&added); err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("rejected addition reappeared: got %d added events", added)
+	}
+
+	// A rejected event can be approved later. The decision flips and the asset lands.
+	if err := svc.ResolveScopeEvent(context.Background(), projectID, eventID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	var status, decision string
+	if err := db.QueryRow(`SELECT status FROM bounty_scope_events WHERE id=?`, eventID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "approved" {
+		t.Fatalf("reopened event status=%q, want approved", status)
+	}
+	if err := db.QueryRow(`SELECT decision FROM bounty_scope_decisions WHERE target_id=? AND event_type='added'`, projectID).Scan(&decision); err != nil {
+		t.Fatal(err)
+	}
+	if decision != "approve" {
+		t.Fatalf("stored decision=%q, want approve", decision)
+	}
+	var assets int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE target_id=? AND approval_status='approved'`, projectID).Scan(&assets); err != nil {
+		t.Fatal(err)
+	}
+	if assets != 2 {
+		t.Fatalf("approved addition did not land: got %d assets", assets)
+	}
+
+	// A genuine later change has a new fingerprint and is reported again.
+	p.Assets[1].RawHash = "v2"
+	storeTestProgram(t, svc, &p)
+	var modified int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=? AND event_type='modified' AND status='pending'`, projectID).Scan(&modified); err != nil {
+		t.Fatal(err)
+	}
+	if modified != 1 {
+		t.Fatalf("genuine scope modification was suppressed: got %d events", modified)
+	}
+}
+
 func TestHackerOneProviderContract(t *testing.T) {
 	svc, db := testCatalog(t)
 	detailCalls := 0
@@ -426,5 +511,188 @@ func TestLivePublicCatalogContracts(t *testing.T) {
 			t.Fatalf("%s live catalog normalized programs=%d assets=%d", provider, programs, assets)
 		}
 		t.Logf("%s: %d programs, %d active declared assets", provider, programs, assets)
+	}
+}
+
+func TestCreateProjectWithOnlyAppStoreAssets(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "only-store", Handle: "only-store", Name: "Only Store",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "os1", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os2", Identifier: "https://apps.apple.com/us/app/example/id123456789", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os3", Identifier: "https://marketplace.atlassian.com/apps/1212096/x", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "os4", Identifier: "Third Party Marketplace Apps", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	ids := []string{p.Assets[0].ID, p.Assets[1].ID, p.Assets[2].ID, p.Assets[3].ID}
+
+	if _, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{AssetIDs: ids, WatchOnly: true}); err == nil {
+		t.Fatal("breadth create with only store assets must fail")
+	} else if !strings.Contains(err.Error(), "no web assets") {
+		t.Fatalf("error=%q, want a no-web-assets error", err.Error())
+	}
+
+	var targets int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM targets`).Scan(&targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets != 0 {
+		t.Fatalf("failed create left %d targets, want 0", targets)
+	}
+}
+
+func TestReconcileSkipsNonScannableScopeEvents(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "bell-1", Handle: "bell", Name: "Bell",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "scope-1", Identifier: "acme.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	projectID, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{
+		Name: "Bell", AssetIDs: []string{p.Assets[0].ID}, MonitorEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p.Assets = append(p.Assets,
+		Asset{ExternalID: "s2", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+		Asset{ExternalID: "s3", Identifier: "com.example.app", AssetType: "ANDROID", InScope: true, EligibleSubmission: true, Active: true},
+		Asset{ExternalID: "s4", Identifier: "Third Party Marketplace Apps", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+		Asset{ExternalID: "s5", Identifier: "www.acme.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+		Asset{ExternalID: "s6", Identifier: "192.0.2.10", AssetType: "IP", InScope: true, EligibleSubmission: true, Active: true},
+		Asset{ExternalID: "s7", Identifier: "All IPs owned by Acme", AssetType: "DESCRIPTION", InScope: true, EligibleSubmission: true, Active: true},
+	)
+	storeTestProgram(t, svc, &p)
+
+	want := map[string]bool{"www.acme.test": true, "192.0.2.10": true}
+	rows, err := db.Query(`SELECT identifier,event_type FROM bounty_scope_events WHERE target_id=?`, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var identifier, eventType string
+		if err := rows.Scan(&identifier, &eventType); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if eventType != "added" {
+			t.Errorf("event %q has type %q, want added", identifier, eventType)
+		}
+		if !want[identifier] {
+			t.Errorf("unexpected scope event for %q", identifier)
+			continue
+		}
+		delete(want, identifier)
+	}
+	rows.Close()
+	if len(want) != 0 {
+		t.Errorf("missing scope events for: %v", want)
+	}
+
+	var notifications int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE target_id=? AND type='bounty_scope_change'`, projectID).Scan(&notifications); err != nil {
+		t.Fatal(err)
+	}
+	if notifications != 1 {
+		t.Errorf("scope-change bell rows=%d, want 1", notifications)
+	}
+
+	var approved int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE target_id=? AND approval_status='approved'`, projectID).Scan(&approved); err != nil {
+		t.Fatal(err)
+	}
+	if approved != 1 {
+		t.Errorf("approved assets=%d, want 1 (new scope stays pending)", approved)
+	}
+}
+
+func TestReconcileSuspendsStaleNonWebAsset(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "bell-2", Handle: "bell2", Name: "Bell 2",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "scope-1", Identifier: "acme.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "scope-store", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	projectID, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{
+		Name: "Bell 2", AssetIDs: []string{p.Assets[0].ID}, MonitorEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeAssetID := p.Assets[1].ID
+	storeIdentifier := p.Assets[1].Identifier
+	_, err = db.Exec(`INSERT INTO assets(id,target_id,name,value,kind,asset_type,source,source_id,approval_status,monitor_enabled,metadata,updated_at)
+		VALUES(?,?,?,?,?,?,'bounty:catalog',?,'approved',1,'{}',CURRENT_TIMESTAMP)`,
+		"legacy-store", projectID, storeIdentifier, storeIdentifier, "web", "app_store", storeAssetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p.Assets = p.Assets[:1]
+	storeTestProgram(t, svc, &p)
+
+	var status string
+	if err := db.QueryRow(`SELECT approval_status FROM assets WHERE id='legacy-store'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suspended" {
+		t.Fatalf("stale store asset status=%q, want suspended", status)
+	}
+	var events, notifications int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bounty_scope_events WHERE target_id=?`, projectID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE target_id=? AND type='bounty_scope_change'`, projectID).Scan(&notifications); err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 || notifications != 0 {
+		t.Fatalf("stale cleanup created events=%d bell rows=%d, want 0/0", events, notifications)
+	}
+}
+
+func TestListScopeEventsHidesNonWebHistory(t *testing.T) {
+	svc, db := testCatalog(t)
+	p := Program{
+		Provider: "hackerone", ExternalID: "bell-3", Handle: "bell3", Name: "Bell 3",
+		Status: "live", ProgramType: "bug_bounty",
+		Assets: []Asset{
+			{ExternalID: "scope-1", Identifier: "acme.test", AssetType: "DOMAIN", InScope: true, EligibleSubmission: true, Active: true},
+			{ExternalID: "scope-store", Identifier: "https://play.google.com/store/apps/details?id=com.example", AssetType: "URL", InScope: true, EligibleSubmission: true, Active: true},
+		},
+	}
+	storeTestProgram(t, svc, &p)
+	projectID, err := svc.CreateProject(context.Background(), 0, p.ID, CreateProjectRequest{
+		Name: "Bell 3", AssetIDs: []string{p.Assets[0].ID}, MonitorEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ id, assetID, identifier string }{
+		{"evt-store", p.Assets[1].ID, p.Assets[1].Identifier},
+		{"evt-web", p.Assets[0].ID, p.Assets[0].Identifier},
+	} {
+		_, err := db.Exec(`INSERT INTO bounty_scope_events(id,target_id,program_id,program_asset_id,event_type,identifier,old_json,new_json,status)
+			VALUES(?,?,?,?,'added',?,'{}','{}','pending')`, row.id, projectID, p.ID, row.assetID, row.identifier)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := svc.ListScopeEvents(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].ID != "evt-web" {
+		t.Fatalf("scope events=%+v, want only evt-web", events)
 	}
 }

@@ -129,17 +129,22 @@ RUN build-hardened-go-tool github.com/d3mondev/puredns/v2 ${PUREDNS_VERSION} . p
 ARG SCILLA_VERSION=v1.3.4
 RUN build-hardened-go-tool github.com/edoardottt/scilla ${SCILLA_VERSION} ./cmd/scilla scilla
 
+# chaos — the projectdiscovery dataset tool used by the breadth/watch tier.
+# The module path is chaos-client (NOT chaos): the binary lives in cmd/chaos.
+ARG CHAOS_VERSION=v0.5.2
+RUN build-hardened-go-tool github.com/projectdiscovery/chaos-client ${CHAOS_VERSION} ./cmd/chaos chaos
+
 # Sanity check: every binary we expect actually landed in /out. Fails loud and
 # early instead of silently shipping a partial tool-chain.
 RUN set -eu; \
     for t in subfinder httpx nuclei katana dnsx alterx asnmap naabu shuffledns gau \
-             waybackurls assetfinder hakrawler subzy puredns scilla; do \
+             waybackurls assetfinder hakrawler subzy puredns scilla chaos; do \
       if [ ! -x "/out/$t" ]; then \
         echo "BUILD FAILURE: /out/$t was not produced by go install" >&2; \
         exit 1; \
       fi; \
     done; \
-    echo "gotools: all 16 pinned Go binaries present in /out"
+    echo "gotools: all 17 pinned Go binaries present in /out"
 
 # ── stage 3: massdns (built from source — not packaged for Debian bookworm) ──
 # Root cause of the earlier `fatal error: stdint.h: No such file or directory`:
@@ -414,11 +419,11 @@ ENV HOME=/home/reconner \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN gosu reconner:reconner sh -c 'set -eu; \
-    echo "==> verifying all 27 required tools, plus Chromium and git, are on PATH"; \
+    echo "==> verifying all 28 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
       subfinder httpx nuclei katana dnsx alterx asnmap naabu shuffledns \
-      gau waybackurls assetfinder hakrawler subzy puredns scilla \
+      gau waybackurls assetfinder hakrawler subzy puredns scilla chaos \
       dirsearch feroxbuster findomain sqlmap uro waymore \
       massdns python3 \
       chromium git nmap hydra ncrack \
@@ -446,6 +451,7 @@ RUN gosu reconner:reconner sh -c 'set -eu; \
     ncrack --version 2>&1 | head -1 || true; \
     httpx -version; \
     subfinder -version; \
+    chaos -version 2>&1 | head -1 || true; \
     katana -version; \
     dnsx -version; \
     dirsearch --help >/dev/null 2>&1 || { echo "BUILD FAILURE: dirsearch not executable" >&2; exit 1; }; \

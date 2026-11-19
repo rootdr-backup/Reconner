@@ -99,14 +99,17 @@ func (h *Handler) handleUpdateTelegramChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var patch struct {
-		Label               *string `json:"label"`
-		Role                *string `json:"role"`
-		Enabled             *bool   `json:"enabled"`
-		NotifyScanStarted   *bool   `json:"notify_scan_started"`
-		NotifyPhaseFinished *bool   `json:"notify_phase_finished"`
-		NotifyScanFinished  *bool   `json:"notify_scan_finished"`
-		NotifyFindings      *bool   `json:"notify_findings"`
-		NotifyMonitoring    *bool   `json:"notify_monitoring"`
+		Label                   *string `json:"label"`
+		Role                    *string `json:"role"`
+		Enabled                 *bool   `json:"enabled"`
+		NotifyScanStarted       *bool   `json:"notify_scan_started"`
+		NotifyPhaseFinished     *bool   `json:"notify_phase_finished"`
+		NotifyScanFinished      *bool   `json:"notify_scan_finished"`
+		NotifyFindings          *bool   `json:"notify_findings"`
+		NotifyMonitoring        *bool   `json:"notify_monitoring"`
+		NotifyWatchScanStarted  *bool   `json:"notify_watch_scan_started"`
+		NotifyWatchScanFinished *bool   `json:"notify_watch_scan_finished"`
+		NotifyScopeLanded       *bool   `json:"notify_scope_landed"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid body")
@@ -135,6 +138,15 @@ func (h *Handler) handleUpdateTelegramChat(w http.ResponseWriter, r *http.Reques
 	}
 	if patch.NotifyMonitoring != nil {
 		current.NotifyMonitoring = *patch.NotifyMonitoring
+	}
+	if patch.NotifyWatchScanStarted != nil {
+		current.NotifyWatchScanStarted = *patch.NotifyWatchScanStarted
+	}
+	if patch.NotifyWatchScanFinished != nil {
+		current.NotifyWatchScanFinished = *patch.NotifyWatchScanFinished
+	}
+	if patch.NotifyScopeLanded != nil {
+		current.NotifyScopeLanded = *patch.NotifyScopeLanded
 	}
 	if err := bot.UpdateChat(r.Context(), id, *current); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

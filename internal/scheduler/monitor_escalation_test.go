@@ -130,3 +130,43 @@ func indexOf(hay, needle string) int {
 	}
 	return -1
 }
+
+// A stylesheet redeploy churns css_change / security:stylesheet_* rows, but
+// those signals are observational: they must not escalate to nuclei /
+// backup discovery the way a changed JS seed or a new host does.
+func TestStylesheetOnlyChangesDoNotEscalate(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, subdomain_count) VALUES ('t','ex.com',10)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO monitoring_changes (id, target_id, url, change_type, old_value, new_value, severity, detected_at)
+		VALUES ('mc-css', 't', 'https://ex.com/a.css', 'css_change', 'old', 'new', 'info', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO monitoring_changes (id, target_id, url, change_type, old_value, new_value, severity, detected_at)
+		VALUES ('mc-attr', 't', 'https://ex.com/a.css', 'security:stylesheet_added', 'old', 'new', 'info', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	s.escalateIfChanged("t", "ex.com", 10, time.Now().Add(-time.Minute))
+	if n := countTasks(t, s, monitorEscalationType); n != 0 {
+		t.Fatalf("stylesheet-only changes escalated to %d task(s), want 0", n)
+	}
+
+	// Mixed signal: the css churn is ignored, a js_change still escalates with
+	// the observational JS refresh set — and only that set.
+	if _, err := s.db.Exec(`INSERT INTO monitoring_changes (id, target_id, url, change_type, old_value, new_value, severity, detected_at)
+		VALUES ('mc-js', 't', 'https://ex.com/app.js', 'js_change', 'old', 'new', 'medium', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	s.escalateIfChanged("t", "ex.com", 10, time.Now().Add(-time.Minute))
+	if n := countTasks(t, s, monitorEscalationType); n != 1 {
+		t.Fatalf("js_change beside css churn did not escalate (%d task(s)), want 1", n)
+	}
+	var modules string
+	if err := s.db.QueryRow(`SELECT modules FROM tasks WHERE type=? LIMIT 1`, monitorEscalationType).Scan(&modules); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(modules, ModuleJSAnalysis) {
+		t.Fatalf("escalation modules %q missing %q", modules, ModuleJSAnalysis)
+	}
+}

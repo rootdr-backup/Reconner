@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard'
 import Targets from './pages/Targets'
 import TargetDetail from './pages/TargetDetail'
 import Findings from './pages/Findings'
+import Changes from './pages/Changes'
 import Tasks from './pages/Tasks'
 import System from './pages/System'
 import BountyPrograms from './pages/BountyPrograms'
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="wp-scanner" element={<WPScanner/>}/>
           <Route path="network-scanner" element={<NetworkScanner/>}/>
           <Route path="findings" element={<Findings/>}/>
+          <Route path="changes" element={<Changes/>}/>
           <Route path="tasks" element={<Tasks/>}/>
           <Route path="system" element={<System/>}/>
         </Route>

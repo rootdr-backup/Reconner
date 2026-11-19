@@ -29,6 +29,29 @@ export function timeAgo(dateStr: string | null): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+// timeUntil renders a scheduled time from the viewer's point of view.
+// A past timestamp means the work is due, so it reads "overdue by X" instead
+// of "X ago". A future timestamp reads "in X".
+export function timeUntil(dateStr: string | null): string {
+  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'not scheduled'
+  const ms = new Date(dateStr).getTime() - Date.now()
+  if (!Number.isFinite(ms)) return 'unknown'
+  const seconds = Math.round(ms / 1000)
+  if (seconds > 0 && seconds < 10) return 'in a moment'
+  if (seconds <= 0 && seconds > -10) return 'due now'
+  if (seconds > 0) return `in ${formatDuration(seconds)}`
+  return `${formatDuration(-seconds)} overdue`
+}
+
 export function truncate(str: string | null | undefined, max: number): string {
   if (!str) return ''
   return str.length <= max ? str : str.slice(0, max) + '…'

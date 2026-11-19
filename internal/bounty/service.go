@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/recon-platform/internal/assets"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/pkg/logger"
 )
@@ -175,9 +176,16 @@ func normalizeAssetType(provider, typ, identifier string) string {
 	t := strings.ToLower(strings.TrimSpace(typ))
 	id := strings.ToLower(strings.TrimSpace(identifier))
 	plainID := strings.TrimSpace(strings.TrimPrefix(id, "*."))
+	if assets.IsAppStoreAsset(identifier) {
+		return "app_store"
+	}
+	webShaped := assets.IsWebShapedIdentifier(identifier)
 	if provider == "intigriti" && strings.HasPrefix(t, "intigriti:") {
 		switch strings.TrimPrefix(t, "intigriti:") {
 		case "1": // URL / domain
+			if !webShaped {
+				return "other"
+			}
 			if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") {
 				if strings.HasSuffix(strings.Split(id, "?")[0], ".js") {
 					return "js"
@@ -206,13 +214,22 @@ func normalizeAssetType(provider, typ, identifier string) string {
 	}
 	switch {
 	case strings.Contains(t, "wildcard") || strings.HasPrefix(id, "*.") || strings.Contains(id, "/*"):
+		if !webShaped {
+			return "other"
+		}
 		return "wildcard"
 	case strings.Contains(t, "url"):
+		if !webShaped {
+			return "other"
+		}
 		if strings.HasSuffix(strings.Split(id, "?")[0], ".js") {
 			return "js"
 		}
 		return "url"
 	case strings.Contains(t, "domain") || t == "website" || t == "web_app":
+		if !webShaped {
+			return "other"
+		}
 		if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") {
 			if strings.HasSuffix(strings.Split(id, "?")[0], ".js") {
 				return "js"
@@ -221,6 +238,9 @@ func normalizeAssetType(provider, typ, identifier string) string {
 		}
 		return "domain"
 	case strings.Contains(t, "api"):
+		if !webShaped {
+			return "other"
+		}
 		return "api"
 	case strings.Contains(t, "cidr"):
 		return "cidr"
@@ -252,7 +272,7 @@ func normalizeAssetType(provider, typ, identifier string) string {
 			}
 			return "url"
 		}
-		if !strings.ContainsAny(plainID, " /@") && strings.Contains(plainID, ".") {
+		if webShaped {
 			return "domain"
 		}
 		_ = provider

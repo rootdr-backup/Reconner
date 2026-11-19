@@ -132,6 +132,16 @@ export interface Target {
   monitor_last_run: string | null
   scan_user_agent?: string
   scan_headers?: Record<string, string>
+  catchall_detection?: 'inherit' | 'on' | 'off'
+  catchall_effective?: boolean
+  // Breadth tier: watch_only=1 means the project runs chained watch rounds
+  // (passive discovery + HTTP probe) instead of the deep pipeline.
+  watch_only?: boolean
+  watch_last_run?: string | null
+  watch_next_run?: string | null
+  watch_fail_count?: number
+  watch_root_index?: number
+  watch_paused?: boolean
 }
 
 export interface Subdomain {
@@ -311,7 +321,51 @@ export interface MonitoringChange {
   change_type: string
   old_value: string
   new_value: string
+  severity: string
   detected_at: string
+}
+
+export type ChangeCategory =
+  | 'http' | 'scripts' | 'security' | 'tech' | 'headers' | 'assets' | 'alerts'
+
+export interface ChangeEntry {
+  id: string
+  source: 'monitor' | 'watch' | 'scope' | 'notification'
+  target_id: string
+  target_name: string
+  task_id?: string
+  url: string
+  change_type: string
+  category: ChangeCategory
+  severity: string
+  old_value: string
+  new_value: string
+  metadata?: Record<string, unknown>
+  seen: boolean
+  detected_at: string
+}
+
+export interface WatchRound {
+  id: string
+  target_id: string
+  target_name: string
+  status: string
+  error: string
+  started_at: string
+  finished_at: string
+  change_count: number
+}
+
+// Body of a monitored file (css_files / js_files) as captured by the monitor
+// pass when the change was detected — see GET /targets/{id}/css-files/body.
+export interface FileBodyResponse {
+  kind: string
+  url: string
+  side: string
+  hash: string
+  size: number
+  content: string
+  captured: boolean
 }
 
 export interface IngramCamera {
@@ -349,6 +403,12 @@ export interface Task {
   created_at: string
   updated_at: string
   target_domain: string
+  // Coverage: 'deep' or 'breadth'. It follows the TASK type, not the project's
+  // current coverage, so flipping a project never rewrites its history.
+  coverage?: string
+  // True when the project is a breadth project today. A deep task on such a
+  // project is a manual deep scan.
+  project_breadth?: boolean
 }
 
 export interface TaskLog {
@@ -400,4 +460,16 @@ export interface DashboardStats {
   finished_tasks: number
   failed_tasks: number
   pending_tasks: number
+  watch_targets: number
+  deep_targets: number
+  watch_running_tasks: number
+  deep_running_tasks: number
+  watch_failed_tasks: number
+  deep_failed_tasks: number
+  watch_alive_hosts: number
+  deep_alive_hosts: number
+  watch_subdomains: number
+  deep_subdomains: number
+  watch_http_services: number
+  deep_http_services: number
 }

@@ -2,6 +2,11 @@ package scheduler
 
 import "testing"
 
+// TestResourceTargetCeilingPreventsTinyHostThrash checks the hardware-envelope
+// helper only. resourceTargetCeiling is now the DEEP envelope used by
+// computeAdmissionCaps; it is no longer a general admission ceiling. For the
+// full admission decision (configured values + pressure + lane reservation),
+// see TestComputeAdmissionCaps* in admission_test.go.
 func TestResourceTargetCeilingPreventsTinyHostThrash(t *testing.T) {
 	cases := []struct {
 		cpu, memory, configured, want int

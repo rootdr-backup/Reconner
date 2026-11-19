@@ -117,6 +117,35 @@ function Stat({ label, value, tone, hint, icon: Icon }: {
   )
 }
 
+// One tile, two lines. Splitting a counter into two tiles would double the
+// fixed 2/4-column grid, so the deep and breadth values stay inside one tile.
+function SplitStat({ label, deep, watch, tone, hint, icon: Icon }: {
+  label: string; deep: number; watch: number; tone?: string; hint?: string
+  icon?: (p: { className?: string }) => JSX.Element
+}) {
+  return (
+    <div className="metric-card">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[.14em] text-text-muted">{label}</p>
+          <p className={cn('mt-2 text-[30px] leading-none font-semibold tracking-[-.04em] tabular-nums', tone)}>{(deep + watch).toLocaleString()}</p>
+          <p className="mt-2 text-[10px] text-text-muted tabular-nums">
+            Deep <span className="text-text-primary">{deep.toLocaleString()}</span>
+            <span className="mx-1.5 opacity-40">·</span>
+            Breadth <span className="text-accent">{watch.toLocaleString()}</span>
+          </p>
+        </div>
+        {Icon && (
+          <span className={cn('mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-white/[.06] bg-white/[.025]', tone || 'text-text-muted')}>
+            <Icon className="h-4 w-4" />
+          </span>
+        )}
+      </div>
+      {hint && <p className="mt-2 text-[10px] text-text-muted">{hint}</p>}
+    </div>
+  )
+}
+
 const KIND_CHIP: Record<string, string> = {
   web: 'bg-accent-muted text-accent-hover', network: 'bg-series-3/15 text-series-3', mixed: 'bg-severity-low/15 text-severity-low',
 }
@@ -219,8 +248,8 @@ export default function Dashboard() {
 
       {/* Hero KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat label="Projects" value={stats.targets} hint="Defined scopes" icon={Icons.targets} />
-        <Stat label="Live services" value={stats.alive_hosts.toLocaleString()} tone="text-severity-low" hint="Reachable now" icon={Icons.network} />
+        <SplitStat label="Projects" deep={stats.deep_targets} watch={stats.watch_targets} hint="Defined scopes" icon={Icons.targets} />
+        <SplitStat label="Live services" deep={stats.deep_alive_hosts} watch={stats.watch_alive_hosts} tone="text-severity-low" hint="Reachable now" icon={Icons.network} />
         <Stat label="Verified findings" value={totalVulns} tone={totalVulns > 0 ? 'text-severity-high' : undefined} hint="Evidence attached" icon={VerifiedIcon} />
         <Stat label="Urgent" value={critHigh} tone={critHigh > 0 ? 'text-severity-critical' : undefined} hint="Critical + high" icon={AlertIcon} />
       </div>
@@ -239,8 +268,8 @@ export default function Dashboard() {
           <p className="panel-heading mb-4">Scan velocity · 30 days</p>
           <Sparkline data={charts?.scans_over_time || []} />
           <div className="grid grid-cols-2 gap-2 mt-4">
-            <Stat label="Running" value={stats.running_tasks} tone={stats.running_tasks > 0 ? 'text-accent' : undefined} />
-            <Stat label="Failed" value={stats.failed_tasks} tone={stats.failed_tasks > 0 ? 'text-severity-critical' : undefined} />
+            <SplitStat label="Running" deep={stats.deep_running_tasks} watch={stats.watch_running_tasks} tone={stats.running_tasks > 0 ? 'text-accent' : undefined} />
+            <SplitStat label="Failed" deep={stats.deep_failed_tasks} watch={stats.watch_failed_tasks} tone={stats.failed_tasks > 0 ? 'text-severity-critical' : undefined} />
           </div>
         </div>
       </div>
@@ -283,8 +312,8 @@ export default function Dashboard() {
       <div>
         <p className="panel-heading mb-3">Coverage inventory</p>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Subdomains" value={stats.subdomains.toLocaleString()} />
-          <Stat label="HTTP services" value={stats.http_services.toLocaleString()} />
+          <SplitStat label="Subdomains" deep={stats.deep_subdomains} watch={stats.watch_subdomains} />
+          <SplitStat label="HTTP services" deep={stats.deep_http_services} watch={stats.watch_http_services} />
           <Stat label="JS files" value={stats.js_files.toLocaleString()} />
           <Stat label="Parameters" value={stats.parameters.toLocaleString()} />
           <Stat label="Reflected params" value={stats.reflected_parameters} tone={stats.reflected_parameters > 0 ? 'text-severity-high' : undefined} />

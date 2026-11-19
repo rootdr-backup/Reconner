@@ -34,6 +34,7 @@ export const Icons = {
   network: I('M6 4h12M6 4v4M18 4v4M4 8h16v4H4V8zM8 16h8M8 16v4M16 16v4M6 12v4M18 12v4'),
   bounty: I('M8 4h8v3a4 4 0 0 1-8 0V4zM6 5H4v2a4 4 0 0 0 4 4M18 5h2v2a4 4 0 0 1-4 4M12 11v5M8 20h8M9 16h6v4H9z'),
   findings: I('M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'),
+  changes: I('M4 7h10M4 12h7M4 17h10M14 7l3-3 3 3M14 17l3 3 3-3'),
   analyze: I('M4 19V5m0 14h16M7 15l3-3 3 2 5-7M17 7h1v1'),
   wordpress: I('M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM4 8l3.2 8.7L9.5 10M12 8l2.4 6.8M11 8l3.3 8.7L17 10.5c.6-1.5.9-2.6.9-3.5M6.6 6.2A9 9 0 0 1 20 9'),
   tasks: I('M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01'),
@@ -70,6 +71,7 @@ export const Sidebar = () => {
     { label: 'Operations', items: [
       { to: '/bounty-programs', label: 'Bounty programs', Icon: Icons.bounty },
       { to: '/targets', label: 'Projects', Icon: Icons.targets, badge: targetsN > 0 ? { text: String(targetsN) } : null },
+      { to: '/changes', label: 'Changes', Icon: Icons.changes },
       { to: '/analyze', label: 'Guided Analyze', Icon: Icons.analyze },
       { to: '/wp-scanner', label: 'WP Scanner', Icon: Icons.wordpress },
       { to: '/network-scanner', label: 'Network Scanner', Icon: Icons.network },

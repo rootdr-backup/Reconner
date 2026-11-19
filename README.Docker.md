@@ -97,12 +97,19 @@ Set `RECON_MEMORY_LIMIT` in `.env` for the host. For an existing `config.json`
 that already contains an explicit `limits` object, also align the two fields
 shown below; fresh/partial configurations are auto-tuned.
 
-| Host RAM | `RECON_MEMORY_LIMIT` | `limits.max_memory_mb` | `limits.max_concurrent_targets` |
-|---:|---:|---:|---:|
-| 2 GB | `1536m` | `1024` | `1` |
-| 4 GB | `3g` | `2304` | `1` |
-| 8 GB | `6g` | `4608` | `2` |
-| 16 GB | `12g` | `9216` | `4` |
+| Host RAM | `RECON_MEMORY_LIMIT` | `limits.max_memory_mb` |
+|---:|---:|---:|
+| 2 GB | `1536m` | `1024` |
+| 4 GB | `3g` | `2304` |
+| 8 GB | `6g` | `4608` |
+| 16 GB | `12g` | `9216` |
+
+Scan concurrency is controlled in **System -> Scanning** (`max_concurrent_scans`,
+`max_concurrent_deep_scans`, `max_concurrent_watch_scans`). The panel shows the
+safe per-lane range for this host and applies your values inside that envelope;
+live memory/CPU pressure may briefly throttle new scans. The legacy
+`limits.max_concurrent_targets` field is kept for config compatibility but no
+longer gates scan admission.
 
 Keep `RECON_PIDS_LIMIT=512` unless measurements show a legitimate need to
 raise it. A PID-limit failure is preferable to exhausting the host-wide PID

@@ -20,6 +20,52 @@ type notification struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// notificationBuckets maps the bell's filter buckets to the stored
+// notifications.type values. The stored types are granular (one per change
+// kind, one per finding kind), so the filter takes a BUCKET and never a raw
+// type — otherwise a bucket would silently return zero rows.
+var notificationBuckets = map[string][]string{
+	// The breadth tier: specific changes only. New rounds no longer write
+	// scan_watch rows; the value stays here so older bell history stays visible.
+	"watch": {"scan_watch", "scope_landed", "watch_failed"},
+	// The deep tier: full scans, discovery, monitoring changes and program
+	// scope updates.
+	"deep": {
+		"scan_deep", "scan_auto_paused", "new_subdomain", "monitor_failed", "bounty_scope_change",
+		"js_change", "css_change", "http_change", "status_change", "page_change",
+		"tech_change", "header_regression", "security_header_removed",
+		"new_host", "new_service", "content_security_change",
+	},
+	// Verified findings.
+	"findings": {
+		"finding", "vuln", "vulnerability", "new_vuln_finding", "nuclei",
+		"open_redirect", "backup", "js_finding", "admin_panel", "sqli", "ssrf",
+		"lfi", "ssti", "csti", "cmdi", "xss", "csrf", "cors", "xxe",
+		"file_upload", "idor", "jwt", "authz", "ato", "nosqli",
+		"cache_poison", "oast", "takeover", "blh",
+	},
+}
+
+// notificationTypeFilter turns the ?type= query parameter into a SQL fragment
+// and its arguments. An unknown or empty bucket means "no filter".
+func notificationTypeFilter(bucket string) (string, []any) {
+	bucket = strings.ToLower(strings.TrimSpace(bucket))
+	if bucket == "" || bucket == "all" {
+		return "", nil
+	}
+	types, ok := notificationBuckets[bucket]
+	if !ok || len(types) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, 0, len(types))
+	args := make([]any, 0, len(types))
+	for _, t := range types {
+		placeholders = append(placeholders, "?")
+		args = append(args, t)
+	}
+	return " AND n.type IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
 // handleListNotifications returns the most recent notifications plus the current
 // unread count for the bell badge.
 func (h *Handler) handleListNotifications(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +84,14 @@ func (h *Handler) handleListNotifications(w http.ResponseWriter, r *http.Request
 		scope = ` WHERE (COALESCE(n.target_id,'')='' OR EXISTS(
 			SELECT 1 FROM targets t WHERE t.id=n.target_id AND t.owner_id=?))`
 		args = append(args, uid)
+	}
+	// The bell filter takes a BUCKET (all/deep/watch/findings), never a raw
+	// stored type: the stored types are granular, so a raw type would match a
+	// single row kind and look like an empty bell.
+	typeFilter, typeArgs := notificationTypeFilter(r.URL.Query().Get("type"))
+	if typeFilter != "" {
+		scope += typeFilter
+		args = append(args, typeArgs...)
 	}
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, COALESCE(target_id,''), type, title, COALESCE(body,''), COALESCE(url,''),
@@ -72,6 +126,12 @@ func (h *Handler) handleListNotifications(w http.ResponseWriter, r *http.Request
 		unreadQuery += ` AND (COALESCE(n.target_id,'')='' OR EXISTS(
 			SELECT 1 FROM targets t WHERE t.id=n.target_id AND t.owner_id=?))`
 		unreadArgs = append(unreadArgs, uid)
+	}
+	// The badge counts the SAME rows the list shows, so a filtered bell never
+	// shows a badge for rows the operator cannot see.
+	if typeFilter != "" {
+		unreadQuery += typeFilter
+		unreadArgs = append(unreadArgs, typeArgs...)
 	}
 	if err := h.db.QueryRowContext(r.Context(), unreadQuery, unreadArgs...).Scan(&unread); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to count notifications")

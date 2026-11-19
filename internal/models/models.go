@@ -29,6 +29,28 @@ type Target struct {
 	MonitorLastRun       *time.Time        `json:"monitor_last_run" db:"monitor_last_run"`
 	ScanUserAgent        string            `json:"scan_user_agent" db:"scan_user_agent"`
 	ScanHeaders          map[string]string `json:"scan_headers" db:"scan_headers"`
+	// CatchallDetection is the per-target override of the HTTP catch-all pass:
+	// "inherit" (follow the global http_catchall_detection setting), "on" or
+	// "off". CatchallEffective is the resolved state the next scan will use.
+	CatchallDetection string `json:"catchall_detection,omitempty"`
+	// CatchallEffective is a pointer so list/create responses (which do not
+	// resolve the override) omit the field entirely, while the detail endpoint
+	// always sends an explicit true/false.
+	CatchallEffective *bool `json:"catchall_effective,omitempty"`
+	// ── Breadth ("watch") tier ──────────────────────────────────────────────
+	// WatchOnly marks the project as a BREADTH project: it runs the cheap
+	// watch rounds (passive discovery + one HTTP probe) instead of the deep
+	// pipeline. WatchLastRun / WatchNextRun drive the chained-round schedule
+	// (a NULL WatchNextRun means "not scheduled" and must never make the
+	// project due). WatchFailCount counts CONSECUTIVE failed rounds;
+	// WatchRootIndex is the domain/wildcard asset the next round enumerates;
+	// WatchPaused is the operator's stop switch.
+	WatchOnly      bool       `json:"watch_only" db:"watch_only"`
+	WatchLastRun   *time.Time `json:"watch_last_run,omitempty" db:"watch_last_run"`
+	WatchNextRun   *time.Time `json:"watch_next_run,omitempty" db:"watch_next_run"`
+	WatchFailCount int        `json:"watch_fail_count" db:"watch_fail_count"`
+	WatchRootIndex int        `json:"watch_root_index" db:"watch_root_index"`
+	WatchPaused    bool       `json:"watch_paused" db:"watch_paused"`
 }
 
 // Asset is one individually-scannable entry of a target (a domain, IP, CIDR, or
@@ -240,6 +262,15 @@ type Task struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	TargetDomain     string     `json:"target_domain,omitempty"`
+	// Coverage is the tier this TASK belongs to: "breadth" for a watch round,
+	// "deep" for everything else. It follows the task type, NOT the project's
+	// current coverage, so flipping a project never rewrites the history of its
+	// task list.
+	Coverage string `json:"coverage,omitempty"`
+	// ProjectBreadth tells whether the OWNING project is currently a breadth
+	// (watch) project. A deep task on a breadth project is a manual deep scan;
+	// the UI marks it as such.
+	ProjectBreadth bool `json:"project_breadth,omitempty"`
 }
 
 type TaskLog struct {
@@ -303,6 +334,21 @@ type DashboardStats struct {
 	FinishedTasks        int `json:"finished_tasks"`
 	FailedTasks          int `json:"failed_tasks"`
 	PendingTasks         int `json:"pending_tasks"`
+
+	// Coverage split. Only the counters the watch tier can change are split.
+	// A manual deep scan on a breadth project counts as breadth here.
+	WatchTargets      int `json:"watch_targets"`
+	DeepTargets       int `json:"deep_targets"`
+	WatchRunningTasks int `json:"watch_running_tasks"`
+	DeepRunningTasks  int `json:"deep_running_tasks"`
+	WatchFailedTasks  int `json:"watch_failed_tasks"`
+	DeepFailedTasks   int `json:"deep_failed_tasks"`
+	WatchAliveHosts   int `json:"watch_alive_hosts"`
+	DeepAliveHosts    int `json:"deep_alive_hosts"`
+	WatchSubdomains   int `json:"watch_subdomains"`
+	DeepSubdomains    int `json:"deep_subdomains"`
+	WatchHTTPServices int `json:"watch_http_services"`
+	DeepHTTPServices  int `json:"deep_http_services"`
 }
 
 // JSON serialization helpers

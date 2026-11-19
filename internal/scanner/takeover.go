@@ -104,7 +104,7 @@ var takeoverFingerprints = []takeoverFingerprint{
 func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "takeover", "Checking for subdomain takeovers...")
 
-	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains WHERE target_id = ?`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0)=0`, targetID)
 	if err != nil {
 		return fmt.Errorf("query subdomains: %w", err)
 	}

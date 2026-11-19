@@ -66,18 +66,97 @@ func TestRejectedAdmissionPrunesOnlyUnverifiedDNSRows(t *testing.T) {
 	insert("vhost.m.local", "vhost", 0)
 
 	s := &SubdomainScanner{db: db}
-	s.pruneRejectedSubdomains(context.Background(), tid, map[string]bool{
+	rejected := map[string]bool{
 		"junk.m.local": true, "historically-live.m.local": true, "seed.m.local": true,
 		"cname.m.local": true, "vhost.m.local": true,
-	})
+	}
+	// One missed resolve pass must never delete: transient resolver failures are
+	// common. The never-live eager DNS row survives the first pass at miss_count=1.
+	s.pruneRejectedSubdomains(context.Background(), tid, rejected)
 	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=?`, tid).Scan(&n)
+	if n != 5 {
+		t.Fatalf("a single missed pass pruned rows early: rows=%d", n)
+	}
+	// The second CONSECUTIVE miss prunes only that never-live eager DNS row.
+	s.pruneRejectedSubdomains(context.Background(), tid, rejected)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=?`, tid).Scan(&n)
 	if n != 4 {
 		t.Fatalf("expected only the never-live eager DNS row to be pruned, rows=%d", n)
 	}
 	_ = db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id=? AND subdomain='junk.m.local'`, tid).Scan(&n)
 	if n != 0 {
-		t.Fatal("unverified junk DNS row survived admission cleanup")
+		t.Fatal("unverified junk DNS row survived two consecutive missed passes")
+	}
+}
+
+// TestDistinctCNAMETargetsDeduplicates proves the extra A/AAAA pass runs once
+// per target. Many aliases share one CDN name, and dnsx can emit several
+// response lines for the same target.
+func TestDistinctCNAMETargetsDeduplicates(t *testing.T) {
+	got := distinctCNAMETargets(map[string]string{
+		"a.example.com": "D27QWT9HEEZ1ET.CloudFront.Net.",
+		"b.example.com": "d27qwt9heez1et.cloudfront.net",
+		"c.example.com": "other.example.net",
+		"d.example.com": "",
+	})
+	want := []string{"d27qwt9heez1et.cloudfront.net", "other.example.net"}
+	if len(got) != len(want) {
+		t.Fatalf("distinct targets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("distinct targets = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestClassifyCNAMEAliasCopiesTargetIP covers the Merck case. dnsx reports the
+// CloudFront A records under the CNAME target, so the alias has no A/AAAA of
+// its own. The target IP must be copied onto the alias for the HTTP probe.
+func TestClassifyCNAMEAliasCopiesTargetIP(t *testing.T) {
+	const target = "d27qwt9heez1et.cloudfront.net"
+	targetIPs := map[string][]string{
+		target: {"108.157.60.59", "108.157.60.86"},
+	}
+	resolve := func(name string) []string {
+		return targetIPs[normalizeSubdomainName(name)]
+	}
+
+	ip, live := classifyCNAMEAlias("account.merck.com", target+".", resolve, nil)
+	if !live || ip != "108.157.60.59" {
+		t.Fatalf("live CNAME alias = (%q, %v), want (108.157.60.59, true)", ip, live)
+	}
+
+	// A dangling target keeps an empty IP and stays in takeover only.
+	ip, live = classifyCNAMEAlias("dangling.example.com", "missing.example.net", resolve, nil)
+	if live || ip != "" {
+		t.Fatalf("dangling CNAME alias = (%q, %v), want (\"\", false)", ip, live)
+	}
+
+	// A wildcard answer pool is never copied onto a NON-CDN alias. A plain
+	// hostname is not proof of a real host, so the wildcard check still applies.
+	profile := &wildcardProfile{apex: wildcardZone{ips: map[string]bool{"108.157.60.59": true}}}
+	ip, live = classifyCNAMEAlias("account.merck.com", "origin.merck.net", func(string) []string {
+		return []string{"108.157.60.59"}
+	}, profile)
+	if live || ip != "" {
+		t.Fatalf("wildcard pool on non-CDN target = (%q, %v), want empty IP", ip, live)
+	}
+
+	// An explicit CNAME to a known CDN is trusted even when its IP overlaps a
+	// wildcard pool. CDN providers share ranges across customers, so an overlap
+	// is common and must not drop the alias IP (the Merck case).
+	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	if !live || ip != "108.157.60.59" {
+		t.Fatalf("CDN target with overlapping wildcard pool = (%q, %v), want (108.157.60.59, true)", ip, live)
+	}
+
+	// A wildcard CNAME target is rejected before the IP lookup.
+	profile = &wildcardProfile{apex: wildcardZone{cnames: map[string]bool{target: true}}}
+	ip, live = classifyCNAMEAlias("account.merck.com", target, resolve, profile)
+	if live || ip != "" {
+		t.Fatalf("wildcard CNAME record = (%q, %v), want (\"\", false)", ip, live)
 	}
 }
 

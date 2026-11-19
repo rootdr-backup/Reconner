@@ -134,7 +134,9 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, domain, COALESCE(kind,'web'), COALESCE(description,''), COALESCE(tags,'[]'),
 		COALESCE(priority,'medium'), COALESCE(notes,''), COALESCE(status,'idle'), COALESCE(scan_status,'idle'), COALESCE(enabled_modules,'[]'),
 		last_scan_at, created_at, updated_at, COALESCE(subdomain_count,0), COALESCE(alive_host_count,0), COALESCE(finding_count,0),
-		COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,'')
+		COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,''),
+		COALESCE(watch_only,0), watch_last_run, watch_next_run, COALESCE(watch_fail_count,0),
+		COALESCE(watch_root_index,0), COALESCE(watch_paused,0)
 		FROM targets WHERE 1=1`
 	args := []any{}
 
@@ -165,6 +167,14 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		query += " AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) WHERE value = ?)"
 		args = append(args, tag)
 	}
+	// Coverage filter (the Projects page chips): "deep" = the full pipeline,
+	// "breadth" = the cheap watch tier, "all"/"" = no filter.
+	switch coverage := strings.ToLower(strings.TrimSpace(q.Get("coverage"))); coverage {
+	case "deep":
+		query += " AND COALESCE(watch_only,0)=0"
+	case "breadth", "watch":
+		query += " AND COALESCE(watch_only,0)=1"
+	}
 
 	query += " ORDER BY created_at DESC"
 
@@ -181,12 +191,16 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		var lastScan *string
 		var tagsJSON, modulesJSON string
 		var monitorEnabled int
+		var watchOnly, watchPaused int
+		var watchLastRun, watchNextRun *string
 
 		err := rows.Scan(&t.ID, &t.Domain, &t.Kind, &t.Description, &tagsJSON, &t.Priority,
 			&t.Notes, &t.Status, &t.ScanStatus, &modulesJSON,
 			&lastScan, &t.CreatedAt, &t.UpdatedAt,
 			&t.SubdomainCount, &t.AliveHostCount, &t.FindingCount,
-			&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope)
+			&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope,
+			&watchOnly, &watchLastRun, &watchNextRun, &t.WatchFailCount,
+			&t.WatchRootIndex, &watchPaused)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "failed to decode targets")
 			return
@@ -195,6 +209,10 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		t.Tags = models.JSONToStringSlice(tagsJSON)
 		t.EnabledModules = models.JSONToStringSlice(modulesJSON)
 		t.MonitorEnabled = monitorEnabled == 1
+		t.WatchOnly = watchOnly == 1
+		t.WatchPaused = watchPaused == 1
+		t.WatchLastRun = parseSQLiteTime(watchLastRun)
+		t.WatchNextRun = parseSQLiteTime(watchNextRun)
 		if lastScan != nil && *lastScan != "" {
 			parsed, err := time.Parse("2006-01-02T15:04:05Z", *lastScan)
 			if err == nil {
@@ -371,28 +389,53 @@ func (h *Handler) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 	var t models.Target
 	var lastScan, monitorLastRun *string
 	var tagsJSON, modulesJSON, scanHeadersJSON string
-	var monitorEnabled int
+	var monitorEnabled, catchallOverride int
+	var watchOnly, watchPaused int
+	var watchLastRun, watchNextRun *string
 
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT id, domain, COALESCE(kind,'web'), COALESCE(description,''), COALESCE(tags,'[]'),
 			COALESCE(priority,'medium'), COALESCE(notes,''), COALESCE(status,'idle'), COALESCE(scan_status,'idle'), COALESCE(enabled_modules,'[]'),
 			last_scan_at, created_at, updated_at, COALESCE(subdomain_count,0), COALESCE(alive_host_count,0), COALESCE(finding_count,0),
 			COALESCE(monitor_enabled,0), COALESCE(monitor_interval_hours,2), COALESCE(name,''), COALESCE(exclude_scope,''), monitor_last_run,
-			COALESCE(scan_user_agent,''), COALESCE(scan_headers,'{}')
+			COALESCE(scan_user_agent,''), COALESCE(scan_headers,'{}'), COALESCE(catchall_detection,-1),
+			COALESCE(watch_only,0), watch_last_run, watch_next_run, COALESCE(watch_fail_count,0),
+			COALESCE(watch_root_index,0), COALESCE(watch_paused,0)
 		FROM targets WHERE id = ?
 	`, id).Scan(&t.ID, &t.Domain, &t.Kind, &t.Description, &tagsJSON, &t.Priority,
 		&t.Notes, &t.Status, &t.ScanStatus, &modulesJSON,
 		&lastScan, &t.CreatedAt, &t.UpdatedAt,
 		&t.SubdomainCount, &t.AliveHostCount, &t.FindingCount,
-		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun, &t.ScanUserAgent, &scanHeadersJSON)
+		&monitorEnabled, &t.MonitorIntervalHours, &t.Name, &t.ExcludeScope, &monitorLastRun, &t.ScanUserAgent, &scanHeadersJSON, &catchallOverride,
+		&watchOnly, &watchLastRun, &watchNextRun, &t.WatchFailCount,
+		&t.WatchRootIndex, &watchPaused)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "target not found")
 		return
 	}
 
+	t.WatchOnly = watchOnly == 1
+	t.WatchPaused = watchPaused == 1
+	t.WatchLastRun = parseSQLiteTime(watchLastRun)
+	t.WatchNextRun = parseSQLiteTime(watchNextRun)
+
 	t.Tags = models.JSONToStringSlice(tagsJSON)
 	t.EnabledModules = models.JSONToStringSlice(modulesJSON)
 	t.MonitorEnabled = monitorEnabled == 1
+	switch catchallOverride {
+	case 1:
+		t.CatchallDetection = "on"
+		on := true
+		t.CatchallEffective = &on
+	case 0:
+		t.CatchallDetection = "off"
+		off := false
+		t.CatchallEffective = &off
+	default:
+		t.CatchallDetection = "inherit"
+		effective := h.cfg != nil && h.cfg.HTTPCatchallDetection
+		t.CatchallEffective = &effective
+	}
 	t.ScanHeaders = map[string]string{}
 	_ = json.Unmarshal([]byte(scanHeadersJSON), &t.ScanHeaders)
 	if lastScan != nil {
@@ -421,6 +464,15 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		EnabledModules *[]string          `json:"enabled_modules"`
 		ScanUserAgent  *string            `json:"scan_user_agent"`
 		ScanHeaders    *map[string]string `json:"scan_headers"`
+		// Tri-state per-target override for the HTTP catch-all pass:
+		// "inherit" (NULL column, follow the global config), "on" (1), "off" (0).
+		CatchallDetection *string `json:"catchall_detection"`
+		// WatchOnly flips the project between the DEEP tier (full pipeline) and
+		// the BREADTH tier (cheap watch rounds). The flip rules live in
+		// applyWatchCoverage (the single enforcement point).
+		WatchOnly *bool `json:"watch_only"`
+		// WatchPaused is the operator's stop switch for the watch chain.
+		WatchPaused *bool `json:"watch_paused"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -432,10 +484,11 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	// omitted fields stay untouched; the old zero-value decoding silently erased
 	// enabled_modules (and, for API clients, metadata/identity) on unrelated edits.
 	var name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON string
+	var catchallOverride int
 	err := h.db.QueryRowContext(r.Context(), `SELECT COALESCE(name,''),COALESCE(description,''),COALESCE(tags,'[]'),
 		COALESCE(priority,'medium'),COALESCE(notes,''),COALESCE(exclude_scope,''),COALESCE(enabled_modules,'[]'),
-		COALESCE(scan_user_agent,''),COALESCE(scan_headers,'{}') FROM targets WHERE id=?`, id).
-		Scan(&name, &description, &tagsJSON, &priority, &notes, &excludeScope, &modulesJSON, &scanUserAgent, &scanHeadersJSON)
+		COALESCE(scan_user_agent,''),COALESCE(scan_headers,'{}'),COALESCE(catchall_detection,-1) FROM targets WHERE id=?`, id).
+		Scan(&name, &description, &tagsJSON, &priority, &notes, &excludeScope, &modulesJSON, &scanUserAgent, &scanHeadersJSON, &catchallOverride)
 	if err == sql.ErrNoRows {
 		h.writeError(w, http.StatusNotFound, "target not found")
 		return
@@ -480,6 +533,25 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.CatchallDetection != nil {
+		// Tri-state override; "inherit" clears the column back to NULL.
+		switch strings.ToLower(strings.TrimSpace(*req.CatchallDetection)) {
+		case "inherit":
+			catchallOverride = -1
+		case "on":
+			catchallOverride = 1
+		case "off":
+			catchallOverride = 0
+		default:
+			h.writeError(w, http.StatusBadRequest, "catchall_detection must be inherit, on, or off")
+			return
+		}
+	}
+	// nil ⇒ SQL NULL (inherit), otherwise the 0/1 override.
+	var catchallDB any
+	if catchallOverride >= 0 {
+		catchallDB = catchallOverride
+	}
 
 	rawScope := ""
 	if req.Domain != nil {
@@ -507,14 +579,39 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+
+	// The coverage flip (deep ⇄ breadth) is one enforcement point, shared with
+	// the bulk endpoint. It refuses a mixed/network project with 400.
+	if req.WatchOnly != nil {
+		if err := applyWatchCoverage(r.Context(), tx, id, *req.WatchOnly); err != nil {
+			var flipErr *watchFlipError
+			if errorsAs(err, &flipErr) {
+				h.writeError(w, http.StatusBadRequest, flipErr.Message)
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, "failed to update coverage")
+			return
+		}
+	}
+	if req.WatchPaused != nil {
+		if _, err := tx.ExecContext(r.Context(), `
+			UPDATE targets SET watch_paused = ?, watch_next_run = CASE WHEN ?=1 THEN NULL ELSE watch_next_run END,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND COALESCE(watch_only,0)=1`,
+			boolInt(*req.WatchPaused), boolInt(*req.WatchPaused), id); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "failed to update watch state")
+			return
+		}
+	}
 	// Metadata, compliance identity and managed asset changes are one transaction;
 	// a uniqueness conflict can no longer leave a half-updated project.
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE targets SET
 			name = ?, description = ?, tags = ?, priority = ?, notes = ?,
-			exclude_scope = ?, enabled_modules = ?, scan_user_agent = ?, scan_headers = ?, updated_at = CURRENT_TIMESTAMP
+			exclude_scope = ?, enabled_modules = ?, scan_user_agent = ?, scan_headers = ?,
+			catchall_detection = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON, id)
+	`, name, description, tagsJSON, priority, notes, excludeScope, modulesJSON, scanUserAgent, scanHeadersJSON, catchallDB, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to update target")
 		return
@@ -677,6 +774,19 @@ func (h *Handler) handleUpdateMonitor(w http.ResponseWriter, r *http.Request) {
 	enabled := 0
 	if req.Enabled {
 		enabled = 1
+	}
+
+	// A watch-only project is monitored by its watch rounds. runDueMonitors
+	// excludes watch_only=1, so no deep monitor task starts. Keep the project
+	// flag ON and refuse to turn it off here. The UI also renders it read-only.
+	var watchOnly int
+	if err := h.db.QueryRow(`SELECT COALESCE(watch_only,0) FROM targets WHERE id=?`, id).Scan(&watchOnly); err != nil {
+		h.writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if watchOnly == 1 && !req.Enabled {
+		h.writeError(w, http.StatusBadRequest, "this project runs watch rounds; monitoring stays on. Switch it to deep coverage first to disable it")
+		return
 	}
 
 	res, err := h.db.Exec(
@@ -1561,8 +1671,8 @@ func (h *Handler) handleTargetStats(w http.ResponseWriter, r *http.Request) {
 		query string
 		args  []any
 	}{
-		{&stats.Subdomains, "SELECT COUNT(*) FROM subdomains WHERE target_id = ?", []any{id}},
-		{&stats.AliveHosts, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1", []any{id}},
+		{&stats.Subdomains, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", []any{id}},
+		{&stats.AliveHosts, "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1 AND COALESCE(catchall,0) = 0", []any{id}},
 		{&stats.HTTPServices, "SELECT COUNT(*) FROM http_services WHERE target_id = ?", []any{id}},
 		{&stats.JSFiles, "SELECT COUNT(*) FROM js_files WHERE target_id = ?", []any{id}},
 		{&stats.JSFindings, "SELECT COUNT(*) FROM js_findings WHERE target_id = ?", []any{id}},
@@ -1974,7 +2084,7 @@ func (h *Handler) mdReconSections(r *http.Request, b *strings.Builder, id string
 		}
 	}
 
-	rowsList("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? ORDER BY subdomain LIMIT 5000`, 3)
+	rowsList("Subdomains", `SELECT subdomain, CASE is_alive WHEN 1 THEN 'alive' ELSE '' END, COALESCE(ip,'') FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0 ORDER BY subdomain LIMIT 5000`, 3)
 	rowsList("Live HTTP Hosts", `SELECT url, status_code, COALESCE(title,'') FROM http_services WHERE target_id=? AND COALESCE(source,'probe')='probe' ORDER BY url LIMIT 3000`, 3)
 	rowsList("Reflected Parameters", `SELECT url, parameter FROM parameters WHERE target_id=? AND is_reflected=1 ORDER BY url LIMIT 2000`, 2)
 	rowsList("Open Redirects", `SELECT url, redirect_to FROM open_redirect_findings WHERE target_id=? ORDER BY url`, 2)
@@ -2014,7 +2124,7 @@ func (h *Handler) handleExportTarget(w http.ResponseWriter, r *http.Request) {
 		writer := csv.NewWriter(w)
 		writer.Write([]string{"type", "url", "details"})
 
-		rows, _ := h.db.QueryContext(r.Context(), "SELECT url, status_code FROM subdomains WHERE target_id = ?", id)
+		rows, _ := h.db.QueryContext(r.Context(), "SELECT url, status_code FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", id)
 		if rows != nil {
 			for rows.Next() {
 				var url string
@@ -2029,7 +2139,7 @@ func (h *Handler) handleExportTarget(w http.ResponseWriter, r *http.Request) {
 	default:
 		export := map[string]any{"target": domain}
 
-		rows, _ := h.db.QueryContext(r.Context(), "SELECT subdomain, ip FROM subdomains WHERE target_id = ?", id)
+		rows, _ := h.db.QueryContext(r.Context(), "SELECT subdomain, ip FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0", id)
 		if rows != nil {
 			var subs []map[string]string
 			for rows.Next() {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -54,8 +55,8 @@ func (s *SubdomainScanner) toolResolverList() []string {
 // deepDNSEnum runs the heavy DNS discovery chain (alterx permutations +
 // puredns/massdns brute) on top of the built-in active enum. It only adds
 // names that actually resolve and aren't wildcard answers.
-func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
-	if len(wildcardIPs) > 0 {
+func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) {
+	if wildcardProfile.apexWildcard() {
 		return // wildcard domains: brute is meaningless, skip
 	}
 
@@ -155,7 +156,7 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 			return
 		}
 		for _, n := range resolved {
-			ip := firstNonWildcardIP(resolveHostIPs(ctx, n, s.resolver), wildcardIPs)
+			ip := wildcardProfile.firstNonWildcardIP(n, resolveHostIPs(ctx, n, s.resolver))
 			if ip == "" {
 				continue // wildcard-only or unresolved on recheck — not an asset
 			}
@@ -168,7 +169,7 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		return
 	}
 
-	s.resolveCandidates(ctx, targetID, names, found, mu, wildcardIPs, logFn)
+	s.resolveCandidates(ctx, targetID, names, found, mu, wildcardProfile, logFn)
 }
 
 // dnsxResolve performs only DNS resolution; every returned name is subsequently
@@ -214,6 +215,122 @@ func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, nam
 			}
 		}, "dnsx", args...)
 	return out
+}
+
+// dnsxResolveIPs batch-resolves the A/AAAA record sets of a large candidate
+// list in a single dnsx run and returns name -> every answer IP as canonical
+// net.ParseIP strings, so comparisons against Go-resolver wildcard-probe IPs
+// stay string-identical. A nil map means dnsx was unavailable or failed while
+// the context was still live — the caller must run the legacy per-name path
+// and must never treat nil as "everything unresolved".
+func (s *SubdomainScanner) dnsxResolveIPs(ctx context.Context, targetID string, names []string) map[string][]string {
+	if s.exec == nil || len(names) == 0 || !s.exec.IsToolAvailable("dnsx") {
+		return nil
+	}
+	// Concurrency floor, mirroring dnsxResolve: a 20k-name admission pass at
+	// the generic low -t crawls; dnsx handles a high thread count comfortably.
+	workers := s.cfg.Workers.SubdomainEnumeration
+	if workers < 150 {
+		workers = 150
+	}
+	if workers > 400 {
+		workers = 400
+	}
+	// -nc keeps dnsx from colouring the -resp tokens. dnsx 1.3.1 wraps the
+	// record type and each value in ANSI escapes; without this, net.ParseIP
+	// sees "\x1b[32m1.2.3.4\x1b[0m" and rejects every address. stripANSI in
+	// parseDNSXResponseLine is the defensive backstop for older installs.
+	args := []string{"-silent", "-nc", "-a", "-aaaa", "-resp", "-retry", "2", "-t", fmt.Sprint(workers)}
+	// Same resolver file contract as every other dnsx pass: the operator list
+	// (or the public default) — the SAME list the in-process s.resolver
+	// round-robins, so answers and wildcard probes share one resolver source.
+	if resolverFile, err := writeTempLines("recon-dnsx-aresp-resolvers-", s.toolResolverList()); err == nil {
+		defer os.Remove(resolverFile)
+		args = append(args, "-r", resolverFile)
+	}
+	out := map[string][]string{}
+	err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
+		func(line string) {
+			name, toks := parseDNSXResponseLine(line)
+			if name == "" {
+				return
+			}
+			ips := make([]string, 0, len(toks))
+			for _, tok := range toks {
+				if ip := net.ParseIP(tok); ip != nil {
+					ips = append(ips, ip.String())
+				}
+			}
+			// dnsx can emit one -resp line per record type for the same name;
+			// merge so an A-only or AAAA-only second line is never lost.
+			if len(ips) > 0 {
+				out[name] = append(out[name], ips...)
+			}
+		}, "dnsx", args...)
+	if err != nil && ctx.Err() == nil {
+		return nil
+	}
+	return out
+}
+
+// isDNSXRecordMarker reports whether a parsed -resp token is the record-type
+// marker that dnsx 1.3.1 emits as the first bracket group (host [a] [1.2.3.4],
+// host [cname] [target]). The real value follows it in the next group.
+func isDNSXRecordMarker(tok string) bool {
+	switch tok {
+	case "a", "aaaa", "cname", "mx", "ns", "txt", "srv", "ptr", "caa":
+		return true
+	}
+	return false
+}
+
+// stripANSI removes SGR escape sequences from tool output. Some dnsx builds
+// colourise `-resp` tokens even when -nc is passed, so the parser must also
+// work on lines like "host [\x1b[35mA\x1b[0m] [\x1b[32m1.2.3.4\x1b[0m]".
+func stripANSI(line string) string {
+	for strings.Contains(line, "\x1b[") {
+		start := strings.Index(line, "\x1b[")
+		end := strings.IndexAny(line[start:], "ABCDEFGHJKSTfmnsulh")
+		if end < 0 {
+			break
+		}
+		line = line[:start] + line[start+end+1:]
+	}
+	return line
+}
+
+// parseDNSXResponseLine splits one dnsx `-resp` output line into the hostname
+// and the bracket-group tokens — separators and trailing dots stripped, lower
+// cased:
+//
+//	sub.example.com [93.184.216.34, 2606:2800:220:1:248:1893:25c8:1946]
+//	www.example.com [example.edge.cdn.net]
+//
+// Tokens come back as raw text; IP-vs-CNAME validation is the caller's
+// concern. Lines without a usable bracket group parse as ("", nil).
+func parseDNSXResponseLine(line string) (string, []string) {
+	line = stripANSI(strings.TrimSpace(line))
+	openBr := strings.Index(line, "[")
+	closeBr := strings.LastIndex(line, "]")
+	if openBr <= 0 || closeBr <= openBr {
+		return "", nil
+	}
+	fields := strings.Fields(line[:openBr])
+	if len(fields) == 0 {
+		return "", nil
+	}
+	name := strings.TrimSuffix(strings.ToLower(fields[0]), ".")
+	if name == "" {
+		return "", nil
+	}
+	var toks []string
+	for _, tok := range strings.FieldsFunc(line[openBr+1:closeBr], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		tok = strings.TrimSuffix(strings.ToLower(strings.Trim(tok, "[] \t")), ".")
+		if tok != "" {
+			toks = append(toks, tok)
+		}
+	}
+	return name, toks
 }
 
 // purednsBruteforce runs `puredns bruteforce <wordlist> <domain>` with a
@@ -270,7 +387,7 @@ func (s *SubdomainScanner) purednsResolve(ctx context.Context, targetID string, 
 }
 
 // resolveCandidates is the built-in fallback resolver pool for a name list.
-func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID string, names []string, found map[string]bool, mu *sync.Mutex, wildcardIPs map[string]bool, logFn LogFunc) {
+func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID string, names []string, found map[string]bool, mu *sync.Mutex, wildcardProfile *wildcardProfile, logFn LogFunc) {
 	workers := s.cfg.Workers.SubdomainEnumeration
 	if workers <= 0 {
 		workers = 20
@@ -287,7 +404,7 @@ func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID strin
 				if ctx.Err() != nil {
 					return
 				}
-				ip := firstNonWildcardIP(resolveHostIPs(ctx, name, s.resolver), wildcardIPs)
+				ip := wildcardProfile.firstNonWildcardIP(name, resolveHostIPs(ctx, name, s.resolver))
 				if ip == "" {
 					continue
 				}

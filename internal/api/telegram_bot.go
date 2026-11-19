@@ -37,8 +37,15 @@ type TelegramChat struct {
 	NotifyScanFinished  bool   `json:"notify_scan_finished"`
 	NotifyFindings      bool   `json:"notify_findings"`
 	NotifyMonitoring    bool   `json:"notify_monitoring"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	// Watch-tier alerts. The breadth/watch tier is a separate workload with its
+	// own volume: a watch round runs per project every 30 minutes, so its start
+	// and finish messages are OFF by default. The scope-landed alert is ON — a
+	// newly eligible host is the one event the operator must not miss.
+	NotifyWatchScanStarted  bool   `json:"notify_watch_scan_started"`
+	NotifyWatchScanFinished bool   `json:"notify_watch_scan_finished"`
+	NotifyScopeLanded       bool   `json:"notify_scope_landed"`
+	CreatedAt               string `json:"created_at"`
+	UpdatedAt               string `json:"updated_at"`
 }
 
 type TelegramState struct {
@@ -196,6 +203,7 @@ func (b *TelegramBot) State(ctx context.Context) (TelegramState, error) {
 
 	rows, err := b.h.db.QueryContext(ctx, `SELECT id,chat_id,label,role,enabled,
 		notify_scan_started,notify_phase_finished,notify_scan_finished,notify_findings,notify_monitoring,
+		notify_watch_scan_started,notify_watch_scan_finished,notify_scope_landed,
 		created_at,updated_at FROM telegram_chats ORDER BY created_at`)
 	if err != nil {
 		return state, err
@@ -203,12 +211,14 @@ func (b *TelegramBot) State(ctx context.Context) (TelegramState, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var c TelegramChat
-		var enabled, a, p, f, findings, monitoring int
-		if err := rows.Scan(&c.ID, &c.ChatID, &c.Label, &c.Role, &enabled, &a, &p, &f, &findings, &monitoring, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var enabled, a, p, f, findings, monitoring, ws, wf, sl int
+		if err := rows.Scan(&c.ID, &c.ChatID, &c.Label, &c.Role, &enabled, &a, &p, &f, &findings, &monitoring,
+			&ws, &wf, &sl, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return state, err
 		}
 		c.Enabled, c.NotifyScanStarted, c.NotifyPhaseFinished = enabled == 1, a == 1, p == 1
 		c.NotifyScanFinished, c.NotifyFindings, c.NotifyMonitoring = f == 1, findings == 1, monitoring == 1
+		c.NotifyWatchScanStarted, c.NotifyWatchScanFinished, c.NotifyScopeLanded = ws == 1, wf == 1, sl == 1
 		state.Chats = append(state.Chats, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -310,12 +320,19 @@ func (b *TelegramBot) AddChat(ctx context.Context, c TelegramChat) (TelegramChat
 		return c, fmt.Errorf("role must be viewer, operator or admin")
 	}
 	c.ID = uuid.NewString()
-	// New chats receive all high-signal event types by default.
+	// New chats receive all high-signal event types by default. The watch tier
+	// stays quiet: a watch round runs per project every 30 minutes, so its
+	// start/finish messages would flood the channel. The scope-landed alert is
+	// ON — a newly eligible host is the one event the operator must not miss.
 	c.Enabled, c.NotifyScanStarted, c.NotifyPhaseFinished = true, true, true
 	c.NotifyScanFinished, c.NotifyFindings, c.NotifyMonitoring = true, true, true
+	c.NotifyWatchScanStarted, c.NotifyWatchScanFinished = false, false
+	c.NotifyScopeLanded = true
 	_, err := b.h.db.ExecContext(ctx, `INSERT INTO telegram_chats(id,chat_id,label,role,enabled,
-		notify_scan_started,notify_phase_finished,notify_scan_finished,notify_findings,notify_monitoring)
-		VALUES(?,?,?,?,1,1,1,1,1,1)`, c.ID, c.ChatID, c.Label, c.Role)
+		notify_scan_started,notify_phase_finished,notify_scan_finished,notify_findings,notify_monitoring,
+		notify_watch_scan_started,notify_watch_scan_finished,notify_scope_landed)
+		VALUES(?,?,?,?,1,1,1,1,1,1,?,?,?)`, c.ID, c.ChatID, c.Label, c.Role,
+		boolInt(c.NotifyWatchScanStarted), boolInt(c.NotifyWatchScanFinished), boolInt(c.NotifyScopeLanded))
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return c, fmt.Errorf("that chat id is already configured")
@@ -344,9 +361,12 @@ func (b *TelegramBot) UpdateChat(ctx context.Context, id string, c TelegramChat)
 		return fmt.Errorf("role must be viewer, operator or admin")
 	}
 	res, err := b.h.db.ExecContext(ctx, `UPDATE telegram_chats SET label=?,role=?,enabled=?,
-		notify_scan_started=?,notify_phase_finished=?,notify_scan_finished=?,notify_findings=?,notify_monitoring=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		notify_scan_started=?,notify_phase_finished=?,notify_scan_finished=?,notify_findings=?,notify_monitoring=?,
+		notify_watch_scan_started=?,notify_watch_scan_finished=?,notify_scope_landed=?,
+		updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		c.Label, c.Role, boolInt(c.Enabled), boolInt(c.NotifyScanStarted), boolInt(c.NotifyPhaseFinished),
-		boolInt(c.NotifyScanFinished), boolInt(c.NotifyFindings), boolInt(c.NotifyMonitoring), id)
+		boolInt(c.NotifyScanFinished), boolInt(c.NotifyFindings), boolInt(c.NotifyMonitoring),
+		boolInt(c.NotifyWatchScanStarted), boolInt(c.NotifyWatchScanFinished), boolInt(c.NotifyScopeLanded), id)
 	if err != nil {
 		return err
 	}
@@ -610,6 +630,10 @@ func (b *TelegramBot) enqueue(category, eventKey, text string, keyboard *tgInlin
 	preference := map[string]string{
 		"scan_started": "notify_scan_started", "phase_finished": "notify_phase_finished",
 		"scan_finished": "notify_scan_finished", "finding": "notify_findings", "monitoring": "notify_monitoring",
+		// Watch-tier categories. They map to their own per-chat switches, so the
+		// deep alerts and the breadth alerts never mix in one channel.
+		"watch_scan_started": "notify_watch_scan_started", "watch_scan_finished": "notify_watch_scan_finished",
+		"scope_landed": "notify_scope_landed",
 	}[category]
 	if preference == "" {
 		return
@@ -686,6 +710,37 @@ func (b *TelegramBot) NotifyMonitorChange(targetID, domain, changeType, title, r
 		text += "\nNew: " + newVal
 	}
 	b.enqueue("monitoring", "monitor:"+targetID+":"+changeType+":"+strconv.FormatInt(time.Now().UnixNano(), 10), text, b.scanKeyboard(targetID))
+}
+
+// NotifyWatchScanStarted reports the start of a breadth/watch round. It is a
+// separate template from the deep scan alert: the operator reads the two tiers
+// as different workloads, and a watch round runs on its own 30-minute rhythm.
+func (b *TelegramBot) NotifyWatchScanStarted(taskID, targetID, domain string) {
+	text := "Watch round started\nTarget: " + displayDomain(domain) + "\nTask: " + shortBotID(taskID)
+	b.enqueue("watch_scan_started", "watch:start:"+taskID, text, b.scanKeyboard(targetID))
+}
+
+// NotifyWatchScanFinished reports the end of a breadth/watch round with the
+// host counts it produced. It stays off by default per chat: with many watch
+// projects this message repeats every round.
+func (b *TelegramBot) NotifyWatchScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int, skippedSummary string) {
+	text := fmt.Sprintf("Watch round %s\nTarget: %s\nDuration: %s\nHosts seen: %d · Alive: %d",
+		status, displayDomain(domain), shortDuration(duration), stats["subdomains"], stats["alive"])
+	if skippedSummary != "" {
+		text += "\n" + skippedSummary
+	}
+	b.enqueue("watch_scan_finished", "watch:finish:"+taskID+":"+status, text, b.scanKeyboard(targetID))
+}
+
+// NotifyScopeLanded delivers the grouped scope-landed alert. The scheduler
+// owns the event key, so the outbox deduplicates the window: one message per
+// tick window across every watch project, never one message per host.
+func (b *TelegramBot) NotifyScopeLanded(eventKey, summary string, hosts []string) {
+	text := "New eligible scope\n" + summary
+	if len(hosts) > 0 {
+		text += "\n" + strings.Join(hosts, "\n")
+	}
+	b.enqueue("scope_landed", eventKey, text, nil)
 }
 
 // Some first-class finding stores (verified Nuclei, backup exposure and open

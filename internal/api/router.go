@@ -133,6 +133,9 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/targets/{id}", h.requireAuth(h.handleUpdateTarget)).Methods("PUT")
 	api.HandleFunc("/targets/{id}", h.requireAuth(h.handleDeleteTarget)).Methods("DELETE")
 	api.HandleFunc("/targets/bulk-delete", h.requireAuth(h.handleBulkDeleteTarget)).Methods("POST")
+	api.HandleFunc("/targets/bulk/coverage", h.requireAuth(h.handleBulkCoverage)).Methods("POST")
+	api.HandleFunc("/targets/{id}/watch-scope-events", h.requireAuth(h.handleWatchScopeEvents)).Methods("GET")
+	api.HandleFunc("/targets/{id}/watch-scope/promote", h.requireAuth(h.handlePromoteWatchScope)).Methods("POST")
 	api.HandleFunc("/targets/import", h.requireAuth(h.handleImportTargets)).Methods("POST")
 	api.HandleFunc("/targets/{id}/export", h.requireAuth(h.handleExportTarget)).Methods("GET")
 	api.HandleFunc("/targets/{id}/artifacts.zip", h.requireAuth(h.handleTargetArtifacts)).Methods("GET")
@@ -204,6 +207,13 @@ func (h *Handler) Router() http.Handler {
 	// Global findings aggregation (top-level Findings page) across all the caller's targets.
 	api.HandleFunc("/findings", h.requireAuth(h.handleListAllFindings)).Methods("GET")
 	api.HandleFunc("/targets/{id}/monitoring-changes", h.requireAuth(h.handleListMonitoringChanges)).Methods("GET")
+	api.HandleFunc("/changes", h.requireAuth(h.handleListChanges)).Methods("GET")
+	api.HandleFunc("/changes/seen", h.requireAuth(h.handleSetChangesSeen)).Methods("POST")
+	api.HandleFunc("/changes/seen-all", h.requireAuth(h.handleMarkAllChangesSeen)).Methods("POST")
+	api.HandleFunc("/targets/{id}/changes", h.requireAuth(h.handleListTargetChanges)).Methods("GET")
+	api.HandleFunc("/watch/rounds", h.requireAuth(h.handleListWatchRounds)).Methods("GET")
+	api.HandleFunc("/targets/{id}/css-files/body", h.requireAuth(h.handleGetCSSFileBody)).Methods("GET")
+	api.HandleFunc("/targets/{id}/js-files/body", h.requireAuth(h.handleGetJSFileBody)).Methods("GET")
 
 	// Tasks
 	api.HandleFunc("/tasks", h.requireAuth(h.handleListTasks)).Methods("GET")
@@ -249,6 +259,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/bounty/programs", h.requireAuth(h.handleListBountyPrograms)).Methods("GET")
 	api.HandleFunc("/bounty/programs/{programID}", h.requireAuth(h.handleGetBountyProgram)).Methods("GET")
 	api.HandleFunc("/bounty/programs/{programID}/projects", h.requireAuth(h.handleCreateProjectFromProgram)).Methods("POST")
+	api.HandleFunc("/bounty/projects/bulk", h.requireAuth(h.handleBulkCreateProjectsFromPrograms)).Methods("POST")
 	api.HandleFunc("/bounty/status", h.requireAuth(h.handleBountySyncStatus)).Methods("GET")
 	api.HandleFunc("/bounty/sync", h.requireAdmin(h.handleSyncBountyCatalog)).Methods("POST")
 	api.HandleFunc("/bounty/favorites", h.requireAuth(h.handleListBountyFavorites)).Methods("GET")

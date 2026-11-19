@@ -53,9 +53,10 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	logFn("info", "http_probe", "Loading subdomains for HTTP probing...")
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT subdomain FROM subdomains 
+		SELECT subdomain FROM subdomains
 		WHERE target_id = ?
 		  AND (COALESCE(ip,'') != '' OR COALESCE(source,'dns') IN ('seed','vhost'))
+		  AND COALESCE(catchall,0) = 0
 		ORDER BY subdomain
 	`, targetID)
 	if err != nil {
@@ -114,14 +115,38 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	tmpFile, err := os.CreateTemp("", "httpx-hosts-*.txt")
 	if err != nil {
 		logFn("warn", "http_probe", "Failed to create temp file, falling back to basic probe")
+		if watchModeEnabled(ctx) {
+			// The native prober opens its own connections and would run outside the
+			// watch rate limit, so a watch round stops here instead.
+			return fmt.Errorf("create httpx host list: %w", err)
+		}
 		return s.basicHTTPProbe(ctx, targetID, hosts, logFn)
 	}
 	defer os.Remove(tmpFile.Name())
 	if _, err := tmpFile.WriteString(strings.Join(hosts, "\n")); err != nil {
 		tmpFile.Close()
+		if watchModeEnabled(ctx) {
+			return fmt.Errorf("write httpx host list: %w", err)
+		}
 		return s.basicHTTPProbe(ctx, targetID, hosts, logFn)
 	}
 	tmpFile.Close()
+
+	// Watch tier settings: its own thread count and rate limit, so a watch round
+	// never competes with a deep scan for the box or for the target.
+	probeThreads := s.cfg.Workers.HTTPProbing
+	probeRate := s.cfg.Limits.HTTPRateLimit
+	watchMode := watchModeEnabled(ctx)
+	if watchMode {
+		probeThreads = s.cfg.Limits.WatchHTTPThreads
+		probeRate = s.cfg.Limits.WatchHTTPRateLimit
+		if probeThreads <= 0 {
+			probeThreads = 10
+		}
+		if probeRate < 0 {
+			probeRate = 0
+		}
+	}
 
 	args := []string{
 		"-l", tmpFile.Name(),
@@ -132,20 +157,33 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		"-tech-detect",
 		"-status-code",
 		"-content-length",
-		"-follow-host-redirects", // never forward program headers to another host
 		"-timeout", "10",
-		"-threads", fmt.Sprintf("%d", s.cfg.Workers.HTTPProbing),
+		"-threads", fmt.Sprintf("%d", probeThreads),
 		"-retries", "1",
+	}
+	// Redirect following: the deep tier follows them (never forward program
+	// headers to another host). The watch tier does NOT follow them: it only
+	// wants to know whether the host is alive, and a redirect is a live host.
+	// Dropping the follow saves one request per host. The recorded status code
+	// becomes the 3xx instead of the final page, which changes no counter:
+	// updateSubdomainAlive marks a host alive for ANY probe result.
+	if !watchMode {
+		args = append(args, "-follow-host-redirects")
 	}
 	// Rate-limit to avoid WAF bans (which cause false negatives) and respect
 	// program policy.
-	if s.cfg.Limits.HTTPRateLimit > 0 {
-		args = append(args, "-rate-limit", fmt.Sprintf("%d", s.cfg.Limits.HTTPRateLimit))
+	if probeRate > 0 {
+		args = append(args, "-rate-limit", fmt.Sprintf("%d", probeRate))
 	}
 	args = append(args, ToolRequestIdentityArgs(ctx, "httpx")...)
 
 	var mu sync.Mutex
 	probed := 0
+	// Watch tier: the hosts that came back from the HTTP phase. Only these are
+	// considered for scope landing — a host that was never probed is not
+	// verified and must not become approved scope.
+	var probedHosts []string
+	seenHost := map[string]bool{}
 
 	if s.exec.IsToolAvailable("httpx") {
 		err = s.exec.RunWithCallback(ctx, targetID, func(line string) {
@@ -164,6 +202,13 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 
 			mu.Lock()
 			probed++
+			if watchMode {
+				host := out.subdomain()
+				if host != "" && !seenHost[host] {
+					seenHost[host] = true
+					probedHosts = append(probedHosts, host)
+				}
+			}
 			if probed%20 == 0 {
 				logFn("info", "http_probe", fmt.Sprintf("Probed %d hosts...", probed))
 			}
@@ -183,7 +228,12 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// exit status 2), or simply stored NOTHING for a non-empty host list, fall
 	// back to the native Go prober so a single tool hiccup can't silently collapse
 	// the entire scan to zero results.
-	if ctx.Err() == nil && probed == 0 && len(hosts) > 0 {
+	//
+	// The watch tier does NOT use that fallback: the native prober opens its own
+	// connections without the watch rate limit, so it would break the operator's
+	// rate budget. A watch round that got no HTTP result simply lands nothing
+	// (decision D53) and says so.
+	if ctx.Err() == nil && probed == 0 && len(hosts) > 0 && !watchMode {
 		if s.exec.IsToolAvailable("httpx") {
 			logFn("warn", "http_probe", "httpx returned no live services — falling back to the native HTTP prober so the scan can proceed.")
 		}
@@ -196,12 +246,54 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			targetID).Scan(&recovered)
 		logFn("info", "http_probe", fmt.Sprintf("Native prober recovered %d live HTTP service(s).", recovered))
 	}
+	if watchMode && probed == 0 && len(hosts) > 0 {
+		logFn("warn", "http_probe", "httpx produced no live services — nothing is landed from this round (the native prober is skipped in watch mode).")
+	}
+
+	// Scope landing (watch tier only): the stage runs AFTER the HTTP phase, so
+	// only hosts that came back from the probe are considered. A round with no
+	// HTTP result lands nothing.
+	if watchMode {
+		if probed == 0 {
+			logFn("info", "watch_scope", "HTTP phase produced no result: nothing landed this round")
+		} else {
+			landed := LandWatchScopeHosts(ctx, s.db, targetID, probedHosts, logFn)
+			if len(landed) > 0 {
+				// One bell row per watch round that landed something. It is written
+				// WITHOUT the notification_created broadcast, so it never reaches
+				// the Telegram "Monitor change" template; the scheduler sends the
+				// grouped scope-landed message instead.
+				cap := 20
+				if s.cfg != nil && s.cfg.WatchNotifyHostCap > 0 {
+					cap = s.cfg.WatchNotifyHostCap
+				}
+				names := landed
+				extra := 0
+				if len(names) > cap {
+					extra = len(names) - cap
+					names = names[:cap]
+				}
+				body := fmt.Sprintf("%d new eligible host(s): %s", len(landed), strings.Join(names, ", "))
+				if extra > 0 {
+					body += fmt.Sprintf(" (+%d more)", extra)
+				}
+				notify(s.db, targetID, "scope_landed", "New eligible scope", body, "/targets/"+targetID, "medium")
+			}
+		}
+	}
 
 	// Fingerprint the WAF/edge AND the CMS on each live host: the WAF name shows in
 	// the HTTP tab, and a WordPress/Joomla/Drupal verdict lets the injection modules
 	// skip a stock-CMS host (see loadCMSSkipHosts) instead of wasting time / raising
 	// false positives on it.
-	s.fingerprintHosts(ctx, targetID, logFn)
+	//
+	// The watch tier skips it: the fingerprinters open their own connections, so
+	// they would run outside the watch rate limit.
+	if watchMode {
+		logFn("info", "http_probe", "WAF/CMS fingerprinting skipped — watch rounds stay inside their rate limit.")
+	} else {
+		s.fingerprintHosts(ctx, targetID, logFn)
+	}
 
 	// A host whose probe landed on a CDN/bot-challenge page instead of the
 	// real site poisons every downstream module that reads http_services
@@ -209,12 +301,31 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// scanners…) with a challenge page's title/content instead of the
 	// target's own. Retry those specific hosts through a headless browser
 	// before anything else consumes this data.
-	s.rescueChallengedHosts(ctx, targetID, logFn)
+	// Deep scans only: a watch round must not start Chromium or open browser
+	// connections outside the watch rate limit.
+	if !watchMode {
+		s.rescueChallengedHosts(ctx, targetID, logFn)
+	}
+
+	// Opt-in HTTP catch-all pass (global config http_catchall_detection, default
+	// OFF, overridable per target): groups the 2xx fingerprints gathered above and
+	// marks wildcard catch-all fleets (redirect-to-apex / homepage clones) so they
+	// stop polluting the Hosts tab, reports and web modules. Reads stored data
+	// only — no requests.
+	if !watchMode && s.catchallEnabledForTarget(ctx, targetID) {
+		if err := s.runCatchallPass(ctx, targetID, logFn); err != nil && ctx.Err() == nil {
+			logFn("warn", "http_probe", fmt.Sprintf("HTTP catch-all pass failed: %v", err))
+		}
+	}
 
 	// Authenticated-session preflight: validate configured identities NOW, at the
 	// front of the scan, so an expired login is surfaced before every downstream
 	// injection/authz module wastes itself against the logged-out app.
-	PreflightSessions(ctx, s, targetID, logFn)
+	//
+	// The watch tier skips it: a watch round must not log into anything.
+	if !watchMode {
+		PreflightSessions(ctx, s, targetID, logFn)
+	}
 
 	logFn("info", "http_probe", "HTTP probing complete")
 	return nil

@@ -88,6 +88,34 @@ type ExecResult struct {
 	Duration time.Duration
 }
 
+// toolEnv returns the EXTRA environment variables a tool needs. The value is
+// read at RUN time from the live config, so a key saved in the UI works on the
+// next run without restarting the service.
+//
+// The projectdiscovery tools read their shared account key from PDCP_API_KEY:
+// chaos needs it, subfinder accepts it for the paid provider sources.
+func (e *Executor) toolEnv(name string) []string {
+	if e.cfg == nil {
+		return nil
+	}
+	key := strings.TrimSpace(e.cfg.ChaosAPIKey)
+	if key == "" {
+		return nil
+	}
+	switch name {
+	case "chaos", "subfinder":
+		return []string{"PDCP_API_KEY=" + key}
+	}
+	return nil
+}
+
+// cmdEnv builds the environment for a tool process: the parent environment,
+// HOME, the extended PATH and any tool-specific variables.
+func (e *Executor) cmdEnv(name string) []string {
+	env := append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
+	return append(env, e.toolEnv(name)...)
+}
+
 type LineCallback func(line string)
 
 // validateToolName keeps callers on Reconner's curated executable search path.
@@ -122,7 +150,7 @@ func (e *Executor) RunWithCallback(ctx context.Context, taskID string, callback 
 
 	toolPath := e.findTool(name)
 	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
+	cmd.Env = e.cmdEnv(name)
 	hardenProc(cmd)
 
 	stdout, err := cmd.StdoutPipe()
@@ -246,7 +274,7 @@ func (e *Executor) Run(ctx context.Context, name string, args ...string) (*ExecR
 	start := time.Now()
 	toolPath := e.findTool(name)
 	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
+	cmd.Env = e.cmdEnv(name)
 	hardenProc(cmd)
 
 	var stdout, stderr bytes.Buffer
@@ -359,7 +387,7 @@ func (e *Executor) RunWithInputCallback(ctx context.Context, input io.Reader, ta
 
 	toolPath := e.findTool(name)
 	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
+	cmd.Env = e.cmdEnv(name)
 	cmd.Stdin = input
 	hardenProc(cmd)
 
@@ -425,7 +453,7 @@ func (e *Executor) RunWithInput(ctx context.Context, input io.Reader, name strin
 	start := time.Now()
 	toolPath := e.findTool(name)
 	cmd := exec.CommandContext(ctx, toolPath, args...) // #nosec G204,G702 -- toolPath derives from a validated bare executable name and fixed search directories
-	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "PATH="+e.extendedPath())
+	cmd.Env = e.cmdEnv(name)
 	cmd.Stdin = input
 	hardenProc(cmd)
 

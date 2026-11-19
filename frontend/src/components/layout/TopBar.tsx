@@ -5,21 +5,14 @@ import { useUIStore } from '../../store/ui'
 import { notifications as notifApi, targets as targetsApi, type Notification } from '../../lib/api'
 import type { Target } from '../../types'
 import { cn, timeAgo, useDebouncedValue } from '../../lib/utils'
+import { sevDot, openNotification, onNotificationsChanged, notifyNotificationsChanged } from '../../lib/notifications'
 import { useUpdateCenter } from './UpdateCenter'
-
-const sevDot: Record<string, string> = {
-  critical: 'bg-severity-critical',
-  high: 'bg-severity-high',
-  medium: 'bg-severity-medium',
-  low: 'bg-severity-low',
-  info: 'bg-accent',
-}
 
 // Static labels for top-level route segments; `/targets/:id` resolves to the
 // target name via a tiny in-memory cache so breadcrumbs read like
 // "Targets › example.com" instead of a raw UUID.
 const SEGMENT_LABEL: Record<string, string> = {
-  targets: 'Targets', analyze: 'Guided Analyze', findings: 'Findings', tasks: 'Scan activity', system: 'System & updates',
+  targets: 'Targets', analyze: 'Guided Analyze', findings: 'Findings', changes: 'Changes', tasks: 'Scan activity', system: 'System & updates',
 }
 
 function useBreadcrumbs(): { label: string; to: string }[] {
@@ -128,6 +121,10 @@ export const TopBar = () => {
   const [items, setItems] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
   const [open, setOpen] = useState(false)
+  // Bell bucket: all | deep | watch | findings. The server maps the bucket to
+  // the stored notification types, so a bucket is never empty because the
+  // stored type is more granular than the bucket.
+  const [bucket, setBucket] = useState<'all' | 'deep' | 'watch' | 'findings'>('all')
   const bellRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => { const i = setInterval(() => setConnected(ws.connected), 2000); return () => clearInterval(i) }, [])
@@ -136,7 +133,7 @@ export const TopBar = () => {
     let alive = true
     const load = async () => {
       try {
-        const r = await notifApi.list()
+        const r = await notifApi.list(bucket)
         if (alive) { setItems(r.notifications || []); setUnread(r.unread || 0) }
       } catch { /* ignore */ }
     }
@@ -145,13 +142,17 @@ export const TopBar = () => {
     // Monitoring persists its notification before emitting this event. Task
     // completion is a fallback for older/new-subdomain producers that only
     // persist a bell row. This removes the previous one-minute blind spot.
+    // scope_landed is its own event: a watch round writes the bell row without
+    // the notification_created broadcast, so the bell needs this listener.
     const offs = [
       ws.on('notification_created', load),
       ws.on('task_finished', load),
+      ws.on('scope_landed', load),
       ws.on('bounty_catalog_sync', load),
+      onNotificationsChanged(load),
     ]
     return () => { alive = false; clearInterval(t); offs.forEach(off => off()) }
-  }, [])
+  }, [bucket])
 
   // Close the dropdown on an outside click.
   useEffect(() => {
@@ -163,7 +164,7 @@ export const TopBar = () => {
   }, [open])
 
   const markAllRead = async () => {
-    try { await notifApi.markRead() } catch { /* ignore */ }
+    try { await notifApi.markRead(); notifyNotificationsChanged() } catch { /* ignore */ }
     setItems(current => current.map(n => ({ ...n, is_read: true })))
     setUnread(0)
   }
@@ -173,16 +174,13 @@ export const TopBar = () => {
     if (!n.is_read) {
       setItems(current => current.map(item => item.id === n.id ? { ...item, is_read: true } : item))
       setUnread(current => Math.max(0, current - 1))
-      void notifApi.markRead([n.id]).catch(() => {})
     }
-    if (n.target_id) navigate(`/targets/${n.target_id}`)
-    else if (n.url.startsWith('/') && !n.url.startsWith('//')) navigate(n.url)
-    else if (/^https?:\/\//i.test(n.url)) window.open(n.url, '_blank', 'noopener,noreferrer')
+    openNotification(n, navigate, notifApi.markRead)
   }
 
   return (
     <>
-      <header className="app-topbar h-[76px] flex items-center justify-between gap-3 px-3 sm:px-6 xl:px-8 shrink-0">
+      <header className="app-topbar relative z-40 h-[76px] flex items-center justify-between gap-3 px-3 sm:px-6 xl:px-8 shrink-0">
         {/* Breadcrumbs */}
         <div className="flex items-center gap-2 min-w-0">
           <button type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"
@@ -220,11 +218,21 @@ export const TopBar = () => {
 
             {open && (
               <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-16 sm:top-auto sm:mt-2 sm:w-80 max-h-[70dvh] overflow-hidden flex flex-col rounded-xl border border-border bg-surface-2 shadow-2xl z-[110]">
-                <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-border">
                   <span className="text-sm font-semibold">Notifications</span>
-                  {unread > 0 && (
-                    <button onClick={markAllRead} className="text-[11px] text-accent hover:underline">Mark all read</button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <select value={bucket} onChange={e => setBucket(e.target.value as typeof bucket)}
+                      title="Filter notifications"
+                      className="bg-surface-1 border border-border rounded text-[11px] text-text-secondary px-1.5 py-0.5">
+                      <option value="all">All</option>
+                      <option value="deep">Deep</option>
+                      <option value="watch">Watch</option>
+                      <option value="findings">Findings</option>
+                    </select>
+                    {unread > 0 && (
+                      <button onClick={markAllRead} className="text-[11px] text-accent hover:underline">Mark all read</button>
+                    )}
+                  </div>
                 </div>
                 <div className="overflow-y-auto">
                   {updateVisible && updateInfo && (

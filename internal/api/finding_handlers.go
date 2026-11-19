@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/recon-platform/internal/models"
@@ -63,7 +64,7 @@ func (h *Handler) handleListSubdomains(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id, target_id, subdomain, ip, is_alive, status_code, page_title,
 		has_https, has_http, response_time_ms, technologies, server, framework, cdn, waf,
 		COALESCE(source,'dns'), last_seen, created_at
-		FROM subdomains WHERE target_id = ?`
+		FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0`
 	args := []any{id}
 
 	if alive == "true" {
@@ -78,7 +79,7 @@ func (h *Handler) handleListSubdomains(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total int
-	countQuery := "SELECT COUNT(*) FROM subdomains WHERE target_id = ?"
+	countQuery := "SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND COALESCE(catchall,0) = 0"
 	countArgs := []any{id}
 	if alive == "true" {
 		countQuery += " AND is_alive = 1"
@@ -560,13 +561,96 @@ func (h *Handler) handleNucleiAffected(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccess(w, out)
 }
 
+// serveFileBody returns the capped content capture the MONITOR pass stored for
+// a diffed asset (css_files / js_files): side=current (live capture) or
+// side=old (previous capture rolled in at detection time). URL-keyed — the
+// monitor records changes under the exact same URL string it tracks content
+// for. Hard-scoped to the routed target: no cross-target reads. This is NOT a
+// fetch proxy: it only ever returns content captured at detection time, so it
+// has no request-driven SSRF surface.
+func (h *Handler) serveFileBody(w http.ResponseWriter, r *http.Request, table, kind string) {
+	id := mux.Vars(r)["id"]
+	rawURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if rawURL == "" {
+		h.writeError(w, http.StatusBadRequest, "url query parameter required")
+		return
+	}
+	side := r.URL.Query().Get("side")
+	if side != "old" && side != "current" {
+		side = "current"
+	}
+	var storedURL, hash, content string
+	var size int64
+	var rowErr error
+	if side == "old" {
+		rowErr = h.db.QueryRowContext(r.Context(), `SELECT url, COALESCE(old_hash,''), COALESCE(old_body,'') FROM `+table+` WHERE target_id = ? AND url = ?`, id, rawURL).
+			Scan(&storedURL, &hash, &content)
+	} else {
+		rowErr = h.db.QueryRowContext(r.Context(), `SELECT url, size, hash, COALESCE(body,'') FROM `+table+` WHERE target_id = ? AND url = ?`, id, rawURL).
+			Scan(&storedURL, &size, &hash, &content)
+	}
+	if rowErr != nil {
+		h.writeError(w, http.StatusNotFound, "no capture for this asset (the change predates content tracking, or the URL is not tracked)")
+		return
+	}
+	h.writeSuccess(w, map[string]any{
+		"kind":     kind,
+		"url":      storedURL,
+		"side":     side,
+		"hash":     hash,
+		"size":     size,
+		"content":  content,
+		"captured": strings.TrimSpace(content) != "",
+	})
+}
+
+func (h *Handler) handleGetCSSFileBody(w http.ResponseWriter, r *http.Request) {
+	h.serveFileBody(w, r, "css_files", "css")
+}
+
+func (h *Handler) handleGetJSFileBody(w http.ResponseWriter, r *http.Request) {
+	h.serveFileBody(w, r, "js_files", "js")
+}
+
 func (h *Handler) handleListMonitoringChanges(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	// Standard pagination envelope, same shape as subdomains/http_services.
+	// The Changes tab uses fetchAllPaged() and walks every page until `total`
+	// is reached, so its footer and counts match the other tabs instead of
+	// stopping at the newest 500 rows.
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset := (page - 1) * limit
+
+	var total int
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM monitoring_changes WHERE target_id = ?`, id).Scan(&total); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// Newest first; id is the tiebreaker so rows sharing detected_at never
+	// shuffle between pages.
+	// COALESCE the nullable text columns: the schema allows NULL for
+	// old_value/new_value/detected_at, and scanning NULL into a string fails.
+	// A failed Scan used to be swallowed, so `total` counted rows the response
+	// never contained. Report the error instead of silently dropping rows.
 	rows, err := h.db.QueryContext(r.Context(), `
-		SELECT id, target_id, url, change_type, old_value, new_value, detected_at
+		SELECT id, target_id, url, change_type, COALESCE(old_value,''), COALESCE(new_value,''),
+		       COALESCE(severity,'info'), COALESCE(detected_at,'')
 		FROM monitoring_changes WHERE target_id = ?
-		ORDER BY detected_at DESC LIMIT 500
-	`, id)
+		ORDER BY detected_at DESC, id DESC LIMIT ? OFFSET ?
+	`, id, limit, offset)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return
@@ -580,16 +664,28 @@ func (h *Handler) handleListMonitoringChanges(w http.ResponseWriter, r *http.Req
 		ChangeType string `json:"change_type"`
 		OldValue   string `json:"old_value"`
 		NewValue   string `json:"new_value"`
+		Severity   string `json:"severity"`
 		DetectedAt string `json:"detected_at"`
 	}
 	changes := make([]Change, 0)
 	for rows.Next() {
 		var c Change
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.URL, &c.ChangeType, &c.OldValue, &c.NewValue, &c.DetectedAt); err == nil {
-			changes = append(changes, c)
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.URL, &c.ChangeType, &c.OldValue, &c.NewValue, &c.Severity, &c.DetectedAt); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "scan failed")
+			return
 		}
+		changes = append(changes, c)
 	}
-	h.writeSuccess(w, changes)
+	if err := rows.Err(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"data":  changes,
+		"total": total,
+		"page":  page,
+		"limit": limit,
+	})
 }
 
 func (h *Handler) handleListVulnFindings(w http.ResponseWriter, r *http.Request) {

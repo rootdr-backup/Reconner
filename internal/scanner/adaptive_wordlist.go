@@ -148,7 +148,7 @@ func buildAdaptiveWordlist(ctx context.Context, db *database.DB, cfg *config.Con
 		}
 		rows.Close()
 	}
-	rows, err = db.QueryContext(ctx, `SELECT subdomain FROM subdomains WHERE target_id=? LIMIT 10000`, targetID)
+	rows, err = db.QueryContext(ctx, `SELECT subdomain FROM subdomains WHERE target_id=? AND COALESCE(catchall,0)=0 LIMIT 10000`, targetID)
 	if err == nil {
 		for rows.Next() {
 			var host string

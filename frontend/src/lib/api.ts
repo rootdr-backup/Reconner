@@ -2,7 +2,7 @@ import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding,
   Parameter, DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding,
   NucleiFinding, VulnFinding, MonitoringChange, Task, TaskLog, TaskPhase, DashboardStats, AttackPath,
-  NetworkService, IngramCamera, Asset,
+  NetworkService, IngramCamera, Asset, FileBodyResponse, ChangeEntry, WatchRound,
   BountyProgram, BountySyncState, BountyScopeEvent,
 } from '../types'
 
@@ -42,7 +42,9 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
 async function fetchAllPaged<T>(path: string, extra?: Record<string, string>): Promise<T[]> {
   const pageSize = 500
   let page = 1
+  let fetched = 0
   const all: T[] = []
+  const seen = new Set<string>()
   for (;;) {
     const qs = new URLSearchParams({ ...(extra || {}), page: String(page), limit: String(pageSize) })
     const res = await fetch(`${BASE}${path}?${qs.toString()}`, {
@@ -57,11 +59,30 @@ async function fetchAllPaged<T>(path: string, extra?: Record<string, string>): P
     }
     const json = text ? JSON.parse(text) : {}
     const data: T[] = (json && Array.isArray(json.data)) ? json.data : []
-    all.push(...data)
-    const total = (json && typeof json.total === 'number') ? json.total : all.length
-    if (data.length === 0 || all.length >= total) break
+    fetched += data.length
+    for (const row of data) {
+      const id = (row as { id?: unknown } | null)?.id
+      if (id === undefined || id === null) {
+        all.push(row)
+        continue
+      }
+      const key = String(id)
+      if (!seen.has(key)) {
+        seen.add(key)
+        all.push(row)
+      }
+    }
+    const total = (json && typeof json.total === 'number') ? json.total : fetched
+    if (data.length === 0 || fetched >= total) break
     page++
-    if (page > 200) break // hard safety stop: 200 * 500 = 100k rows
+    if (page > 200) {
+      // Hard safety stop: 200 * 500 = 100k rows. Never truncate silently — a
+      // short Changes/URLs list must at least be visible in the console.
+      if (fetched < total) {
+        console.warn(`[api] ${path}: stopped at ${fetched}/${total} rows (200-page cap)`)
+      }
+      break
+    }
   }
   return all
 }
@@ -134,6 +155,15 @@ export const targets = {
     req<{ deleted: number; failed: number; requested: number }>('/targets/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   updateMonitor: (id: string, enabled: boolean, hours: number) =>
     req<void>(`/targets/${id}/monitor`, { method: 'PATCH', body: JSON.stringify({ monitor_enabled: enabled, monitor_interval_hours: hours }) }),
+  // Coverage: switch a project between the deep pipeline and the breadth
+  // (watch round) tier. The server refuses a mixed/network project.
+  bulkCoverage: (ids: string[], watchOnly: boolean) =>
+    req<{ results: { id: string; ok: boolean; reason?: string; assets?: string[] }[] }>(
+      '/targets/bulk/coverage', { method: 'POST', body: JSON.stringify({ ids, watch_only: watchOnly }) }),
+  watchScopeEvents: (id: string) =>
+    req<{ events: WatchScopeEvent[] }>(`/targets/${id}/watch-scope-events`),
+  promoteWatchScope: (id: string, values: string[]) =>
+    req<{ promoted: number }>(`/targets/${id}/watch-scope/promote`, { method: 'POST', body: JSON.stringify({ values }) }),
   setAuth: (id: string, headers: Record<string,string>) =>
     req<void>(`/targets/${id}/auth`, { method: 'PATCH', body: JSON.stringify({ auth_headers: headers }) }),
   graph: (id: string) => req<{ attack_paths: AttackPath[]; nodes: unknown[]; edges: unknown[] }>(`/targets/${id}/graph`),
@@ -256,8 +286,10 @@ export const bounty = {
   get: (id: string) => req<BountyProgram>(`/bounty/programs/${id}`),
   status: () => req<BountySyncState[]>('/bounty/status'),
   sync: () => req<{ status: string }>('/bounty/sync', { method: 'POST' }),
-  createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number }) =>
+  createProject: (id: string, body: { name?: string; description?: string; priority?: string; notes?: string; asset_ids: string[]; monitor_enabled: boolean; monitor_interval_hours: number; watch_only?: boolean }) =>
     req<{ id: string; url: string }>(`/bounty/programs/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
+  createProjectsBulk: (body: BulkCreateProjectsRequest) =>
+    req<BulkCreateProjectsResponse>('/bounty/projects/bulk', { method: 'POST', body: JSON.stringify(body) }),
   events: (targetId: string) => req<BountyScopeEvent[]>(`/targets/${targetId}/bounty-events`),
   resolveEvent: (targetId: string, eventId: string, decision: 'approve' | 'reject') =>
     req<{ status: string }>(`/targets/${targetId}/bounty-events/${eventId}`, { method: 'POST', body: JSON.stringify({ decision }) }),
@@ -265,6 +297,34 @@ export const bounty = {
   setFavorite: (programId: string, autoScanPolicy: string, watchIntervalHours?: number) =>
     req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'POST', body: JSON.stringify({ auto_scan_policy: autoScanPolicy, watch_interval_hours: watchIntervalHours }) }),
   removeFavorite: (programId: string) => req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'DELETE' }),
+}
+
+export type BulkCreateProjectsRequest = {
+  program_ids: string[]
+  coverage: 'breadth' | 'deep'
+  asset_policy?: 'all_eligible_web' | 'all_eligible'
+  priority?: string
+  name_template?: string
+  monitor_enabled?: boolean
+  monitor_interval_hours?: number
+  skip_existing?: boolean
+}
+
+export type BulkCreateProjectResult = {
+  program_id: string
+  program_name?: string
+  ok: boolean
+  target_id?: string
+  assets?: number
+  skipped_network?: number
+  skipped_app_store?: number
+  skipped_invalid?: number
+  reason?: string
+}
+
+export type BulkCreateProjectsResponse = {
+  created: number
+  results: BulkCreateProjectResult[]
 }
 
 export interface BountyFavorite {
@@ -301,13 +361,83 @@ export const findings = {
     req<{ triage: string }>(`/targets/${id}/findings/${fid}/triage`, {
       method: 'POST', body: JSON.stringify({ triage, note }),
     }),
-  monitoringChanges: (id: string) => req<MonitoringChange[]>(`/targets/${id}/monitoring-changes`),
+  // Changes use the same page/limit envelope as every other list endpoint, so
+  // fetchAllPaged() loads the complete history up front — no separate
+  // "load older changes" path and no 500-row stop.
+  monitoringChanges: async (id: string) => {
+    const rows = await fetchAllPaged<MonitoringChange>(`/targets/${id}/monitoring-changes`)
+    // Offset pagination can repeat a row when new changes land between page
+    // requests. Drop duplicates by id so React keys stay unique and the raw
+    // count in the footer matches the chips.
+    const seen = new Set<string>()
+    return rows.filter(r => {
+      if (seen.has(r.id)) return false
+      seen.add(r.id)
+      return true
+    })
+  },
+  // Stored capture of a monitored file's body at detection time — NOT a live
+  // fetch. Backs the Changes-tab diff drawer (css_change / js_change rows).
+  fileBody: (id: string, kind: 'css' | 'js', url: string, side: 'current' | 'old' = 'current') =>
+    req<FileBodyResponse>(`/targets/${id}/${kind}-files/body?url=${encodeURIComponent(url)}&side=${side}`),
   ingram: (id: string) => req<IngramCamera[]>(`/targets/${id}/ingram`),
   // Global findings across all of the caller's targets (top-level Findings page).
   all: (params?: Record<string, string>) => {
     const q = params ? '?' + new URLSearchParams(params).toString() : ''
     return req<AllFinding[]>(`/findings${q}`)
   },
+}
+
+export interface PagedResult<T> {
+  data: T[]
+  total: number
+  page: number
+  limit: number
+}
+
+// fetchPage returns one server page with its total. The global Changes view
+// uses this so a filter change or WS event costs one request, not a full walk
+// of every page. The per-target view still uses fetchAllPaged.
+async function fetchPage<T>(path: string, extra?: Record<string, string>): Promise<PagedResult<T>> {
+  const qs = new URLSearchParams({ ...(extra || {}) })
+  const res = await fetch(`${BASE}${path}?${qs.toString()}`, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    let msg = text
+    try { msg = JSON.parse(text).error || text } catch { /**/ }
+    throw new APIError(res.status, msg)
+  }
+  const json = text ? JSON.parse(text) : {}
+  return {
+    data: Array.isArray(json?.data) ? json.data : [],
+    total: typeof json?.total === 'number' ? json.total : 0,
+    page: typeof json?.page === 'number' ? json.page : 1,
+    limit: typeof json?.limit === 'number' ? json.limit : 0,
+  }
+}
+
+// Unified Changes feed. The per-target tab loads all pages for one target;
+// the global page fetches one server page at a time and appends on "Load more".
+export const changes = {
+  listPage: (params?: Record<string, string>) => fetchPage<ChangeEntry>('/changes', params),
+  list: (params?: Record<string, string>) => fetchAllPaged<ChangeEntry>('/changes', params),
+  forTarget: (id: string, params?: Record<string, string>) =>
+    fetchAllPaged<ChangeEntry>(`/targets/${id}/changes`, params),
+  setSeen: (ids: string[], seen: boolean) =>
+    req<{ updated: number }>('/changes/seen', {
+      method: 'POST', body: JSON.stringify({ ids, seen }),
+    }),
+  markAllSeen: (params?: Record<string, string>) => {
+    const q = params ? '?' + new URLSearchParams(params).toString() : ''
+    return req<{ updated: number }>(`/changes/seen-all${q}`, { method: 'POST' })
+  },
+}
+
+export const watchApi = {
+  rounds: (params?: Record<string, string>) => fetchAllPaged<WatchRound>('/watch/rounds', params),
 }
 
 export interface AllFinding {
@@ -332,17 +462,54 @@ export interface ApiKeyState { name: string; label: string; hint: string; set: b
 export interface ScanConfig {
   dns_resolvers: string[]
   subdomain_recursion_depth: number
+  subdomain_recursion_enabled: boolean
+  http_catchall_detection: boolean
   nuclei_exclude_template_ids: string[]
   nuclei_extra_template_repos: string[]
+  monitor_modules: string[]
   default_dns_resolvers: string[]
   default_nuclei_repos: string[]
+  // Breadth tier (watch rounds).
+  max_concurrent_scans: number
+  max_concurrent_deep_scans: number
+  max_concurrent_watch_scans: number
+  // Read-only: the safe per-lane caps for this host on a healthy box.
+  envelope_total: number
+  envelope_deep: number
+  envelope_watch: number
+  watch_http_threads: number
+  watch_http_rate_limit: number
+  watch_rounds_min_gap: number
+  watch_round_interval_hours: number
+  watch_source_timeout_minutes: number
+  watch_enumeration_sources: string[]
+  watch_rows_retention_days: number
+  watch_scope_events_retention_days: number
+  watch_notify_host_cap: number
+  watch_fail_limit: number
+  watch_module_set: string[]
+}
+
+/** One landing event of the breadth tier (the audit trail). */
+export interface WatchScopeEvent {
+  id: string
+  target_id: string
+  program_id: string
+  identifier: string
+  event_type: string
+  asset_id: string
+  detected_at: string
+  announced: number
+  metadata?: string
 }
 
 export type TelegramRole = 'viewer' | 'operator' | 'admin'
 export interface TelegramChat {
   id: string; chat_id: string; label: string; role: TelegramRole; enabled: boolean
   notify_scan_started: boolean; notify_phase_finished: boolean; notify_scan_finished: boolean
-  notify_findings: boolean; notify_monitoring: boolean; created_at: string; updated_at: string
+  notify_findings: boolean; notify_monitoring: boolean
+  notify_watch_scan_started: boolean; notify_watch_scan_finished: boolean; notify_scope_landed: boolean
+  created_at: string; updated_at: string
 }
 export interface TelegramState {
   configured: boolean; enabled: boolean; masked_token: string; bot_username: string
@@ -440,7 +607,12 @@ export interface Notification {
 }
 
 export const notifications = {
-  list: () => req<{ notifications: Notification[]; unread: number }>('/notifications'),
+  // type: 'all' | 'deep' | 'watch' | 'findings' — the bucket maps to a list of
+  // stored notification types server-side.
+  list: (type?: string) => {
+    const q = type ? '?type=' + encodeURIComponent(type) : ''
+    return req<{ notifications: Notification[]; unread: number }>(`/notifications${q}`)
+  },
   markRead: (ids?: string[]) =>
     req<{ message: string }>('/notifications/read', { method: 'POST', body: JSON.stringify({ ids: ids || [] }) }),
 }

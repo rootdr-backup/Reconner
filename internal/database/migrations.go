@@ -100,6 +100,7 @@ func RunMigrations(db *DB) error {
 		alterNucleiFindingsAddVerification,
 		alterNucleiFindingsAddConfidence,
 		alterSubdomainsAddSource,
+		alterSubdomainsAddMissCount,
 		alterCandidatesAddStateVersion,
 		alterVulnFindingsAddCandidateID,
 		alterVulnFindingsAddLifecycle,
@@ -137,6 +138,7 @@ func RunMigrations(db *DB) error {
 		createBountySyncStateTable,
 		createProjectProgramsTable,
 		createBountyScopeEventsTable,
+		createBountyScopeDecisionsTable,
 		createTelegramConfigTable,
 		alterTelegramConfigAddLastUpdateID,
 		createTelegramChatsTable,
@@ -156,7 +158,26 @@ func RunMigrations(db *DB) error {
 		alterTasksAddAssetsTotal,
 		alterAdminPanelFindingsAddScreenshotID,
 		alterVulnFindingsAddScreenshotID,
+		createCSSFilesTable,
+		alterJSFilesAddBody,
+		alterJSFilesAddOldHash,
+		alterJSFilesAddOldBody,
 		createWPSitesTable,
+		alterSubdomainsAddCatchall,
+		alterTargetsAddCatchallDetection,
+		createMonitoringChangesTargetTimeIndex,
+		alterTargetsAddWatchOnly,
+		alterTargetsAddWatchLastRun,
+		alterTargetsAddWatchNextRun,
+		alterTargetsAddWatchFailCount,
+		alterTargetsAddWatchRootIndex,
+		alterTargetsAddWatchPaused,
+		createWatchScopeEventsTable,
+		createWatchRoundChangesTable,
+		createChangeSeenTable,
+		createWatchTierIndexes,
+		alterTelegramChatsAddWatchPrefs,
+		alterNotificationsAddMetadata,
 	}
 
 	for i, m := range migrations {
@@ -542,6 +563,31 @@ CREATE TABLE IF NOT EXISTS bounty_scope_events (
 	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
 	FOREIGN KEY (program_asset_id) REFERENCES bounty_program_assets(id) ON DELETE SET NULL
 );`
+
+// createBountyScopeDecisionsTable keeps an operator's approve/reject decision
+// for a scope fingerprint. Without it, a rejected "added" event is recreated
+// on every catalog sync because reconcileProject only compares assets rows:
+// the rejected asset is still absent, so it looks new again. The fingerprint
+// covers the event type, identifier and the state JSON that produced the
+// event. A genuine later change gets a new fingerprint and is reported again.
+const createBountyScopeDecisionsTable = `
+CREATE TABLE IF NOT EXISTS bounty_scope_decisions (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	program_id TEXT NOT NULL,
+	program_asset_id TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	identifier TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	decision TEXT NOT NULL,
+	resolved_event_id TEXT DEFAULT '',
+	decided_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE,
+	UNIQUE (target_id, program_id, program_asset_id, event_type, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_scope_decisions_target ON bounty_scope_decisions(target_id, decided_at DESC);
+`
 
 const alterAssetsAddAssetType = `ALTER TABLE assets ADD COLUMN asset_type TEXT DEFAULT 'domain';`
 const alterAssetsAddSource = `ALTER TABLE assets ADD COLUMN source TEXT DEFAULT 'manual';`
@@ -1071,6 +1117,26 @@ CREATE TABLE IF NOT EXISTS subdomains (
 // hosts, which are often internal/forgotten and high-value.
 const alterSubdomainsAddSource = `ALTER TABLE subdomains ADD COLUMN source TEXT DEFAULT 'dns';`
 
+// A name is not dead after ONE missed resolve pass: a single resolver timeout
+// or dnsx hiccup must not delete a previously verified row (and, with it, the
+// recursion frontier seed). pruneRejectedSubdomains increments this counter on
+// every rejected pass and only deletes at 2 consecutive misses; a pass that
+// resolves the name resets it to 0 via the admission upsert.
+const alterSubdomainsAddMissCount = `ALTER TABLE subdomains ADD COLUMN miss_count INTEGER DEFAULT 0;`
+
+// catchall marks subdomains whose HTTP responses match the target's wildcard
+// catch-all fleet (redirect-to-apex groups or homepage-content clones). Rows are
+// marked, never deleted: operator seeds, vhost findings and previously-alive
+// evidence stay untouched, and resurfaces of the same page are idempotent.
+// Human-facing surfaces (Hosts tab, reports, graph, adaptive wordlist) filter
+// COALESCE(catchall,0)=0. Written only when the opt-in config flag is set.
+const alterSubdomainsAddCatchall = `ALTER TABLE subdomains ADD COLUMN catchall INTEGER NOT NULL DEFAULT 0;`
+
+// alterTargetsAddCatchallDetection adds the per-target tri-state override of the
+// HTTP catch-all pass: NULL = inherit the global http_catchall_detection config,
+// 0 = force off for this target, 1 = force on.
+const alterTargetsAddCatchallDetection = `ALTER TABLE targets ADD COLUMN catchall_detection INTEGER DEFAULT NULL;`
+
 // ── P1 canonical lifecycle bridge ────────────────────────────────────────────
 // candidates is the AUTHORITATIVE lifecycle state source. state_version is a
 // monotonic counter used for optimistic, concurrency-safe transitions.
@@ -1149,6 +1215,31 @@ CREATE TABLE IF NOT EXISTS js_findings (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
 	FOREIGN KEY (js_file_id) REFERENCES js_files(id) ON DELETE CASCADE
 );`
+
+const createCSSFilesTable = `
+CREATE TABLE IF NOT EXISTS css_files (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	size INTEGER DEFAULT 0,
+	hash TEXT DEFAULT '',
+	body TEXT DEFAULT '',
+	old_hash TEXT DEFAULT '',
+	old_body TEXT DEFAULT '',
+	last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	UNIQUE(target_id, url)
+);`
+
+// Body capture for diffing (monitor pass). The monitor keeps the previous
+// content next to the current one so a `css_change`/`js_change` row carries a
+// real line-level diff in the dashboard instead of two opaque SHA-256 hashes.
+// Bodies are capped (monitor body cap) — truncated captures still diff the
+// first N lines, which is where most real changes live.
+const alterJSFilesAddBody = `ALTER TABLE js_files ADD COLUMN body TEXT DEFAULT '';`
+const alterJSFilesAddOldHash = `ALTER TABLE js_files ADD COLUMN old_hash TEXT DEFAULT '';`
+const alterJSFilesAddOldBody = `ALTER TABLE js_files ADD COLUMN old_body TEXT DEFAULT '';`
 
 const createParametersTable = `
 CREATE TABLE IF NOT EXISTS parameters (
@@ -1382,6 +1473,13 @@ CREATE TABLE IF NOT EXISTS monitoring_changes (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
 );`
 
+// Covering index for the Changes tab history query:
+// WHERE target_id=? ORDER BY detected_at DESC, id DESC. The old target-only
+// index still required a sort of the target's whole change history per page.
+const createMonitoringChangesTargetTimeIndex = `
+CREATE INDEX IF NOT EXISTS idx_monitoring_changes_target_time
+ON monitoring_changes(target_id, detected_at DESC, id DESC);`
+
 const createNotificationsTable = `
 CREATE TABLE IF NOT EXISTS notifications (
 	id TEXT PRIMARY KEY,
@@ -1396,6 +1494,11 @@ CREATE TABLE IF NOT EXISTS notifications (
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at DESC);`
+
+// alterNotificationsAddMetadata stores structured details for a notification.
+// The new_subdomain bell row uses it to keep the full list of host names found
+// during a re-scan. The body text stays a short count so the bell stays readable.
+const alterNotificationsAddMetadata = `ALTER TABLE notifications ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';`
 
 // Notification read state is user-specific. The legacy notifications.is_read
 // column remains as a compatibility fallback for rows created before this table.
@@ -1756,3 +1859,113 @@ const alterTasksAddAssetsTotal = `ALTER TABLE tasks ADD COLUMN assets_total INTE
 // thumbnail than by reading raw evidence text alone.
 const alterAdminPanelFindingsAddScreenshotID = `ALTER TABLE admin_panel_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
 const alterVulnFindingsAddScreenshotID = `ALTER TABLE vuln_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
+
+// ── Breadth ("watch") tier columns ─────────────────────────────────────────
+//
+// watch_only marks a target as a BREADTH project: it runs the cheap watch
+// rounds (passive discovery + one HTTP probe) instead of the deep pipeline.
+// The other columns drive the chained-round schedule:
+//
+//	watch_last_run   when the last round finished
+//	watch_next_run   when the next round is due (NULL = not scheduled)
+//	watch_fail_count consecutive failed rounds (the chain stops at the limit)
+//	watch_root_index which domain/wildcard asset the next round enumerates
+//	watch_paused     the operator's stop switch (1 = watching stopped)
+//
+// The two timestamps use the SQLite datetime layout (YYYY-MM-DD HH:MM:SS), so
+// the scheduler can compare them with datetime('now') directly. A NULL
+// watch_next_run means "not scheduled" and must NEVER make a project due.
+const alterTargetsAddWatchOnly = `ALTER TABLE targets ADD COLUMN watch_only INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchLastRun = `ALTER TABLE targets ADD COLUMN watch_last_run DATETIME;`
+const alterTargetsAddWatchNextRun = `ALTER TABLE targets ADD COLUMN watch_next_run DATETIME;`
+const alterTargetsAddWatchFailCount = `ALTER TABLE targets ADD COLUMN watch_fail_count INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchRootIndex = `ALTER TABLE targets ADD COLUMN watch_root_index INTEGER NOT NULL DEFAULT 0;`
+const alterTargetsAddWatchPaused = `ALTER TABLE targets ADD COLUMN watch_paused INTEGER NOT NULL DEFAULT 0;`
+
+// watch_scope_events is the audit trail of the auto-land: every host the watch
+// tier brought into a project's eligible scope, with the program it came from.
+//
+// announced is three-state:
+//
+//	0 = not announced yet
+//	2 = claimed by a flush that is sending it right now
+//	1 = announced
+//
+// A claim that is never released (a crash mid-send) is picked up again by the
+// next flush, so a landing is never silently lost.
+const createWatchScopeEventsTable = `
+CREATE TABLE IF NOT EXISTS watch_scope_events (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	program_id TEXT DEFAULT '',
+	identifier TEXT NOT NULL,
+	event_type TEXT DEFAULT 'landed',
+	asset_id TEXT DEFAULT '',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	announced INTEGER NOT NULL DEFAULT 0,
+	metadata TEXT DEFAULT '{}',
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_watch_scope_events_target ON watch_scope_events(target_id, detected_at);
+CREATE INDEX IF NOT EXISTS idx_watch_scope_events_announced ON watch_scope_events(announced);`
+
+// createWatchRoundChangesTable is the long-lived audit trail for watch breadth
+// rounds. A watch round writes before/after snapshots here because the cheap
+// watch module set never runs the monitor diff engine. task_id has no foreign
+// key: finished watch tasks are pruned after 90 days, but this trail stays for
+// 180 days.
+const createWatchRoundChangesTable = `
+CREATE TABLE IF NOT EXISTS watch_round_changes (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	url TEXT NOT NULL DEFAULT '',
+	change_type TEXT NOT NULL,
+	old_value TEXT NOT NULL DEFAULT '',
+	new_value TEXT NOT NULL DEFAULT '',
+	severity TEXT NOT NULL DEFAULT 'info',
+	metadata TEXT NOT NULL DEFAULT '{}',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_target_time ON watch_round_changes(target_id, detected_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_task ON watch_round_changes(task_id, detected_at);
+CREATE INDEX IF NOT EXISTS idx_watch_round_changes_type_time ON watch_round_changes(change_type, detected_at DESC);`
+
+// createChangeSeenTable stores per-user read state for the unified Changes
+// feed. Change ids are globally unique UUIDs from all four source tables. A
+// single table therefore covers every source without altering the sources.
+const createChangeSeenTable = `
+CREATE TABLE IF NOT EXISTS change_seen (
+	change_id TEXT NOT NULL,
+	user_id INTEGER NOT NULL,
+	seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (change_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_change_seen_user ON change_seen(user_id);`
+
+// createWatchTierIndexes serves the watch workload: the scheduler lists tasks
+// by type and status, the task list pages per target, and the Projects filter
+// reads the coverage column.
+//
+// The asset index is NOT unique on purpose: SQLite compares TEXT with BINARY
+// collation, so a unique index on LOWER(value) would fail to build on an
+// existing database that already holds Example.com next to example.com. The
+// auto-land writes lowercased values instead, and the existing
+// UNIQUE(target_id, value) then covers the normal case.
+const createWatchTierIndexes = `
+CREATE INDEX IF NOT EXISTS idx_tasks_type_status_created ON tasks(type, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_target_created ON tasks(target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_targets_watch_only ON targets(watch_only);
+CREATE INDEX IF NOT EXISTS idx_assets_target_lower_value ON assets(target_id, LOWER(value));`
+
+// alterTelegramChatsAddWatchPrefs adds the two-tier alert switches to every
+// Telegram chat. The watch tier is a separate workload, so its alerts are
+// separate: the deep "scan started" and "scan finished" messages stay off for
+// watch rounds by default (a watch round runs every 30 minutes per project and
+// would otherwise flood the channel), while the scope-landed alert is ON because
+// a newly eligible host is the one event the operator must never miss.
+const alterTelegramChatsAddWatchPrefs = `
+ALTER TABLE telegram_chats ADD COLUMN notify_watch_scan_started INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE telegram_chats ADD COLUMN notify_watch_scan_finished INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE telegram_chats ADD COLUMN notify_scope_landed INTEGER NOT NULL DEFAULT 1;`

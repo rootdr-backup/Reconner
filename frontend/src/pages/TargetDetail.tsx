@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi } from '../lib/api'
+import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi, changes as changesApi } from '../lib/api'
+import type { WatchScopeEvent } from '../lib/api'
 import { useUIStore } from '../store/ui'
-import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows } from '../components/ui'
+import { Badge, Button, Spinner, Empty, CopyButton, ErrorBoundary, SkeletonRows, Modal } from '../components/ui'
 import { ScanModal } from '../components/targets/ScanModal'
 import { EvidenceViewer } from '../components/targets/EvidenceViewer'
+import { ChangeDiffViewer } from '../components/targets/ChangeDiffViewer'
 import { LiveResults } from '../components/targets/LiveResults'
 import { ws } from '../lib/websocket'
-import { timeAgo, statusCodeColor, truncate, cn } from '../lib/utils'
+import { timeAgo, timeUntil, statusCodeColor, truncate, cn } from '../lib/utils'
 import type {
   Target, Subdomain, HTTPService, JSFile, JSFinding, Parameter,
   DirectoryFinding, AdminPanelFinding, BackupFinding, OpenRedirectFinding, NucleiFinding, VulnFinding, MonitoringChange, AttackPath, Task, IngramCamera, Asset, BountyScopeEvent, NetworkService
@@ -16,6 +18,83 @@ import type {
 const isScannableProjectAsset = (asset: Asset) =>
 	(asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')) ||
 	(asset.kind === 'network' && ['ip', 'cidr'].includes(asset.asset_type || 'ip'))
+
+// Changes(/monitor) tab: filter buckets for the noise chips. The stylesheet
+// content tracker (css_change + security:stylesheet_*) turned this tab into a
+// steady stream; the chips let an operator pull one signal back out of it.
+type ChangeFilter = 'all' | 'security' | 'scripts' | 'css' | 'http' | 'tech' | 'headers'
+const CHANGE_FILTERS: { id: ChangeFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'security', label: 'Security' },
+  { id: 'scripts', label: 'Scripts' },
+  { id: 'css', label: 'Stylesheets' },
+  { id: 'http', label: 'HTTP' },
+  { id: 'tech', label: 'Tech' },
+  { id: 'headers', label: 'Headers' },
+]
+
+// Bucket order matters: the stylesheet/script markers win before the generic
+// "security:" prefix, so a security:stylesheet_* row lands in Stylesheets (not
+// Security), a security:script_* row in Scripts, and header removals in Headers.
+export const monitorRowKind = (c: MonitoringChange): ChangeFilter => {
+  // One render can hold rows from the PREVIOUS tab while the next tab's fetch
+  // is in flight (data is replaced only after the request resolves). Never
+  // assume the row really is a monitoring_changes row.
+  const ct = typeof c?.change_type === 'string' ? c.change_type : ''
+  if (ct === 'css_change' || ct.includes('stylesheet')) return 'css'
+  if (ct === 'js_change' || ct.includes('script')) return 'scripts'
+  if (ct.includes('header')) return 'headers'
+  if (ct.startsWith('security')) return 'security'
+  if (ct === 'tech_change') return 'tech'
+  return 'http'
+}
+
+// Badge color follows the stored severity (rows written since the severity
+// column carry one); older rows without it keep the old type-based estimate.
+export const changeBadgeVariant = (c: { severity?: string; change_type?: string }): 'high' | 'medium' | 'low' | 'info' => {
+  const sev = (c.severity || '').toLowerCase()
+  if (sev === 'high' || sev === 'medium' || sev === 'low' || sev === 'info') return sev
+  // Same stale-row hazard as monitorRowKind: the badge must render even when a
+  // previous tab's row is briefly shown under the Changes tab.
+  const ct = typeof c.change_type === 'string' ? c.change_type : ''
+  return ct === 'js_change' ? 'medium'
+    : ct.startsWith('security') || ct.includes('header') ? 'high'
+    : ct === 'tech_change' ? 'low'
+    : 'info'
+}
+
+// Changes-tab grouping: one row per (change_type, old_value, new_value), with
+// every occurrence kept for the expandable detail list. The key is stable
+// across refreshes, so an expanded group stays open when a live update makes a
+// newer row the representative.
+export interface MonitorChangeGroup {
+  key: string
+  rep: MonitoringChange
+  items: MonitoringChange[]
+  urls: string[]
+}
+
+// Bounds how many occurrence rows mount at once. A noisy target can repeat the
+// same change thousands of times; expanding all of them in one render freezes
+// the tab. The expansion footer pages through the rest.
+const OCCURRENCE_PAGE_SIZE = 200
+
+export function groupMonitorChanges(rows: MonitoringChange[]): MonitorChangeGroup[] {
+  const groups = new Map<string, MonitorChangeGroup>()
+  for (const c of rows) {
+    const key = `${c.change_type}\u0000${c.old_value}\u0000${c.new_value}`
+    const g = groups.get(key)
+    // Keep every occurrence, not just distinct URLs: the same URL can emit the
+    // same change more than once, and the old "+N more URLs" label hid those
+    // repeats entirely.
+    if (g) g.items.push(c)
+    else groups.set(key, { key, rep: c, items: [c], urls: [] })
+  }
+  for (const g of groups.values()) {
+    g.urls = [...new Set(g.items.map(i => i.url))]
+  }
+  return [...groups.values()]
+}
 
 // Projects created from the WP Scanner page carry this tag (see WPScanner.tsx) —
 // the same signal used there to decide this is a WordPress project, reused here
@@ -473,10 +552,23 @@ export default function TargetDetail() {
   const [newAssetType, setNewAssetType] = useState('auto')
   const [assetBusy, setAssetBusy] = useState(false)
   const [scopeEvents, setScopeEvents] = useState<BountyScopeEvent[]>([])
+  const [scopeTab, setScopeTab] = useState<'pending' | 'approved' | 'rejected'>('pending')
   const [eventBusy, setEventBusy] = useState<string | null>(null)
   const [evidence, setEvidence] = useState<{ id: string; url: string; type: string } | null>(null)
+  // Changes-tab noise filter + the open content-diff drawer (css/js rows).
+  const [changeFilter, setChangeFilter] = useState<ChangeFilter>('all')
+  // Changes tab: group key -> how many occurrence rows are currently mounted.
+  // Presence in the map means the group is expanded.
+  const [expandedOccurrences, setExpandedOccurrences] = useState<Map<string, number>>(new Map())
+  const [diffView, setDiffView] = useState<{ url: string; kind: 'css' | 'js' } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [monitorSaving, setMonitorSaving] = useState(false)
+  const [catchallSaving, setCatchallSaving] = useState(false)
+  // Coverage tier: deep (full pipeline) or breadth (chained watch rounds).
+  const [coverageDialogOpen, setCoverageDialogOpen] = useState(false)
+  const [coverageChoice, setCoverageChoice] = useState<'deep' | 'breadth'>('breadth')
+  const [coverageBusy, setCoverageBusy] = useState(false)
+  const [watchScopeEvents, setWatchScopeEvents] = useState<WatchScopeEvent[]>([])
   const [paths, setPaths] = useState<AttackPath[]>([])
   const [lastFailedTask, setLastFailedTask] = useState<Task | null>(null)
   const [resuming, setResuming] = useState(false)
@@ -495,6 +587,7 @@ export default function TargetDetail() {
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
+    loadWatchScope()
     bountyApi.events(id).then(e => setScopeEvents(e || [])).catch(() => {})
   }, [id])
 
@@ -513,7 +606,10 @@ export default function TargetDetail() {
     setEventBusy(event.id)
     try {
       await bountyApi.resolveEvent(id, event.id, decision)
-      setScopeEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: decision === 'approve' ? 'approved' : 'rejected' } : e))
+      const nextStatus = decision === 'approve' ? 'approved' : 'rejected'
+      setScopeEvents(prev => prev.map(e => e.id === event.id ? { ...e, status: nextStatus, resolved_at: new Date().toISOString() } : e))
+      if (nextStatus === 'approved') setScopeTab('approved')
+      if (nextStatus === 'rejected') setScopeTab('rejected')
       loadAssets()
       addToast('success', decision === 'approve' ? 'Scope change approved' : 'Scope change dismissed')
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not resolve scope change') }
@@ -664,6 +760,8 @@ export default function TargetDetail() {
         const code = Number((row as { status_code?: number })?.status_code || 0)
         return Math.floor(code / 100) === Number(statusClass)
       })
+    : (tab === 'monitor' && changeFilter !== 'all')
+    ? (data as MonitoringChange[]).filter(row => monitorRowKind(row) === changeFilter)
     : data
   // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
   const pageData = filteredData.slice(0, visibleCount)
@@ -680,14 +778,46 @@ export default function TargetDetail() {
   // more hooks than during the previous render" invariant (crashed the whole
   // page in production the moment the target finished loading).
   const isVulnTab = tab === 'vulns' || tab === 'candidates'
+  const isMonitorTab = tab === 'monitor'
   const vulnGroups = useMemo(
     () => (isVulnTab ? groupVulnFindings(filteredData as VulnFinding[]) : []),
     [isVulnTab, filteredData]
   )
+  // Changes tab: dedupe the FULL dataset once, not just the windowed rows.
+  // Grouping inside the table meant the chip counts, the "+N more URLs" labels
+  // and the footer disagreed, and they changed as you loaded more rows.
+  const monitorGroups = useMemo(() => {
+    if (!isMonitorTab) return [] as MonitorChangeGroup[]
+    return groupMonitorChanges(data as MonitoringChange[])
+  }, [isMonitorTab, data])
+  // Chip counts: distinct groups (what the table shows) plus raw row counts
+  // (tooltip), so "HTTP 18" and "58 changes" are both visible and explained.
+  const monitorCounts = useMemo(() => {
+    const groups: Record<string, number> = { all: monitorGroups.length }
+    const raw: Record<string, number> = { all: isMonitorTab ? (data as MonitoringChange[]).length : 0 }
+    if (isMonitorTab) {
+      for (const g of monitorGroups) {
+        const k = monitorRowKind(g.rep)
+        groups[k] = (groups[k] || 0) + 1
+      }
+      for (const row of (data as MonitoringChange[])) {
+        const k = monitorRowKind(row)
+        raw[k] = (raw[k] || 0) + 1
+      }
+    }
+    return { groups, raw }
+  }, [isMonitorTab, monitorGroups, data])
+  const monitorFilteredGroups = useMemo(
+    () => (isMonitorTab && changeFilter !== 'all'
+      ? monitorGroups.filter(g => monitorRowKind(g.rep) === changeFilter)
+      : monitorGroups),
+    [isMonitorTab, monitorGroups, changeFilter]
+  )
   const vulnGroupPage = vulnGroups.slice(0, visibleCount)
-  const footerShownCount = isVulnTab ? vulnGroupPage.length : pageData.length
-  const footerTotalCount = isVulnTab ? vulnGroups.length : filteredData.length
-  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : hasMore
+  const monitorGroupPage = monitorFilteredGroups.slice(0, visibleCount)
+  const footerShownCount = isVulnTab ? vulnGroupPage.length : isMonitorTab ? monitorGroupPage.length : pageData.length
+  const footerTotalCount = isVulnTab ? vulnGroups.length : isMonitorTab ? monitorFilteredGroups.length : filteredData.length
+  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : isMonitorTab ? monitorFilteredGroups.length > visibleCount : hasMore
 
   const loadTab = async (t: string) => {
     if (!id) return
@@ -724,7 +854,21 @@ export default function TargetDetail() {
         r = all.filter(f => want.has(f.type))
       }
       else if (t === 'cameras') r = await findingsApi.ingram(id)
-      else if (t === 'monitor') r = await findingsApi.monitoringChanges(id)
+      else if (t === 'monitor') {
+        // One feed: deep monitor changes plus watch-round diffs, scope landings
+        // and bell rows. Keep the original table and its stylesheet diff.
+        const feed = await changesApi.forTarget(id)
+        r = feed.map(c => ({
+          id: c.id,
+          target_id: c.target_id,
+          url: c.url,
+          change_type: c.change_type,
+          old_value: c.old_value,
+          new_value: c.new_value,
+          severity: c.severity,
+          detected_at: c.detected_at,
+        }))
+      }
       setData(r || [])
       setVisibleCount(PAGE)
     } catch { setData([]) }
@@ -780,6 +924,72 @@ export default function TargetDetail() {
       await targetsApi.updateMonitor(id, enabled, hours)
       setTarget(prev => prev ? { ...prev, monitor_enabled: enabled, monitor_interval_hours: hours } : prev)
     } catch { /* ignore */ } finally { setMonitorSaving(false) }
+  }
+
+  // Flip the project between the deep pipeline and the breadth watch tier.
+  // The API is the enforcement point: a project with network assets is refused
+  // a breadth flip with a 400, so the error is surfaced verbatim.
+  const applyCoverage = async (toBreadth: boolean) => {
+    if (!id) return
+    setCoverageBusy(true)
+    try {
+      await targetsApi.update(id, { watch_only: toBreadth })
+      setTarget(prev => prev ? {
+        ...prev,
+        watch_only: toBreadth,
+        watch_paused: toBreadth ? false : prev.watch_paused,
+        monitor_enabled: toBreadth ? true : prev.monitor_enabled,
+      } : prev)
+      addToast('success', toBreadth ? 'Project switched to breadth watch' : 'Project switched to deep scan')
+      setCoverageDialogOpen(false)
+      if (toBreadth) loadWatchScope()
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not change coverage')
+    } finally { setCoverageBusy(false) }
+  }
+
+  const saveWatchPaused = async (paused: boolean) => {
+    if (!id) return
+    try {
+      await targetsApi.update(id, { watch_paused: paused })
+      setTarget(prev => prev ? { ...prev, watch_paused: paused } : prev)
+      addToast('success', paused ? 'Watching paused' : 'Watching resumed')
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not change the watch state')
+    }
+  }
+
+  // Function declaration (hoisted): the mount effect at :586 calls this, so it
+  // must exist even on the first render that early-returns at the loading guard.
+  // A const arrow here stays in TDZ on that render -> "Cannot access before
+  // initialization" -> blank page for every target.
+  function loadWatchScope() {
+    if (!id) return
+    targetsApi.watchScopeEvents(id).then(r => setWatchScopeEvents(r.events || [])).catch(() => {})
+  }
+
+  const promoteWatchHosts = async (values: string[]) => {
+    if (!id || values.length === 0) return
+    try {
+      const res = await targetsApi.promoteWatchScope(id, values)
+      addToast('success', `${res.promoted} host${res.promoted === 1 ? '' : 's'} promoted to deep seed`)
+      loadAssets()
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Could not promote hosts')
+    }
+  }
+
+  const saveCatchall = async (value: 'inherit' | 'on' | 'off') => {
+    if (!id) return
+    setCatchallSaving(true)
+    try {
+      await targetsApi.update(id, { catchall_detection: value })
+      // Refresh so catchall_effective reflects the global config on "inherit".
+      targetsApi.get(id).then(setTarget).catch(() => {})
+      addToast('success', 'Catch-all detection updated')
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Failed to update catch-all detection')
+    } finally { setCatchallSaving(false) }
   }
 
   // Network targets' actual results (Nuclei/Vulns/Candidates) used to sit
@@ -842,7 +1052,7 @@ export default function TargetDetail() {
             { label: 'Subdomains', value: target.subdomain_count },
             { label: 'Alive surface', value: target.alive_host_count, color: 'text-severity-low' },
             { label: 'Verified findings', value: target.finding_count, color: target.finding_count > 0 ? 'text-severity-high' : undefined },
-            { label: 'Automation', value: target.monitor_enabled ? `Every ${target.monitor_interval_hours || 12}h` : 'Manual' },
+            { label: 'Automation', value: target.watch_only ? 'Watch rounds' : target.monitor_enabled ? `Every ${target.monitor_interval_hours || 12}h` : 'Manual' },
             { label: 'Last scan', value: target.last_scan_at ? timeAgo(target.last_scan_at) : 'Never' },
             { label: 'Asset type', value: target.kind || 'web' },
           ].map(metric => (
@@ -854,19 +1064,45 @@ export default function TargetDetail() {
         </dl>
       </section>
 
-	  {scopeEvents.some(e => e.status === 'pending') && (
+	  {scopeEvents.length > 0 && (
 		<div className="card border-severity-medium/30 overflow-hidden">
 		  <div className="px-4 py-3 border-b border-border bg-severity-medium/[.06]">
-			<p className="text-sm font-semibold">Program scope changes need review</p>
-			<p className="mt-0.5 text-[11px] text-text-muted">Added assets stay unscanned until approved. Removed assets were suspended immediately.</p>
+			<div className="flex flex-wrap items-center justify-between gap-3">
+			  <div>
+				<p className="text-sm font-semibold">Program scope changes</p>
+				<p className="mt-0.5 text-[11px] text-text-muted">Decisions are saved. Dismissed changes stay in history and can be approved later.</p>
+			  </div>
+			  <div className="flex gap-1">
+				{(['pending','approved','rejected'] as const).map(tab => {
+				  const count = scopeEvents.filter(e => e.status === tab).length
+				  return (
+					<button key={tab} onClick={() => setScopeTab(tab)}
+					  className={cn('px-2.5 py-1 rounded text-[11px] capitalize', scopeTab === tab ? 'bg-white/10 text-text-primary' : 'text-text-muted hover:text-text-primary')}>
+					  {tab} <span className="opacity-60">{count}</span>
+					</button>
+				  )
+				})}
+			  </div>
+			</div>
 		  </div>
 		  <div className="divide-y divide-white/[.05]">
-			{scopeEvents.filter(e => e.status === 'pending').map(e => (
+			{scopeEvents.filter(e => e.status === scopeTab).map(e => (
 			  <div key={e.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3">
-				<div className="min-w-0 flex-1"><div className="flex items-center gap-2"><Badge variant={e.event_type === 'removed' ? 'critical' : e.event_type === 'added' ? 'low' : 'medium'}>{e.event_type}</Badge><code className="text-[11px] break-all">{e.identifier}</code></div><p className="mt-1 text-[10px] text-text-muted">Detected {timeAgo(e.detected_at)}</p></div>
-				<div className="flex gap-2 self-end sm:self-auto"><Button size="sm" variant="ghost" disabled={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'reject')}>Dismiss</Button><Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>{e.event_type === 'removed' ? 'Keep suspended' : 'Approve asset'}</Button></div>
+				<div className="min-w-0 flex-1">
+				  <div className="flex items-center gap-2"><Badge variant={e.event_type === 'removed' ? 'critical' : e.event_type === 'added' ? 'low' : 'medium'}>{e.event_type}</Badge><code className="text-[11px] break-all">{e.identifier}</code></div>
+				  <p className="mt-1 text-[10px] text-text-muted">Detected {timeAgo(e.detected_at)}{e.resolved_at ? ` · Resolved ${timeAgo(e.resolved_at)}` : ''}</p>
+				</div>
+				<div className="flex gap-2 self-end sm:self-auto">
+				  {e.status === 'pending' && <Button size="sm" variant="ghost" disabled={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'reject')}>Dismiss</Button>}
+				  {e.status === 'pending' && <Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>{e.event_type === 'removed' ? 'Keep suspended' : 'Approve asset'}</Button>}
+				  {e.status === 'rejected' && <Button size="sm" loading={eventBusy === e.id} onClick={() => resolveScopeEvent(e,'approve')}>Approve now</Button>}
+				  {e.status === 'approved' && <span className="badge-low">Approved</span>}
+				</div>
 			  </div>
 			))}
+			{scopeEvents.filter(e => e.status === scopeTab).length === 0 && (
+			  <p className="px-4 py-6 text-center text-xs text-text-muted">No {scopeTab} scope changes.</p>
+			)}
 		  </div>
 		</div>
 	  )}
@@ -893,7 +1129,7 @@ export default function TargetDetail() {
         </div>
 		<div className="flex flex-col sm:flex-row gap-2 mb-3">
 		  <select value={newAssetType} onChange={e => setNewAssetType(e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1.5 text-xs text-text-primary sm:w-32">
-			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP / range'],['cidr','CIDR'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+			{[['auto','Auto type'],['domain','Domain'],['url','URL / page'],['js','JavaScript'],['api','API'],['wildcard','Wildcard'],['ip','IP / range'],['cidr','CIDR'],['app_store','App store'],['source_code','Source code'],['other','Other']].map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
 		  </select>
           <input value={newAsset} onChange={e => setNewAsset(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addAsset() }}
@@ -930,14 +1166,64 @@ export default function TargetDetail() {
       </div>
 
       <div className={cn('space-y-5', isNetwork && 'order-2')}>
+      {/* Scan coverage: deep pipeline or breadth watch rounds */}
+      <div className="card p-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-sm font-medium">Scan coverage</span>
+          <span className={cn(
+            'rounded px-2 py-0.5 text-xs font-medium',
+            target.watch_only ? 'bg-accent/15 text-accent' : 'bg-surface-alt text-text-secondary',
+          )}>
+            {target.watch_only ? 'Breadth watch' : 'Deep scan'}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => { setCoverageChoice(target.watch_only ? 'deep' : 'breadth'); setCoverageDialogOpen(true) }}
+          >
+            Change
+          </Button>
+        </div>
+        <div className="text-xs text-text-muted">
+          <span>
+            Deep: {target.last_scan_at ? timeAgo(target.last_scan_at) : 'never'}
+          </span>
+          <span className="mx-2">·</span>
+          <span>
+            Watch: {target.watch_last_run ? timeAgo(target.watch_last_run) : 'never'}
+          </span>
+          <span className="mx-2">·</span>
+          <span>
+            Next watch: {target.watch_paused ? 'paused' : target.watch_next_run ? timeUntil(target.watch_next_run) : 'not scheduled'}
+          </span>
+        </div>
+        {target.watch_only && (
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={!!target.watch_paused}
+              onChange={e => saveWatchPaused(e.target.checked)}
+              className="accent-accent w-3.5 h-3.5"
+            />
+            <span className="text-sm">Pause watching</span>
+          </label>
+        )}
+        <p className="w-full text-[11px] text-text-muted mt-1">
+          {target.watch_only
+            ? 'Breadth watch runs passive discovery plus one HTTP probe per host, in chained rounds. No brute force, no crawling, no active checks. New bounty-eligible hosts land as scope automatically.'
+            : 'Deep scan runs the full pipeline: discovery, HTTP probing, JavaScript analysis, crawling, active checks and verification.'}
+        </p>
+      </div>
+
       {/* Monitoring settings */}
       <div className="card p-4 flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
+          <label className={cn('flex items-center gap-2 select-none', target.watch_only ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer')}>
             <div
-              onClick={() => saveMonitor(!target.monitor_enabled, target.monitor_interval_hours || 12)}
+              onClick={() => { if (target.watch_only) return; saveMonitor(!target.monitor_enabled, target.monitor_interval_hours || 12) }}
               className={cn(
-                'w-10 h-5 rounded-full transition-colors relative cursor-pointer',
+                'w-10 h-5 rounded-full transition-colors relative',
+                target.watch_only ? 'cursor-not-allowed' : 'cursor-pointer',
                 target.monitor_enabled ? 'bg-accent' : 'bg-surface-alt'
               )}
             >
@@ -947,12 +1233,16 @@ export default function TargetDetail() {
               )} />
             </div>
             <span className="text-sm font-medium">
-              {target.monitor_enabled ? 'Monitoring On' : 'Monitoring Off'}
+              {target.watch_only
+                ? 'Monitored by watch rounds'
+                : target.monitor_enabled
+                  ? 'Monitoring On'
+                  : 'Monitoring Off'}
             </span>
           </label>
           {monitorSaving && <span className="text-xs text-text-muted">Saving…</span>}
         </div>
-        {target.monitor_enabled && (
+        {target.monitor_enabled && !target.watch_only && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-text-muted">Every</span>
             <select
@@ -969,12 +1259,70 @@ export default function TargetDetail() {
             </span>
           </div>
         )}
-        {target.monitor_enabled && (
+        {target.watch_only && (
+          <p className="w-full text-[11px] text-text-muted mt-1">
+            Breadth watch rounds monitor this project. Each round re-enumerates one asset root and lands new bounty-eligible hosts into scope. No deep monitor task runs for breadth projects.
+          </p>
+        )}
+        {target.monitor_enabled && !target.watch_only && (
           <p className="w-full text-[11px] text-text-muted mt-1">
             Each cycle re-enumerates subdomains, re-probes hosts, and runs takeover + backup/config-file discovery.
             If a new subdomain/asset or change is found, you're notified and <b>nuclei + backup discovery</b> auto-run over the new surface.
           </p>
         )}
+      </div>
+
+      {/* Watch scope: hosts landed by breadth rounds from bounty-eligible scope */}
+      {target.watch_only && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Watch scope</p>
+              <p className="mt-0.5 text-[10px] text-text-muted">Bounty-eligible hosts landed automatically by breadth watch rounds.</p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={loadWatchScope}>Refresh</Button>
+          </div>
+          {watchScopeEvents.length === 0 ? (
+            <p className="text-xs text-text-muted py-2">No hosts landed yet. Eligible hosts appear after a watch round finds them alive.</p>
+          ) : (
+            <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+              {watchScopeEvents.map(ev => (
+                <div key={ev.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/[.02] border border-white/[.05] flex-wrap">
+                  <code className="text-[11px] font-mono text-text-primary min-w-0 flex-1 break-all">{ev.identifier}</code>
+                  <span className="text-[10px] text-text-muted">{timeAgo(ev.detected_at)}</span>
+                  <Button size="sm" variant="ghost" onClick={() => promoteWatchHosts([ev.identifier].map(v => v.toLowerCase()))}>
+                    Promote to Deep seed
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* HTTP catch-all detection override */}
+      <div className="card p-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium">HTTP catch-all detection</span>
+          <select
+            value={target.catchall_detection ?? 'inherit'}
+            onChange={e => saveCatchall(e.target.value as 'inherit' | 'on' | 'off')}
+            className="bg-surface-alt border border-border rounded px-2 py-1 text-sm"
+          >
+            <option value="inherit">Inherit global</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+          {catchallSaving && <span className="text-xs text-text-muted">Saving…</span>}
+          <span className={cn('text-xs', target.catchall_effective ? 'text-accent' : 'text-text-muted')}>
+            Effective: {target.catchall_effective ? 'On' : 'Off'}
+          </span>
+        </div>
+        <p className="w-full text-[11px] text-text-muted mt-1">
+          Marks fleets that redirect to the apex or clone the apex homepage as catch-all junk (hidden from Hosts,
+          reports and later modules). The global default is off; the per-target override applies from the next scan.
+          Seeds and vhost rows are never touched.
+        </p>
       </div>
 
       {/* Attack paths (correlation / intelligence layer) */}
@@ -1011,7 +1359,18 @@ export default function TargetDetail() {
           <div key={g.group} className="flex flex-wrap items-center gap-0.5 rounded-lg border border-white/[.06] bg-white/[.02] p-1">
             <span className="px-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted/70 select-none">{g.group}</span>
             {g.tabs.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)} title={t.desc}
+              <button key={t.id} onClick={() => {
+                if (t.id === tab) return
+                // The next render runs with the PREVIOUS tab's rows still in
+                // `data` (the fetch resolves later). Clear them and show the
+                // skeleton now, so the new tab never renders another tab's row
+                // shape — that crashed the page (undefined change_type) when
+                // switching to Changes.
+                setTabLoading(true)
+                setData([])
+                setVisibleCount(PAGE)
+                setTab(t.id)
+              }} title={t.desc}
                 className={cn(
                   'rounded-md px-2.5 py-1.5 text-sm font-medium whitespace-nowrap transition-all',
                   tab === t.id ? 'bg-accent/15 text-accent' : 'text-text-muted hover:text-text-secondary hover:bg-white/[.04]'
@@ -1069,7 +1428,9 @@ export default function TargetDetail() {
       </div>
       )}
 
-      <ErrorBoundary>
+      {/* key={tab}: a caught render error belongs to one tab's row shape; do
+          not leave the fallback stuck when the operator switches tabs. */}
+      <ErrorBoundary key={tab}>
       <div className="card overflow-hidden" style={{ padding: 0 }}>
         {tabLoading
           ? <div className="py-2"><SkeletonRows rows={8} cols={5} /></div>
@@ -1107,6 +1468,26 @@ export default function TargetDetail() {
               </div>
             )
             : (
+              <>
+              {tab === 'monitor' && (
+                <div className="flex items-center gap-1.5 flex-wrap mb-3">
+                  {CHANGE_FILTERS.map(f => {
+                    const n = monitorCounts.groups[f.id] || 0
+                    const rawN = monitorCounts.raw[f.id] || 0
+                    return (
+                      <button key={f.id}
+                        title={`${rawN.toLocaleString()} raw change(s)`}
+                        onClick={() => { setChangeFilter(f.id); setVisibleCount(PAGE) }}
+                        className={cn('px-2.5 py-1 rounded-full border text-[11px] transition-colors',
+                          changeFilter === f.id
+                            ? 'bg-accent/15 border-accent text-accent'
+                            : 'border-border text-text-muted hover:text-text-primary hover:border-text-muted')}>
+                        {f.label} <span className="opacity-60">{n.toLocaleString()}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -1516,65 +1897,115 @@ export default function TargetDetail() {
                       </tr>
                       )
                     })}
-                    {tab === 'monitor' && (() => {
-                      // Collapse changes that are identical except for the URL (e.g. the
-                      // same header added across 40 hosts) into ONE row with an affected-URL
-                      // count, instead of 40 near-duplicate rows — the Changes view used to
-                      // be an unreadable wall of the same drift repeated per URL.
-                      const groups = new Map<string, { rep: MonitoringChange; urls: string[] }>()
-                      for (const c of (pageData as MonitoringChange[])) {
-                        const key = `${c.change_type}|${c.old_value}|${c.new_value}`
-                        const g = groups.get(key)
-                        if (g) { if (!g.urls.includes(c.url)) g.urls.push(c.url) }
-                        else groups.set(key, { rep: c, urls: [c.url] })
-                      }
-                      return [...groups.values()].map(({ rep: c, urls }) => (
-                      <tr key={c.id} className="table-row align-top">
-                        <td className="table-cell max-w-xs">
-                          <div className="flex items-center gap-1.5">
-                            <a href={c.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono truncate">{truncate(c.url, 50)}</a>
-                            <CopyButton text={c.url} />
-                          </div>
-                          {urls.length > 1 && (
-                            <span title={urls.join('\n')} className="mt-0.5 inline-block text-[10px] text-text-muted cursor-help">+{urls.length - 1} more URL{urls.length - 1 === 1 ? '' : 's'}</span>
+                    {tab === 'monitor' && monitorGroupPage.map(g => {
+                      const c = g.rep
+                      const occurrences = g.items.length - 1
+                      const shownCount = expandedOccurrences.get(g.key) ?? 0
+                      const expanded = expandedOccurrences.has(g.key)
+                      return (
+                        <Fragment key={c.id}>
+                          <tr className="table-row align-top">
+                            <td className="table-cell max-w-xs">
+                              <div className="flex items-center gap-1.5">
+                                <a href={c.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono truncate">{truncate(c.url, 50)}</a>
+                                <CopyButton text={c.url} />
+                                {/* Content-capture diff for monitored stylesheets/scripts.
+                                    Legacy rows (recorded before capture) open too, but
+                                    show the not-captured note + hashes only. */}
+                                {(c.change_type === 'css_change' || c.change_type === 'js_change') && (
+                                  <button onClick={() => setDiffView({ url: c.url, kind: c.change_type === 'css_change' ? 'css' : 'js' })}
+                                    className="btn-secondary text-[10px] px-1.5 py-0.5 shrink-0">Diff</button>
+                                )}
+                              </div>
+                              {occurrences > 0 && (
+                                <button
+                                  onClick={() => setExpandedOccurrences(prev => {
+                                    const next = new Map(prev)
+                                    if (next.has(g.key)) next.delete(g.key)
+                                    else next.set(g.key, OCCURRENCE_PAGE_SIZE)
+                                    return next
+                                  })}
+                                  title={g.urls.join('\n')}
+                                  className="mt-0.5 inline-block text-[10px] text-accent hover:underline"
+                                >
+                                  {expanded ? 'Hide occurrences' : `+${occurrences} more change${occurrences === 1 ? '' : 's'} · ${g.urls.length} URL${g.urls.length === 1 ? '' : 's'}`}
+                                </button>
+                              )}
+                            </td>
+                            <td className="table-cell">
+                              <Badge variant={changeBadgeVariant(c)}>{c.change_type}</Badge>
+                            </td>
+                            {/* Old/new values were truncated to 50 chars with no way to read the
+                                rest. Now each value wraps, shows the full text on hover, and has a
+                                copy button, so a full diff is actually inspectable. */}
+                            <td className="table-cell text-xs text-text-muted font-mono break-all whitespace-pre-wrap max-w-sm">
+                              <div className="flex items-start gap-1">
+                                <span title={c.old_value} className="flex-1">{c.old_value || '—'}</span>
+                                {c.old_value && <CopyButton text={c.old_value} />}
+                              </div>
+                            </td>
+                            <td className="table-cell text-xs text-severity-medium font-mono break-all whitespace-pre-wrap max-w-sm">
+                              <div className="flex items-start gap-1">
+                                <span title={c.new_value} className="flex-1">{c.new_value || '—'}</span>
+                                {c.new_value && <CopyButton text={c.new_value} />}
+                              </div>
+                            </td>
+                            <td className="table-cell text-xs whitespace-nowrap">{timeAgo(c.detected_at)}</td>
+                          </tr>
+                          {expanded && g.items.slice(1, 1 + shownCount).map(it => (
+                            <tr key={it.id} className="table-row bg-bg-secondary/30 align-top">
+                              <td colSpan={5} className="table-cell text-[11px]">
+                                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 pl-3 text-text-muted">
+                                  <span className="text-accent">↳</span>
+                                  <a href={it.url} target="_blank" rel="noreferrer" className="text-accent hover:underline font-mono break-all">{truncate(it.url, 80)}</a>
+                                  <CopyButton text={it.url} />
+                                  <span className="font-mono break-all">{it.old_value || '—'} → {it.new_value || '—'}</span>
+                                  <span className="whitespace-nowrap">{timeAgo(it.detected_at)}</span>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                          {expanded && occurrences > shownCount && (
+                            <tr key={`more-${g.key}`} className="table-row bg-bg-secondary/30">
+                              <td colSpan={5} className="table-cell text-[11px]">
+                                <div className="flex flex-wrap items-center gap-3 pl-3 text-text-muted">
+                                  <span>Showing {shownCount.toLocaleString()} of {occurrences.toLocaleString()} occurrence{occurrences === 1 ? '' : 's'}</span>
+                                  <button
+                                    onClick={() => setExpandedOccurrences(prev => {
+                                      const next = new Map(prev)
+                                      next.set(g.key, (next.get(g.key) ?? 0) + OCCURRENCE_PAGE_SIZE)
+                                      return next
+                                    })}
+                                    className="text-accent hover:underline"
+                                  >
+                                    Show {Math.min(OCCURRENCE_PAGE_SIZE, occurrences - shownCount).toLocaleString()} more
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td className="table-cell">
-                          <Badge variant={c.change_type === 'js_change' ? 'medium' : c.change_type.startsWith('security') || c.change_type.includes('header') ? 'high' : c.change_type === 'tech_change' ? 'low' : 'info'}>{c.change_type}</Badge>
-                        </td>
-                        {/* Old/new values were truncated to 50 chars with no way to read the
-                            rest. Now each value wraps, shows the full text on hover, and has a
-                            copy button, so a full diff is actually inspectable. */}
-                        <td className="table-cell text-xs text-text-muted font-mono break-all whitespace-pre-wrap max-w-sm">
-                          <div className="flex items-start gap-1">
-                            <span title={c.old_value} className="flex-1">{c.old_value || '—'}</span>
-                            {c.old_value && <CopyButton text={c.old_value} />}
-                          </div>
-                        </td>
-                        <td className="table-cell text-xs text-severity-medium font-mono break-all whitespace-pre-wrap max-w-sm">
-                          <div className="flex items-start gap-1">
-                            <span title={c.new_value} className="flex-1">{c.new_value || '—'}</span>
-                            {c.new_value && <CopyButton text={c.new_value} />}
-                          </div>
-                        </td>
-                        <td className="table-cell text-xs whitespace-nowrap">{timeAgo(c.detected_at)}</td>
-                      </tr>
-                      ))
-                    })()}
+                        </Fragment>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
+              </>
             )}
         {!tabLoading && footerHasMore && (
           <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
             <span className="text-text-muted">
               Showing {footerShownCount.toLocaleString()} of {footerTotalCount.toLocaleString()}
-              {isVulnTab ? ' distinct issue(s)' : ''}
+              {isVulnTab
+                ? ' distinct issue(s)'
+                : isMonitorTab
+                ? ` distinct change group(s) · ${filteredData.length.toLocaleString()} change(s)`
+                : ''}
             </span>
             <button onClick={() => setVisibleCount(c => c + PAGE)} className="btn-secondary text-xs">
               Load {Math.min(PAGE, footerTotalCount - visibleCount).toLocaleString()} more
             </button>
-            <button onClick={() => setVisibleCount(data.length)} className="text-accent hover:underline">
+            <button onClick={() => setVisibleCount(footerTotalCount)} className="text-accent hover:underline">
               Show all
             </button>
           </div>
@@ -1610,6 +2041,40 @@ export default function TargetDetail() {
           onClose={() => setEvidence(null)}
         />
       )}
+      {diffView && (
+        <ChangeDiffViewer targetId={id!} url={diffView.url} kind={diffView.kind} onClose={() => setDiffView(null)} />
+      )}
+
+      {/* Coverage change confirmation */}
+      <Modal open={coverageDialogOpen} onClose={() => !coverageBusy && setCoverageDialogOpen(false)} title="Change scan coverage" width="sm">
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="detail-coverage" checked={coverageChoice === 'breadth'} onChange={() => setCoverageChoice('breadth')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Breadth watch</span>
+                <span className="block text-xs text-text-muted">Passive discovery + HTTP probe only, chained rounds, no brute force. New bounty-eligible hosts land as scope. Monitoring is turned off; network assets are ignored and the flip is refused if any are present.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="radio" name="detail-coverage" checked={coverageChoice === 'deep'} onChange={() => setCoverageChoice('deep')} className="accent-accent mt-0.5" />
+              <span>
+                <span className="text-sm font-semibold">Deep scan</span>
+                <span className="block text-xs text-text-muted">The full pipeline runs on the next scan. Auto-landed hosts remain as scope. Monitoring stays off until you turn it back on.</span>
+              </span>
+            </label>
+          </div>
+          {coverageChoice === 'breadth' && !assets.some(a => (a.source || '').startsWith('bounty:')) && (
+            <div className="rounded-lg border border-severity-medium/30 bg-severity-medium/5 p-3 text-[11px] text-text-secondary">
+              This project has no linked bounty program. Watch rounds will discover hosts, but no scope can land and nothing will be notified. Link a program first for automatic landing.
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2 border-t border-border">
+            <Button variant="ghost" disabled={coverageBusy} onClick={() => setCoverageDialogOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={coverageBusy} onClick={() => applyCoverage(coverageChoice === 'breadth')}>Apply</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
     </ErrorBoundary>
   )

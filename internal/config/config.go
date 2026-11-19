@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 type WorkerConfig struct {
@@ -35,6 +36,28 @@ type ResourceLimits struct {
 	// HTTPRateLimit caps requests/sec for httpx & nuclei to avoid WAF bans
 	// (0 = tool default).
 	HTTPRateLimit int `json:"http_rate_limit"`
+	// ── Two-tier (deep + breadth/watch) limits ───────────────────────────────
+	// These three knobs are authoritative operator settings edited in
+	// System → Scanning. They are stored and returned exactly. Admission honors
+	// them inside a visible per-lane hardware envelope; live memory/CPU pressure
+	// may brake that envelope temporarily, and scans resume when it clears.
+	// MaxConcurrentScans is the GLOBAL ceiling (deep AND watch together).
+	// Default 2.
+	MaxConcurrentScans int `json:"max_concurrent_scans"`
+	// MaxConcurrentDeepScans caps the DEEP lane (the expensive full pipeline).
+	// Deep keeps its reservation; a deep scan never waits for a watch round.
+	// Default 1.
+	MaxConcurrentDeepScans int `json:"max_concurrent_deep_scans"`
+	// MaxConcurrentWatchScans caps the BREADTH lane (the cheap watch rounds).
+	// It only gets slots the deep lane did not reserve. 0 disables watch rounds.
+	// Default 1.
+	MaxConcurrentWatchScans int `json:"max_concurrent_watch_scans"`
+	// WatchHTTPThreads is the httpx thread count for ONE watch round. The deep
+	// tier keeps Workers.HTTPProbing. Default 10.
+	WatchHTTPThreads int `json:"watch_http_threads"`
+	// WatchHTTPRateLimit is the httpx -rate-limit for ONE watch round, in
+	// requests/sec. The deep tier keeps HTTPRateLimit. Default 25.
+	WatchHTTPRateLimit int `json:"watch_http_rate_limit"`
 }
 
 type Config struct {
@@ -212,6 +235,20 @@ type Config struct {
 	// (written to config.json) or the RECON_DNS_RESOLVERS env var (comma-separated,
 	// env wins). Set it to a single internal resolver to force the old behavior.
 	DNSResolvers []string `json:"dns_resolvers"`
+	// MonitorModules overrides which pipeline modules the automatic periodic
+	// monitor watch task runs (the scheduled pass creating monitor_watch tasks
+	// in scheduler.runDueMonitors). Names are validated against the scheduler's
+	// AllModules catalog by the scheduler; unknown names are logged and skipped
+	// (never rejected) so neither the API layer nor the UI needs to know the
+	// catalog. If nothing valid remains, the built-in default watch set applies.
+	// The snapshot module ("monitor") is always hoisted ahead of refresh-capable
+	// modules (http_probe/js_analysis) server-side — snapshot-before-refresh is
+	// an invariant, not a form checkbox. Empty
+	// ⇒ the built-in watch set (subdomain_enum, monitor, http_probe, takeover,
+	// cors, backup_discovery). Set via the System → Scanning page (written to
+	// config.json; scheduler picks the list up on its next due check — no
+	// restart needed).
+	MonitorModules []string `json:"monitor_modules"`
 	// SubdomainRecursionDepth controls recursive subdomain enumeration: after the
 	// apex domain is enumerated, each newly-discovered RESOLVING subdomain is itself
 	// enumerated (passive sources + resolution) as a sub-apex, and so on, until this
@@ -220,6 +257,23 @@ type Config struct {
 	// raise it to go deeper on a sprawling target. Bounded per level
 	// (SubdomainRecursionMaxPerLevel) so it can't explode on a huge zone.
 	SubdomainRecursionDepth int `json:"subdomain_recursion_depth"`
+	// SubdomainRecursionEnabled is the deployment default for recursive
+	// enumeration. Off ⇒ apex only (the pre-recursion behavior); the depth value
+	// stays stored for when it is switched back on. Default false: recursion
+	// multiplies DNS query volume and invites public-resolver throttling. A scan
+	// can still opt in through the scan dialog's recursion toggle.
+	// Set via the System → Scanning panel, next to the depth field.
+	SubdomainRecursionEnabled bool `json:"subdomain_recursion_enabled"`
+	// HTTPCatchallDetection is OPT-IN (default false). When enabled, the end of
+	// the HTTP-probe module groups stored 2xx http_services fingerprints and
+	// marks subdomains that serve a wildcard catch-all page — either a redirect
+	// fleet aimed at the apex, or >=5 live hosts byte-identical to the apex
+	// homepage. Marked hosts are excluded from the Hosts tab, reports, graph and
+	// wordlist learning; their rows stay stored (marked, not deleted: seeds,
+	// vhosts and anything the operator vouched for are never touched). The pass
+	// reads already-stored responses and sends NO extra network requests; it
+	// costs under a second. Toggle via the System → Scanning panel.
+	HTTPCatchallDetection bool `json:"http_catchall_detection"`
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime
@@ -231,6 +285,59 @@ type Config struct {
 	// headroom on top of this floor based on the live subdomain/URL/parameter
 	// surface known at that point in the run (see scanSurface in scheduler.go).
 	ScanWatchdogHours int `json:"scan_watchdog_hours"`
+	// ── Breadth ("watch") tier ──────────────────────────────────────────────
+	// The watch tier is the cheap tier: a breadth project runs passive
+	// discovery plus one HTTP probe on a normal cadence, and lands newly
+	// eligible hosts into the project's scope automatically.
+	//
+	// WatchRoundsMinGap is the RETRY GAP for the SAME project: the short wait
+	// after a failed or interrupted round. It is not the normal cadence.
+	// Default 30 minutes. Set via System → Scanning.
+	WatchRoundsMinGap int `json:"watch_rounds_min_gap"`
+	// WatchRoundIntervalHours is the normal wait between two finished watch
+	// rounds of the SAME project. Default 12 hours. Set to 24 for daily rounds.
+	// Failed and interrupted rounds use WatchRoundsMinGap instead, so a failed
+	// round retries quickly without breaking the normal cadence.
+	WatchRoundIntervalHours int `json:"watch_round_interval_hours"`
+	// WatchSourceTimeoutMinutes bounds ONE discovery source (subfinder,
+	// assetfinder, chaos, findomain) inside a watch round. There is NO shared
+	// round budget: the DNS admission and the HTTP probe run on the parent
+	// context and always finish. Default 5 minutes.
+	WatchSourceTimeoutMinutes int `json:"watch_source_timeout_minutes"`
+	// WatchEnumerationSources lists the discovery sources a watch round may
+	// use. Valid ids: crtsh, certspotter, hackertarget, rapiddns, otx, anubis,
+	// urlscan, subfinder, assetfinder, chaos, findomain. The list applies to
+	// the WATCH tier only — deep scans keep every source. Default:
+	// subfinder, assetfinder, chaos, findomain. A source that is not on the
+	// list is skipped with one log line (reason: disabled by the operator,
+	// tool not installed, or API key missing).
+	//
+	// The loader keeps a MISSING key at the default list and an explicitly
+	// empty list empty (the operator turned every source off on purpose):
+	// encoding/json leaves the field untouched when the key is absent and
+	// replaces it with an empty slice when the saved JSON says [].
+	WatchEnumerationSources []string `json:"watch_enumeration_sources"`
+	// WatchRowsRetentionDays is how long raw rows produced by a watch round are
+	// kept. Landed scope, notifications, deep-scan rows and task rows survive.
+	// Default 30 days. Set via System → Scanning.
+	WatchRowsRetentionDays int `json:"watch_rows_retention_days"`
+	// WatchScopeEventsRetentionDays is how long the watch_scope_events audit
+	// trail (one row per landed host) is kept. Default 180 days.
+	WatchScopeEventsRetentionDays int `json:"watch_scope_events_retention_days"`
+	// WatchChangesRetentionDays is how long the watch_round_changes audit trail
+	// is kept. It survives finished-task pruning. Default 180 days.
+	WatchChangesRetentionDays int `json:"watch_changes_retention_days"`
+	// WatchNotifyHostCap caps how many host names ONE grouped scope-landed
+	// message lists. The total count is always shown. Default 20.
+	WatchNotifyHostCap int `json:"watch_notify_host_cap"`
+	// WatchFailLimit is how many CONSECUTIVE failed watch rounds stop the
+	// chain for a project (it then waits for the operator). Default 3.
+	WatchFailLimit int `json:"watch_fail_limit"`
+	// ChaosAPIKey is the projectdiscovery key used by the `chaos` dataset tool
+	// and by subfinder's projectdiscovery sources. It is read at RUN time by the
+	// tool executor, so a key saved in the UI works without a restart. Empty ⇒
+	// chaos is skipped with one log line.
+	ChaosAPIKey string `json:"chaos_api_key"`
 	// Removed v2 network configuration keys are intentionally absent. v3.4 uses
 	// explicit, asset-gated Network Fast/Normal/Deep plan tokens; old JSON keys are
 	// ignored for upgrade compatibility instead of implying an inactive feature
@@ -301,6 +408,29 @@ type Config struct {
 	// path is the on-disk config.json this Config was loaded from (unexported, so
 	// it is never marshaled back into the file). Save() writes here.
 	path string
+
+	// concurrencyMu guards the three two-tier concurrency limits. The API writes
+	// them from an HTTP goroutine (System -> Scanning PATCH) while the scheduler
+	// reads them on every admission decision. Without a lock, a PATCH can land
+	// mid-read and produce a caps tuple from two different config generations.
+	concurrencyMu sync.RWMutex
+}
+
+// ConcurrencyLimits returns a consistent snapshot of the three admission caps.
+// The scheduler and API use this instead of reading the fields directly.
+func (c *Config) ConcurrencyLimits() (global, deep, watch int) {
+	c.concurrencyMu.RLock()
+	defer c.concurrencyMu.RUnlock()
+	return c.Limits.MaxConcurrentScans, c.Limits.MaxConcurrentDeepScans, c.Limits.MaxConcurrentWatchScans
+}
+
+// SetConcurrencyLimits stores the three admission caps atomically.
+func (c *Config) SetConcurrencyLimits(global, deep, watch int) {
+	c.concurrencyMu.Lock()
+	defer c.concurrencyMu.Unlock()
+	c.Limits.MaxConcurrentScans = global
+	c.Limits.MaxConcurrentDeepScans = deep
+	c.Limits.MaxConcurrentWatchScans = watch
 }
 
 // Save marshals the config back to the file it was loaded from (0600), so
@@ -477,6 +607,13 @@ func defaultConfig() *Config {
 		workers = autoTunedWorkers(cpu)
 		limits = autoTunedLimits(cpu, memMB)
 	}
+	// The two-tier scan ceilings are FIXED operator knobs: they are NOT part of
+	// autoTunedLimits, so they survive RECON_NO_AUTOTUNE=1 unchanged.
+	limits.MaxConcurrentScans = 2
+	limits.MaxConcurrentDeepScans = 1
+	limits.MaxConcurrentWatchScans = 1
+	limits.WatchHTTPThreads = 10
+	limits.WatchHTTPRateLimit = 25
 
 	return &Config{
 		Host:               "127.0.0.1", // safe default: local-only. Set to 0.0.0.0 to expose (behind a firewall/VPN only).
@@ -516,14 +653,28 @@ func defaultConfig() *Config {
 		// existing install must explicitly set it to 0 (or delete the key) in
 		// its own config.json to actually pick up the new default — see the
 		// release notes.
-		EnableDAST:              true,              // native context-aware DAST (XSS/SQLi) over all insertion points
-		AIModel:                 "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
-		AIMaxIterations:         40,                // hard cap on the agent loop
-		AuthzMode:               "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
-		AuthzDestructive:        false,             // cross-user DELETE stays opt-in
-		SubdomainRecursionDepth: 4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
-		Workers:                 workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
-		Limits:                  limits,            // auto-scaled to host CPU/RAM
+		EnableDAST:                true,              // native context-aware DAST (XSS/SQLi) over all insertion points
+		AIModel:                   "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
+		AIMaxIterations:           40,                // hard cap on the agent loop
+		AuthzMode:                 "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
+		AuthzDestructive:          false,             // cross-user DELETE stays opt-in
+		SubdomainRecursionEnabled: false,             // apex-only by default; System panel sets the deployment default, per-scan toggle overrides
+		SubdomainRecursionDepth:   4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
+		Workers:                   workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
+		Limits:                    limits,            // auto-scaled to host CPU/RAM
+		// The watch-tier knobs are FIXED operator knobs, not machine-tuned ones:
+		// they never come from autoTunedLimits, so RECON_NO_AUTOTUNE=1 keeps
+		// them exactly as written here.
+		WatchRoundsMinGap:             30, // retry gap after a failed/interrupted round
+		WatchRoundIntervalHours:       12, // normal cadence between finished rounds
+		WatchSourceTimeoutMinutes:     5,  // per-source timeout inside a watch round; NO shared round budget
+		WatchEnumerationSources:       []string{"subfinder", "assetfinder", "chaos", "findomain"},
+		WatchRowsRetentionDays:        30,  // raw watch rows survive this long
+		WatchScopeEventsRetentionDays: 180, // the landing audit trail survives this long
+		WatchChangesRetentionDays:     180, // the per-round change audit trail survives task pruning
+		WatchNotifyHostCap:            20,  // host names listed in one grouped message
+		WatchFailLimit:                3,   // consecutive failed rounds stop the chain
+		ChaosAPIKey:                   "",  // projectdiscovery key for chaos/subfinder; empty ⇒ chaos skipped
 	}
 }
 
@@ -603,6 +754,16 @@ func (c *Config) FinishLegacySecretRotation() error {
 	return c.Save()
 }
 
+// WatchRoundIntervalMinutes returns the normal cadence between finished
+// watch rounds, in minutes. The 12-hour fallback keeps the documented contract
+// for configs written before WatchRoundIntervalHours existed.
+func (c *Config) WatchRoundIntervalMinutes() int {
+	if c != nil && c.WatchRoundIntervalHours > 0 {
+		return c.WatchRoundIntervalHours * 60
+	}
+	return 12 * 60
+}
+
 // applyEnvOverrides lets secrets be supplied via environment variables instead
 // of being written into config.json — the safe way to configure a deployment
 // whose source lives in a PUBLIC repo (never commit an API key). An env var wins
@@ -621,6 +782,7 @@ func (c *Config) applyEnvOverrides() {
 		"RECON_ZOOMEYE_KEY":    &c.ZoomEyeAPIKey,
 		"RECON_VIRUSTOTAL_KEY": &c.VirusTotalAPIKey,
 		"RECON_SHODAN_KEY":     &c.ShodanAPIKey,
+		"RECON_CHAOS_API_KEY":  &c.ChaosAPIKey,
 	} {
 		if v := os.Getenv(env); v != "" {
 			*dst = v
