@@ -14,6 +14,7 @@ you need detector-level detail.
 | [Docker reference](../README.Docker.md) | Image composition, Compose layout, persistence, and runtime capabilities |
 | [Capability matrix](V3_CAPABILITY_MATRIX.md) | Module prerequisites, positive-proof contracts, and support boundaries |
 | [API data-exposure workflow](API_DATA_EXPOSURE_WORKFLOW.md) | Research basis, request-safety gates, method negotiation, and local regression corpus |
+| [Capture import](CAPTURE_IMPORT.md) | Importing HAR, Burp XML and Reconner capture JSON as a passive, sanitized-or-sensitive corpus |
 
 ## Quality and verification evidence
 
