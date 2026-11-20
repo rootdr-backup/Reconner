@@ -8,8 +8,11 @@ import GuidedCorpus from '../components/GuidedCorpus'
 const sourceFor = async (file: File) => {
   const prefix = (await file.slice(0, 4096).text()).trimStart()
   if (prefix.startsWith('<')) return 'burp_xml'
-  if (prefix.startsWith('{')) return 'reconner_json'
-  throw new Error('Unsupported capture file. Choose Burp XML or Reconner capture JSON.')
+  if (prefix.startsWith('{')) {
+    if (prefix.includes('"log"')) return 'har'
+    return 'reconner_json'
+  }
+  throw new Error('Unsupported capture file. Choose a HAR export, Burp XML, or Reconner capture JSON.')
 }
 
 const previewTestLabel: Record<string, string> = {

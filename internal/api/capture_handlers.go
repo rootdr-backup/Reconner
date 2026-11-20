@@ -375,6 +375,8 @@ func (h *Handler) readCaptureUpload(w http.ResponseWriter, r *http.Request) ([]c
 		exchanges, err = capture.ParseBurpXML(raw)
 	case "reconner_json", "chrome", "chrome-devtools":
 		exchanges, err = capture.ParseReconnerJSON(raw)
+	case "har", "har12":
+		exchanges, err = capture.ParseHAR(raw)
 	default:
 		return nil, "", "", "", fmt.Errorf("unsupported capture source %q", source)
 	}
